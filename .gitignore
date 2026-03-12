@@ -1,0 +1,23 @@
+# Binaries
+/attest
+/cmd/attest/attest
+
+# Go
+*.exe
+*.test
+*.prof
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# attest runtime state
+.attest/
+
+# Firebase
+firebase-debug.log
