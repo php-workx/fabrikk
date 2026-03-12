@@ -10,6 +10,18 @@ on:
 # Go module cache is shared via actions/setup-go's built-in caching.
 
 jobs:
+  actionlint:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
+      - run: actionlint .github/workflows/*.yml
+
   vet:
     name: Vet
     runs-on: ubuntu-latest
@@ -28,7 +40,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.3
 
@@ -79,7 +91,8 @@ jobs:
       - name: Check go.mod and go.sum are tidy
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum not tidy — run 'go mod tidy'" && exit 1)
+          git diff --exit-code go.mod || (echo "go.mod not tidy — run 'go mod tidy'" && exit 1)
+          if [ -f go.sum ]; then git diff --exit-code go.sum || (echo "go.sum not tidy — run 'go mod tidy'" && exit 1); fi
 
   vuln:
     name: Vulnerability Scan

@@ -5,6 +5,7 @@
 golangci_lint_ver := "v2.11.3"
 gofumpt_ver := "v0.7.0"
 govulncheck_ver := "v1.1.4"
+actionlint_ver := "v1.7.11"
 
 version := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
 commit := `git rev-parse --short HEAD 2>/dev/null || echo "unknown"`
@@ -15,7 +16,7 @@ default:
     @just --list
 
 # Run all quality checks (the quality gate)
-check: vet lint fmt mod-tidy test build-check
+check: vet lint actionlint fmt mod-tidy test build-check
 
 # Run full dev suite: quality gate + vulnerability scan + roam + sonar
 dev: check vuln roam sonar
@@ -33,6 +34,11 @@ vet:
 # Lint with golangci-lint
 lint:
     golangci-lint run
+
+# Lint GitHub Actions workflows
+actionlint:
+    @command -v actionlint >/dev/null 2>&1 || (echo "actionlint not installed (run: just install-dev)" && exit 1)
+    actionlint .github/workflows/*.yml
 
 # Check formatting with gofumpt (fails if any file needs formatting)
 fmt:
@@ -111,6 +117,7 @@ install-dev:
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@{{golangci_lint_ver}}
     go install mvdan.cc/gofumpt@{{gofumpt_ver}}
     go install golang.org/x/vuln/cmd/govulncheck@{{govulncheck_ver}}
+    go install github.com/rhysd/actionlint/cmd/actionlint@{{actionlint_ver}}
     @echo "Done! Development environment ready."
 
 # Remove build artifacts

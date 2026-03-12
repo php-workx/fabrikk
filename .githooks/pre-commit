@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -e
-# Pre-commit: fast checks (vet, formatting, compile, module tidiness)
-just vet fmt build-check mod-tidy
+# Pre-commit: fast checks (workflow lint, vet, formatting, compile, module tidiness)
+just actionlint vet fmt build-check mod-tidy
