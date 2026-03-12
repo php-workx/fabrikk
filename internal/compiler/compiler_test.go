@@ -46,9 +46,9 @@ func TestCompileDeterministic(t *testing.T) {
 func TestCompileSortedOutput(t *testing.T) {
 	artifact := &state.RunArtifact{
 		Requirements: []state.Requirement{
-			{ID: "AT-FR-003", Text: "C"},
-			{ID: "AT-FR-001", Text: "A"},
-			{ID: "AT-FR-002", Text: "B"},
+			{ID: "AT-FR-003", Text: "C", SourceSpec: "spec.md", SourceLine: 12},
+			{ID: "AT-FR-001", Text: "A", SourceSpec: "spec.md", SourceLine: 10},
+			{ID: "AT-FR-002", Text: "B", SourceSpec: "spec.md", SourceLine: 11},
 		},
 	}
 
@@ -57,12 +57,11 @@ func TestCompileSortedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Tasks should be sorted by requirement ID.
-	if result.Tasks[0].TaskID != "task-at-fr-001" {
-		t.Errorf("first task = %q, want task-at-fr-001", result.Tasks[0].TaskID)
+	if len(result.Tasks) != 1 {
+		t.Fatalf("task count = %d, want 1 grouped task", len(result.Tasks))
 	}
-	if result.Tasks[1].TaskID != "task-at-fr-002" {
-		t.Errorf("second task = %q, want task-at-fr-002", result.Tasks[1].TaskID)
+	if result.Tasks[0].RequirementIDs[0] != "AT-FR-001" {
+		t.Errorf("first grouped requirement = %q, want AT-FR-001", result.Tasks[0].RequirementIDs[0])
 	}
 }
 
@@ -120,5 +119,53 @@ func TestCompileEmptyRequirements(t *testing.T) {
 	_, err := compiler.Compile(&state.RunArtifact{})
 	if err == nil {
 		t.Fatal("expected error for empty requirements")
+	}
+}
+
+func TestCompileGroupsNearbyRequirements(t *testing.T) {
+	artifact := &state.RunArtifact{
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "The system must ingest specs.", SourceSpec: "functional.md", SourceLine: 10},
+			{ID: "AT-FR-002", Text: "The system must normalize artifacts.", SourceSpec: "functional.md", SourceLine: 11},
+			{ID: "AT-FR-003", Text: "The system must support approval.", SourceSpec: "functional.md", SourceLine: 12},
+		},
+	}
+
+	result, err := compiler.Compile(artifact)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if len(result.Tasks) != 1 {
+		t.Fatalf("task count = %d, want 1 grouped task", len(result.Tasks))
+	}
+	if len(result.Tasks[0].RequirementIDs) != 3 {
+		t.Fatalf("grouped requirement count = %d, want 3", len(result.Tasks[0].RequirementIDs))
+	}
+}
+
+func TestCompileAddsDependenciesBetweenChunks(t *testing.T) {
+	artifact := &state.RunArtifact{
+		Requirements: []state.Requirement{
+			{ID: "AT-TS-001", Text: "First technical scenario.", SourceSpec: "technical.md", SourceLine: 100},
+			{ID: "AT-TS-002", Text: "Second technical scenario.", SourceSpec: "technical.md", SourceLine: 101},
+			{ID: "AT-TS-003", Text: "Third technical scenario.", SourceSpec: "technical.md", SourceLine: 102},
+			{ID: "AT-TS-004", Text: "Fourth technical scenario.", SourceSpec: "technical.md", SourceLine: 103},
+			{ID: "AT-TS-005", Text: "Fifth technical scenario.", SourceSpec: "technical.md", SourceLine: 104},
+			{ID: "AT-TS-006", Text: "Sixth technical scenario.", SourceSpec: "technical.md", SourceLine: 105},
+			{ID: "AT-TS-007", Text: "Seventh technical scenario.", SourceSpec: "technical.md", SourceLine: 106},
+		},
+	}
+
+	result, err := compiler.Compile(artifact)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if len(result.Tasks) != 2 {
+		t.Fatalf("task count = %d, want 2 chunked tasks", len(result.Tasks))
+	}
+	if len(result.Tasks[1].DependsOn) != 1 || result.Tasks[1].DependsOn[0] != result.Tasks[0].TaskID {
+		t.Fatalf("second task dependencies = %+v, want [%s]", result.Tasks[1].DependsOn, result.Tasks[0].TaskID)
 	}
 }
