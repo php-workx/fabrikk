@@ -1,6 +1,11 @@
 # attest project quality gate
 # This is the single entry point for "my code is clean" (spec section 11.2)
 
+# Pinned tool versions — keep in sync with CI (.github/workflows/ci.yml)
+golangci_lint_ver := "v1.64.5"
+gofumpt_ver := "v0.7.0"
+govulncheck_ver := "v1.1.4"
+
 version := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
 commit := `git rev-parse --short HEAD 2>/dev/null || echo "unknown"`
 build_date := `date -u +"%Y-%m-%dT%H:%M:%SZ"`
@@ -18,6 +23,7 @@ dev: check vuln roam sonar
 
 # Build the attest binary with version info
 build:
+    mkdir -p bin
     go build -ldflags '{{ldflags}}' -o bin/attest ./cmd/attest
 
 # Go vet
@@ -60,10 +66,16 @@ roam:
 
 # Run SonarQube scan (requires SONAR_TOKEN in .env and local SonarQube on localhost:9000)
 sonar:
-    @if command -v sonar-scanner >/dev/null 2>&1 && [ -f .env ]; then \
-        . ./.env && SONAR_TOKEN="$$SONAR_TOKEN" sonar-scanner; \
+    @if ! command -v sonar-scanner >/dev/null 2>&1; then \
+        echo "sonar-scanner not installed, skipping"; \
+    elif [ ! -f .env ]; then \
+        echo ".env missing, skipping sonar scan"; \
     else \
-        echo "sonar-scanner not installed or .env missing, skipping"; \
+        TOKEN=$(grep -E '^SONAR_TOKEN=[A-Za-z0-9_]+$$' .env | cut -d= -f2); \
+        if [ -z "$$TOKEN" ]; then \
+            echo "error: SONAR_TOKEN not found or invalid in .env"; exit 1; \
+        fi; \
+        SONAR_TOKEN="$$TOKEN" sonar-scanner; \
     fi
 
 # Format all Go files in-place
@@ -75,12 +87,12 @@ setup: install-dev
     git config core.hooksPath .githooks
     @echo "Git hooks configured (.githooks/)"
 
-# Install required development tools
+# Install required development tools (pinned versions)
 install-dev:
     @echo "Installing Go tools..."
-    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-    go install mvdan.cc/gofumpt@latest
-    go install golang.org/x/vuln/cmd/govulncheck@latest
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@{{golangci_lint_ver}}
+    go install mvdan.cc/gofumpt@{{gofumpt_ver}}
+    go install golang.org/x/vuln/cmd/govulncheck@{{govulncheck_ver}}
     @echo "Done! Development environment ready."
 
 # Remove build artifacts

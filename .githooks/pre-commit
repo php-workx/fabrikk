@@ -1,3 +1,4 @@
 #!/usr/bin/env sh
+set -e
 # Pre-commit: fast checks only (vet + formatting)
 just vet fmt

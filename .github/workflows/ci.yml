@@ -16,16 +16,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install tools
-        run: |
-          go install mvdan.cc/gofumpt@latest
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+      - name: Install gofumpt
+        run: go install mvdan.cc/gofumpt@v0.7.0
 
       - name: Vet
         run: go vet ./...
 
       - name: Lint
-        run: golangci-lint run
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.5
 
       - name: Check formatting
         run: |

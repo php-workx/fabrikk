@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -92,10 +93,10 @@ func (f taskFilter) matches(t state.Task, doneStates map[string]state.TaskStatus
 	if f.taskType != "" && t.TaskType != f.taskType {
 		return false
 	}
-	if f.tag != "" && !containsTag(t.Tags, f.tag) {
+	if f.tag != "" && !slices.Contains(t.Tags, f.tag) {
 		return false
 	}
-	if f.requirementID != "" && !containsStr(t.RequirementIDs, f.requirementID) {
+	if f.requirementID != "" && !slices.Contains(t.RequirementIDs, f.requirementID) {
 		return false
 	}
 	if f.priority > 0 && t.Priority != f.priority {
@@ -138,24 +139,6 @@ func buildTaskStates(tasks []state.Task) map[string]state.TaskStatus {
 		m[t.TaskID] = t.Status
 	}
 	return m
-}
-
-func containsTag(tags []string, tag string) bool {
-	for _, t := range tags {
-		if t == tag {
-			return true
-		}
-	}
-	return false
-}
-
-func containsStr(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 func outputTasks(tasks []state.Task, jsonOutput bool) {
