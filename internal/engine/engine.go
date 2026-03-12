@@ -217,25 +217,25 @@ func (e *Engine) GetPendingTasks() ([]state.Task, error) {
 	}
 
 	taskStates := make(map[string]state.TaskStatus)
-	for _, t := range tasks {
-		taskStates[t.TaskID] = t.Status
+	for i := range tasks {
+		taskStates[tasks[i].TaskID] = tasks[i].Status
 	}
 
 	var pending []state.Task
-	for _, t := range tasks {
-		if t.Status != state.TaskPending {
+	for i := range tasks {
+		if tasks[i].Status != state.TaskPending {
 			continue
 		}
 		// Check dependencies (spec section 7.4).
-		depsReady := true
-		for _, dep := range t.DependsOn {
+		ready := true
+		for _, dep := range tasks[i].DependsOn {
 			if taskStates[dep] != state.TaskDone {
-				depsReady = false
+				ready = false
 				break
 			}
 		}
-		if depsReady {
-			pending = append(pending, t)
+		if ready {
+			pending = append(pending, tasks[i])
 		}
 	}
 	return pending, nil

@@ -27,11 +27,7 @@ type taskFilter struct {
 	jsonOutput    bool
 }
 
-func parseTaskFilter(args []string) (string, taskFilter, []string) {
-	var runID string
-	var f taskFilter
-	var remaining []string
-
+func parseTaskFilter(args []string) (runID string, f taskFilter, remaining []string) { //nolint:unparam // remaining is used by callers for future extensibility
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--status":
@@ -86,7 +82,7 @@ func parseTaskFilter(args []string) (string, taskFilter, []string) {
 	return runID, f, remaining
 }
 
-func (f taskFilter) matches(t state.Task, doneStates map[string]state.TaskStatus) bool {
+func (f taskFilter) matches(t *state.Task, doneStates map[string]state.TaskStatus) bool {
 	if f.status != "" && string(t.Status) != f.status {
 		return false
 	}
@@ -113,9 +109,9 @@ func (f taskFilter) matches(t state.Task, doneStates map[string]state.TaskStatus
 
 func filterTasks(tasks []state.Task, f taskFilter, doneStates map[string]state.TaskStatus) []state.Task {
 	var result []state.Task
-	for _, t := range tasks {
-		if f.matches(t, doneStates) {
-			result = append(result, t)
+	for i := range tasks {
+		if f.matches(&tasks[i], doneStates) {
+			result = append(result, tasks[i])
 		}
 	}
 	if f.limit > 0 && len(result) > f.limit {
@@ -124,7 +120,7 @@ func filterTasks(tasks []state.Task, f taskFilter, doneStates map[string]state.T
 	return result
 }
 
-func depsReady(t state.Task, taskStates map[string]state.TaskStatus) bool {
+func depsReady(t *state.Task, taskStates map[string]state.TaskStatus) bool {
 	for _, dep := range t.DependsOn {
 		if taskStates[dep] != state.TaskDone {
 			return false
@@ -135,8 +131,8 @@ func depsReady(t state.Task, taskStates map[string]state.TaskStatus) bool {
 
 func buildTaskStates(tasks []state.Task) map[string]state.TaskStatus {
 	m := make(map[string]state.TaskStatus, len(tasks))
-	for _, t := range tasks {
-		m[t.TaskID] = t.Status
+	for i := range tasks {
+		m[tasks[i].TaskID] = tasks[i].Status
 	}
 	return m
 }
@@ -149,11 +145,11 @@ func outputTasks(tasks []state.Task, jsonOutput bool) {
 		return
 	}
 
-	for _, t := range tasks {
+	for i := range tasks {
 		fmt.Printf("  [%s] %-12s %s (reqs: %s) etag:%s\n",
-			t.Status, t.Slug, t.Title,
-			strings.Join(t.RequirementIDs, ","),
-			t.ETag[:8])
+			tasks[i].Status, tasks[i].Slug, tasks[i].Title,
+			strings.Join(tasks[i].RequirementIDs, ","),
+			tasks[i].ETag[:8])
 	}
 }
 
@@ -260,12 +256,12 @@ func cmdBlocked(args []string) error {
 		}
 		// Group by reason (spec section 5.2).
 		byReason := make(map[string][]state.Task)
-		for _, t := range blocked {
-			reason := t.StatusReason
+		for i := range blocked {
+			reason := blocked[i].StatusReason
 			if reason == "" {
 				reason = "(no reason recorded)"
 			}
-			byReason[reason] = append(byReason[reason], t)
+			byReason[reason] = append(byReason[reason], blocked[i])
 		}
 		for reason, tasks := range byReason {
 			fmt.Printf("Blocked: %s (%d tasks)\n", reason, len(tasks))
@@ -297,9 +293,9 @@ func cmdNext(args []string) error {
 
 	// Find ready tasks sorted by priority.
 	var ready []state.Task
-	for _, t := range tasks {
-		if t.Status == state.TaskPending && depsReady(t, taskStates) {
-			ready = append(ready, t)
+	for i := range tasks {
+		if tasks[i].Status == state.TaskPending && depsReady(&tasks[i], taskStates) {
+			ready = append(ready, tasks[i])
 		}
 	}
 	sort.Slice(ready, func(i, j int) bool {
@@ -321,9 +317,9 @@ func cmdNext(args []string) error {
 
 	// No ready task — point to highest-impact blocker (spec section 5.2).
 	var blocked []state.Task
-	for _, t := range tasks {
-		if t.Status == state.TaskBlocked {
-			blocked = append(blocked, t)
+	for i := range tasks {
+		if tasks[i].Status == state.TaskBlocked {
+			blocked = append(blocked, tasks[i])
 		}
 	}
 	if len(blocked) > 0 {
@@ -364,8 +360,8 @@ func cmdProgress(args []string) error {
 
 	// Count by task state.
 	counts := make(map[string]int)
-	for _, t := range tasks {
-		counts[string(t.Status)]++
+	for i := range tasks {
+		counts[string(tasks[i].Status)]++
 	}
 
 	// Requirement coverage.

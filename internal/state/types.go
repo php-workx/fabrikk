@@ -94,6 +94,7 @@ type TaskScope struct {
 // TaskStatus represents the current state of a task (spec section 6.3).
 type TaskStatus string
 
+// Task lifecycle states (spec section 6.3).
 const (
 	TaskPending       TaskStatus = "pending"
 	TaskClaimed       TaskStatus = "claimed"
@@ -151,6 +152,7 @@ type RunStatus struct {
 // RunState represents the current state of a run (spec section 6.1).
 type RunState string
 
+// Run lifecycle states (spec section 6.1).
 const (
 	RunPreparing             RunState = "preparing"
 	RunAwaitingClarification RunState = "awaiting_clarification"

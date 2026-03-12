@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +22,7 @@ func TestWriteAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if string(got) != string(data) {
+	if !bytes.Equal(got, data) {
 		t.Errorf("got %q, want %q", got, data)
 	}
 }

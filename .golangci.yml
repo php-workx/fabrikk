@@ -1,0 +1,112 @@
+version: "2"
+
+# golangci-lint v2 configuration for attest
+# Keep version in sync with Justfile and CI
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    # Type safety & correctness (Go's "mypy")
+    - staticcheck
+    - govet
+
+    # Bug detection
+    - errcheck
+    - bodyclose
+    - nilerr
+    - nilnil
+
+    # Style & consistency
+    - revive
+    - goconst
+    - unconvert
+    - unparam
+    - usestdlibvars
+
+    # Complexity
+    - gocognit
+    - cyclop
+
+    # Security
+    - gosec
+
+    # Code hygiene
+    - gocritic
+    - prealloc
+    - mirror
+    - nolintlint
+
+  settings:
+    gocognit:
+      min-complexity: 30
+
+    cyclop:
+      max-complexity: 22
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: range
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: unnecessary-stmt
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - whyNoLint  # handled by nolintlint
+      settings:
+        hugeParam:
+          sizeThreshold: 200  # only flag structs > 200 bytes (Task=440 yes, Event=88 no)
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    gosec:
+      excludes:
+        - G104  # unhandled errors — errcheck covers this
+        - G301  # dir perms 0755 — standard for work directories in a file-based tool
+        - G302  # file perms 0644 — standard for non-secret data files
+        - G304  # file inclusion via variable — attest is a file-management tool by design
+        - G306  # WriteFile 0644 — same as G302
+
+formatters:
+  enable:
+    - gofumpt
+
+issues:
+  exclude-rules:
+    # Test files get more leniency
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - goconst
+        - unparam
+        - gocritic
+
+    # Main packages often have unused parameters in command handlers
+    - path: cmd/
+      linters:
+        - unparam

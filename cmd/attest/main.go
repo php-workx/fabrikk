@@ -198,8 +198,8 @@ func cmdApprove(ctx context.Context, args []string) error {
 	fmt.Printf("Tasks: %d\n", len(result.Tasks))
 	fmt.Printf("Coverage: %d requirements mapped\n", len(result.Coverage))
 
-	for _, t := range result.Tasks {
-		fmt.Printf("  [%s] %s (reqs: %s)\n", t.TaskID, t.Title, strings.Join(t.RequirementIDs, ", "))
+	for i := range result.Tasks {
+		fmt.Printf("  [%s] %s (reqs: %s)\n", result.Tasks[i].TaskID, result.Tasks[i].Title, strings.Join(result.Tasks[i].RequirementIDs, ", "))
 	}
 
 	if launch {
@@ -322,9 +322,9 @@ func cmdVerify(ctx context.Context, args []string) error {
 	return nil
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
 		return s
 	}
-	return s[:max-3] + "..."
+	return s[:maxLen-3] + "..."
 }

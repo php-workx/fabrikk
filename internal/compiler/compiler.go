@@ -67,7 +67,7 @@ func Compile(artifact *state.RunArtifact) (*CompileResult, error) {
 			Status:           state.TaskPending,
 			RequiredEvidence: inferEvidence(req),
 		}
-		task.ETag = computeETag(task)
+		task.ETag = computeETag(&task)
 		tasks = append(tasks, task)
 
 		if _, exists := coverageMap[req.ID]; !exists {
@@ -158,7 +158,7 @@ func tagsFromRequirement(req state.Requirement) []string {
 }
 
 // computeETag produces a content hash for compare-and-swap consistency (spec section 3.4).
-func computeETag(task state.Task) string {
+func computeETag(task *state.Task) string {
 	// Zero out volatile fields before hashing.
 	task.ETag = ""
 	task.UpdatedAt = time.Time{}
