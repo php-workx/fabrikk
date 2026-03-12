@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -e
-# Pre-push: full quality gate (vet + lint + fmt + test with race)
+# Pre-push: full quality gate — last safety net before CI
 just check

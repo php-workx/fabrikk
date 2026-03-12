@@ -2,7 +2,7 @@
 # This is the single entry point for "my code is clean" (spec section 11.2)
 
 # Pinned tool versions — keep in sync with CI (.github/workflows/ci.yml)
-golangci_lint_ver := "v1.64.5"
+golangci_lint_ver := "v2.11.3"
 gofumpt_ver := "v0.7.0"
 govulncheck_ver := "v1.1.4"
 
@@ -14,8 +14,8 @@ ldflags := "-X main.Version=" + version + " -X main.GitCommit=" + commit + " -X 
 default:
     @just --list
 
-# Run all quality checks: vet, lint, format, test (the quality gate)
-check: vet lint fmt test
+# Run all quality checks (the quality gate)
+check: vet lint fmt mod-tidy test build-check
 
 # Run full dev suite: quality gate + vulnerability scan + roam + sonar
 dev: check vuln roam sonar
@@ -36,7 +36,25 @@ lint:
 
 # Check formatting with gofumpt (fails if any file needs formatting)
 fmt:
+    @command -v gofumpt >/dev/null 2>&1 || (echo "gofumpt not installed (run: just install-dev)" && exit 1)
     @test -z "$(gofumpt --extra -l .)" || (echo "gofumpt: unformatted files:" && gofumpt --extra -l . && exit 1)
+
+# Verify go.mod and go.sum are tidy
+mod-tidy:
+    @cp go.mod go.mod.bak
+    @if [ -f go.sum ]; then cp go.sum go.sum.bak; fi
+    @go mod tidy
+    @DIRTY=0; \
+        diff -q go.mod go.mod.bak >/dev/null 2>&1 || DIRTY=1; \
+        if [ -f go.sum.bak ]; then diff -q go.sum go.sum.bak >/dev/null 2>&1 || DIRTY=1; \
+        elif [ -f go.sum ]; then DIRTY=1; fi; \
+        mv go.mod.bak go.mod; \
+        if [ -f go.sum.bak ]; then mv go.sum.bak go.sum; elif [ -f go.sum ]; then rm go.sum; fi; \
+        if [ "$$DIRTY" = "1" ]; then echo "go.mod/go.sum not tidy — run 'go mod tidy'" && exit 1; fi
+
+# Verify the project compiles (fast, no binary output)
+build-check:
+    go build ./...
 
 # Run all tests with race detector
 test:
