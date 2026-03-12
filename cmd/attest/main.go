@@ -60,7 +60,7 @@ func usage() {
 commands:
   prepare --spec <path> [--spec <path>...]   Ingest specs and create a draft run
   review <run-id>                            Show the run artifact for review
-  approve <run-id>                           Approve and compile tasks
+  approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
   verify <run-id> <task-id>                  Run deterministic verification
   tasks <run-id> [--status X] [--json]       Query tasks with filters
@@ -159,10 +159,22 @@ func cmdReview(_ context.Context, args []string) error {
 }
 
 func cmdApprove(ctx context.Context, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: attest approve <run-id>")
+	var runID string
+	var launch bool
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--launch":
+			launch = true
+		default:
+			if runID == "" {
+				runID = args[i]
+			}
+		}
 	}
-	runID := args[0]
+	if runID == "" {
+		return fmt.Errorf("usage: attest approve <run-id> [--launch]")
+	}
 
 	wd, err := workDir()
 	if err != nil {
@@ -188,6 +200,10 @@ func cmdApprove(ctx context.Context, args []string) error {
 
 	for _, t := range result.Tasks {
 		fmt.Printf("  [%s] %s (reqs: %s)\n", t.TaskID, t.Title, strings.Join(t.RequirementIDs, ", "))
+	}
+
+	if launch {
+		fmt.Printf("\n--launch: detached execution not yet implemented (Phase 4)\n")
 	}
 
 	return nil

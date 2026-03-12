@@ -21,3 +21,6 @@
 
 # Firebase
 firebase-debug.log
+
+# AgentOps session artifacts
+.agents/

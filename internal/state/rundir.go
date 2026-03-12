@@ -57,6 +57,12 @@ func (d *RunDir) Events() string { return d.Path("events.jsonl") }
 // Clarifications returns the path to clarifications.json.
 func (d *RunDir) Clarifications() string { return d.Path("clarifications.json") }
 
+// Engine returns the path to engine.json.
+func (d *RunDir) Engine() string { return d.Path("engine.json") }
+
+// EngineLog returns the path to engine.log.
+func (d *RunDir) EngineLog() string { return d.Path("engine.log") }
+
 // ClaimPath returns the path to a specific claim file.
 func (d *RunDir) ClaimPath(taskID string) string {
 	return filepath.Join(d.Root, "claims", taskID+".json")
@@ -65,6 +71,16 @@ func (d *RunDir) ClaimPath(taskID string) string {
 // ReportDir returns the report directory for a specific task.
 func (d *RunDir) ReportDir(taskID string) string {
 	return filepath.Join(d.Root, "reports", taskID)
+}
+
+// AttemptPath returns the path to attempt.json for a specific task.
+func (d *RunDir) AttemptPath(taskID string) string {
+	return filepath.Join(d.ReportDir(taskID), "attempt.json")
+}
+
+// CouncilResultPath returns the path to council-result.json for a specific task.
+func (d *RunDir) CouncilResultPath(taskID string) string {
+	return filepath.Join(d.ReportDir(taskID), "council-result.json")
 }
 
 // WriteArtifact writes the run artifact atomically.

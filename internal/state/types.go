@@ -134,10 +134,18 @@ type RunStatus struct {
 	RunID                     string         `json:"run_id"`
 	State                     RunState       `json:"state"`
 	ActiveWaveID              string         `json:"active_wave_id,omitempty"`
+	CurrentGate               string         `json:"current_gate,omitempty"`
+	ActiveBackend             string         `json:"active_backend,omitempty"`
+	ActiveModel               string         `json:"active_model,omitempty"`
 	TaskCountsByState         map[string]int `json:"task_counts_by_state"`
+	ActiveClaims              int            `json:"active_claims"`
 	UncoveredRequirementCount int            `json:"uncovered_requirement_count"`
 	OpenBlockers              []string       `json:"open_blockers,omitempty"`
+	RetryCount                int            `json:"retry_count"`
+	NextAutomaticAction       string         `json:"next_automatic_action,omitempty"`
 	LastTransitionTime        time.Time      `json:"last_transition_time"`
+	LastSuccessfulCouncilTime *time.Time     `json:"last_successful_council_time,omitempty"`
+	TaskDetails               []TaskDetail   `json:"task_details,omitempty"`
 }
 
 // RunState represents the current state of a run (spec section 6.1).
@@ -205,6 +213,71 @@ type Finding struct {
 	Summary     string `json:"summary"`
 	EvidenceRef string `json:"evidence_ref,omitempty"`
 	DedupeKey   string `json:"dedupe_key"`
+}
+
+// Attempt records metadata for a single worker attempt (spec section 3.7).
+type Attempt struct {
+	TaskID              string    `json:"task_id"`
+	AttemptID           string    `json:"attempt_id"`
+	WaveID              string    `json:"wave_id"`
+	SelectedBackend     string    `json:"selected_backend"`
+	SelectedModelTier   string    `json:"selected_model_tier"`
+	BackendCLIVersion   string    `json:"backend_cli_version,omitempty"`
+	BackendModelVersion string    `json:"backend_model_version,omitempty"`
+	PromptTemplateID    string    `json:"prompt_template_id,omitempty"`
+	InputBundleHash     string    `json:"input_bundle_hash,omitempty"`
+	WorkerInputContract string    `json:"worker_input_contract,omitempty"`
+	StartedAt           time.Time `json:"started_at"`
+	FinishedAt          time.Time `json:"finished_at,omitempty"`
+	ExitStatus          string    `json:"exit_status,omitempty"`
+	EscalationCause     string    `json:"escalation_cause,omitempty"`
+	RetryCount          int       `json:"retry_count"`
+}
+
+// ReviewResult is the output from a Codex or Gemini review (spec section 3.7).
+type ReviewResult struct {
+	TaskID              string    `json:"task_id"`
+	AttemptID           string    `json:"attempt_id"`
+	Verdict             string    `json:"verdict"` // pass, pass_with_findings, fail
+	Confidence          float64   `json:"confidence"`
+	BlockingFindings    []Finding `json:"blocking_findings,omitempty"`
+	NonBlockingFindings []Finding `json:"non_blocking_findings,omitempty"`
+	FindingIDs          []string  `json:"finding_ids,omitempty"`
+}
+
+// CouncilResult is the Opus synthesis output (spec section 3.7).
+type CouncilResult struct {
+	TaskID              string    `json:"task_id"`
+	AttemptID           string    `json:"attempt_id"`
+	Verdict             string    `json:"verdict"` // pass, pass_with_findings, fail
+	SynthesizedFindings []Finding `json:"synthesized_findings,omitempty"`
+	DismissalRationale  string    `json:"dismissal_rationale,omitempty"`
+	FollowUpAction      string    `json:"follow_up_action"` // none, reopen, create_child_repair, block, escalate
+}
+
+// EngineInfo records the engine process metadata (spec section 2.4).
+type EngineInfo struct {
+	RunID       string    `json:"run_id"`
+	PID         int       `json:"pid"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+	Version     string    `json:"version"`
+	State       string    `json:"state"`
+}
+
+// TaskDetail is a per-task operational record within run-status.json (spec section 13.1).
+type TaskDetail struct {
+	TaskID                 string `json:"task_id"`
+	CurrentGate            string `json:"current_gate,omitempty"`
+	ActiveBackend          string `json:"active_backend,omitempty"`
+	ActiveModel            string `json:"active_model,omitempty"`
+	ClaimAgeSeconds        int    `json:"claim_age_seconds,omitempty"`
+	HeartbeatAgeSeconds    int    `json:"heartbeat_age_seconds,omitempty"`
+	RetryCount             int    `json:"retry_count"`
+	NextAutomaticAction    string `json:"next_automatic_action,omitempty"`
+	BlockingFindingID      string `json:"blocking_finding_id,omitempty"`
+	BlockingFindingSummary string `json:"blocking_finding_summary,omitempty"`
+	HumanInputRequired     bool   `json:"human_input_required"`
 }
 
 // Event is a single entry in the run event stream (spec section 13.3).
