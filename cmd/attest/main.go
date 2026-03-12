@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,49 +14,54 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(1)
+	os.Exit(run(context.Background(), os.Args[1:], os.Stderr))
+}
+
+func run(ctx context.Context, args []string, stderr io.Writer) int {
+	if len(args) < 1 {
+		usage(stderr)
+		return 1
 	}
 
-	ctx := context.Background()
 	var err error
 
-	switch os.Args[1] {
+	switch args[0] {
 	case "prepare":
-		err = cmdPrepare(ctx, os.Args[2:])
+		err = cmdPrepare(ctx, args[1:])
 	case "review":
-		err = cmdReview(ctx, os.Args[2:])
+		err = cmdReview(ctx, args[1:])
 	case "approve":
-		err = cmdApprove(ctx, os.Args[2:])
+		err = cmdApprove(ctx, args[1:])
 	case "status":
-		err = cmdStatus(ctx, os.Args[2:])
+		err = cmdStatus(ctx, args[1:])
 	case "verify":
-		err = cmdVerify(ctx, os.Args[2:])
+		err = cmdVerify(ctx, args[1:])
 	case "tasks":
-		err = cmdTasks(os.Args[2:])
+		err = cmdTasks(args[1:])
 	case "ready":
-		err = cmdReady(os.Args[2:])
+		err = cmdReady(args[1:])
 	case "blocked":
-		err = cmdBlocked(os.Args[2:])
+		err = cmdBlocked(args[1:])
 	case "next":
-		err = cmdNext(os.Args[2:])
+		err = cmdNext(args[1:])
 	case "progress":
-		err = cmdProgress(os.Args[2:])
+		err = cmdProgress(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
-		usage()
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
+		usage(stderr)
+		return 1
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
 	}
+
+	return 0
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `usage: attest <command> [args]
+func usage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, `usage: attest <command> [args]
 
 commands:
   prepare --spec <path> [--spec <path>...]   Ingest specs and create a draft run
