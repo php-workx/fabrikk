@@ -193,8 +193,11 @@ func TestCmdApproveCompilesTasksAndLaunchNotice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadTasks: %v", err)
 	}
-	if len(tasks) != 1 || tasks[0].RequirementIDs[0] != "AT-FR-001" {
-		t.Fatalf("compiled tasks = %+v, want one AT-FR-001 task", tasks)
+	if len(tasks) != 1 {
+		t.Fatalf("compiled tasks = %+v, want exactly one task", tasks)
+	}
+	if len(tasks[0].RequirementIDs) == 0 || tasks[0].RequirementIDs[0] != "AT-FR-001" {
+		t.Fatalf("compiled task requirements = %+v, want first requirement AT-FR-001", tasks[0].RequirementIDs)
 	}
 }
 
@@ -413,6 +416,17 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	os.Stdout = w
 
+	// Drain reader concurrently to avoid deadlock if output exceeds pipe buffer.
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		ch <- result{data, err}
+	}()
+
 	defer func() {
 		os.Stdout = origStdout
 	}()
@@ -422,14 +436,14 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close stdout writer: %v", err)
 	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
+	res := <-ch
+	if res.err != nil {
+		t.Fatalf("ReadAll: %v", res.err)
 	}
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close stdout reader: %v", err)
 	}
-	return string(data)
+	return string(res.data)
 }
 
 func assertContains(t *testing.T, output, want string) {
