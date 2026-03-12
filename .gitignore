@@ -1,6 +1,11 @@
 # Binaries
 /attest
 /cmd/attest/attest
+bin/
+
+# Coverage
+coverage.out
+coverage.html
 
 # Go
 *.exe
