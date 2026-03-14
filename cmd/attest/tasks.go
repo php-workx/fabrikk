@@ -27,7 +27,7 @@ type taskFilter struct {
 	jsonOutput    bool
 }
 
-func parseTaskFilter(args []string) (runID string, f taskFilter, remaining []string) { //nolint:unparam // remaining is used by callers for future extensibility
+func parseTaskFilter(args []string) (runID string, f taskFilter, remaining []string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--status":
