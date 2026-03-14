@@ -103,7 +103,7 @@ sonar:
         if [ -z "$TOKEN" ]; then \
             echo "error: SONAR_TOKEN not found or invalid in .env"; exit 1; \
         fi; \
-        SONAR_TOKEN="$TOKEN" sonar-scanner; \
+        SONAR_TOKEN="$TOKEN" sonar-scanner -Dsonar.qualitygate.wait=true; \
     fi
 
 # Format all Go files in-place
