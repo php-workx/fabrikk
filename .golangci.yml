@@ -91,21 +91,6 @@ linters:
         - G304  # file inclusion via variable — attest is a file-management tool by design
         - G306  # WriteFile 0644 — same as G302
 
-  exclusions:
-    rules:
-      # Test files get more leniency
-      - path: _test\.go
-        linters:
-          - errcheck
-          - gosec
-          - goconst
-          - unparam
-          - gocritic
-
-      # Main packages often have unused parameters in command handlers
-      - path: cmd/
-        linters:
-          - unparam
 
 formatters:
   enable:

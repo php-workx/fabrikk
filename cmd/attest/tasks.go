@@ -27,7 +27,7 @@ type taskFilter struct {
 	jsonOutput    bool
 }
 
-func parseTaskFilter(args []string) (runID string, f taskFilter, remaining []string) {
+func parseTaskFilter(args []string) (runID string, f taskFilter) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--status":
@@ -74,12 +74,10 @@ func parseTaskFilter(args []string) (runID string, f taskFilter, remaining []str
 		default:
 			if runID == "" {
 				runID = args[i]
-			} else {
-				remaining = append(remaining, args[i])
 			}
 		}
 	}
-	return runID, f, remaining
+	return runID, f
 }
 
 func (f taskFilter) matches(t *state.Task, doneStates map[string]state.TaskStatus) bool {
@@ -155,7 +153,7 @@ func outputTasks(tasks []state.Task, jsonOutput bool) {
 
 // cmdTasks implements `attest tasks` (spec section 5.2).
 func cmdTasks(args []string) error {
-	runID, f, _ := parseTaskFilter(args)
+	runID, f := parseTaskFilter(args)
 	if runID == "" {
 		return fmt.Errorf("usage: attest tasks <run-id> [--status X] [--task-type X] [--tag X] [--json]")
 	}
@@ -185,7 +183,7 @@ func cmdTasks(args []string) error {
 
 // cmdReady implements `attest ready` (spec section 5.2).
 func cmdReady(args []string) error {
-	runID, f, _ := parseTaskFilter(args)
+	runID, f := parseTaskFilter(args)
 	if runID == "" {
 		return fmt.Errorf("usage: attest ready <run-id> [--json]")
 	}
@@ -227,7 +225,7 @@ func cmdReady(args []string) error {
 
 // cmdBlocked implements `attest blocked` (spec section 5.2).
 func cmdBlocked(args []string) error {
-	runID, f, _ := parseTaskFilter(args)
+	runID, f := parseTaskFilter(args)
 	if runID == "" {
 		return fmt.Errorf("usage: attest blocked <run-id> [--json]")
 	}
@@ -273,7 +271,7 @@ func cmdBlocked(args []string) error {
 
 // cmdNext implements `attest next` (spec section 5.2).
 func cmdNext(args []string) error {
-	runID, f, _ := parseTaskFilter(args)
+	runID, f := parseTaskFilter(args)
 	if runID == "" {
 		return fmt.Errorf("usage: attest next <run-id> [--json]")
 	}
@@ -342,7 +340,7 @@ func cmdNext(args []string) error {
 
 // cmdProgress implements `attest progress` (spec section 5.2).
 func cmdProgress(args []string) error {
-	runID, f, _ := parseTaskFilter(args)
+	runID, f := parseTaskFilter(args)
 	if runID == "" {
 		return fmt.Errorf("usage: attest progress <run-id> [--json]")
 	}
