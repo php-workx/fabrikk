@@ -4,3 +4,9 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 # Pre-commit: fast checks (workflow lint, vet, formatting, compile, module tidiness)
 just actionlint vet fmt build-check mod-tidy
+# Secret scanning on staged changes
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks git --staged --no-banner
+else
+    echo "warning: gitleaks not installed, skipping secret scan"
+fi
