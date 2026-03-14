@@ -366,9 +366,10 @@ func tagsForGroup(group []state.Requirement) []string {
 
 // computeETag produces a content hash for compare-and-swap consistency (spec section 3.4).
 func computeETag(task *state.Task) string {
-	task.ETag = ""
-	task.UpdatedAt = time.Time{}
-	data, err := json.Marshal(task)
+	tmp := *task
+	tmp.ETag = ""
+	tmp.UpdatedAt = time.Time{}
+	data, err := json.Marshal(&tmp)
 	if err != nil {
 		return ""
 	}
@@ -476,11 +477,11 @@ func tagsForSlice(_ *state.ExecutionSlice, reqs []state.Requirement) []string {
 }
 
 func riskForSlice(slice *state.ExecutionSlice, reqs []state.Requirement) string {
-	if len(reqs) > 0 {
-		return riskForGroup(reqs)
-	}
 	if slice.Risk != "" {
 		return slice.Risk
+	}
+	if len(reqs) > 0 {
+		return riskForGroup(reqs)
 	}
 	return riskLow
 }
