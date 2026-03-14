@@ -329,6 +329,14 @@ func detectSliceCycles(slices []state.ExecutionSlice, adj map[string][]string, r
 	}
 }
 
+var (
+	validRisks = map[string]bool{"low": true, "medium": true, "high": true}
+	validSizes = map[string]bool{"small": true, "medium": true, "large": true}
+)
+
+func isValidRisk(v string) bool { return validRisks[v] }
+func isValidSize(v string) bool { return validSizes[v] }
+
 func reviewSlice(slice *state.ExecutionSlice, review *state.ExecutionPlanReview) {
 	fields := []struct {
 		ok       bool
@@ -341,8 +349,8 @@ func reviewSlice(slice *state.ExecutionSlice, review *state.ExecutionPlanReview)
 		{ok: len(slice.RequirementIDs) > 0, category: "missing_requirement_ids", summary: "slice is missing requirement IDs"},
 		{ok: len(slice.OwnedPaths) > 0, category: "missing_owned_paths", summary: "slice is missing owned paths"},
 		{ok: len(slice.AcceptanceChecks) > 0, category: "missing_acceptance_checks", summary: "slice is missing acceptance checks"},
-		{ok: slice.Risk != "", category: "missing_risk", summary: "slice is missing risk"},
-		{ok: slice.Size != "", category: "missing_size", summary: "slice is missing size"},
+		{ok: isValidRisk(slice.Risk), category: "invalid_risk", summary: fmt.Sprintf("slice risk %q is not valid (want low, medium, or high)", slice.Risk)},
+		{ok: isValidSize(slice.Size), category: "invalid_size", summary: fmt.Sprintf("slice size %q is not valid (want small, medium, or large)", slice.Size)},
 	}
 
 	for _, field := range fields {
