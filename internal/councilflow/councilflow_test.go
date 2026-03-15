@@ -482,6 +482,43 @@ func TestDetectDriftNoWarningsWhenClean(t *testing.T) {
 	}
 }
 
+func TestMergeFindingsDeduplicates(t *testing.T) {
+	initial := []Finding{
+		{FindingID: "sec-001", Description: "old version"},
+		{FindingID: "sec-002", Description: "only in initial"},
+	}
+	nudge := []Finding{
+		{FindingID: "sec-001", Description: "updated version"},
+		{FindingID: "sec-003", Description: "only in nudge"},
+	}
+
+	merged := mergeFindings(initial, nudge)
+	if len(merged) != 3 {
+		t.Fatalf("merged count = %d, want 3", len(merged))
+	}
+	// sec-001 should be the nudge version.
+	if merged[0].Description != "updated version" {
+		t.Errorf("sec-001 description = %q, want nudge version", merged[0].Description)
+	}
+	// sec-002 preserved from initial.
+	if merged[1].FindingID != "sec-002" {
+		t.Errorf("merged[1] = %q, want sec-002", merged[1].FindingID)
+	}
+	// sec-003 added from nudge.
+	if merged[2].FindingID != "sec-003" {
+		t.Errorf("merged[2] = %q, want sec-003", merged[2].FindingID)
+	}
+}
+
+func TestVerdictSeverityOrdering(t *testing.T) {
+	if verdictSeverity(VerdictPass) >= verdictSeverity(VerdictWarn) {
+		t.Error("PASS should be less severe than WARN")
+	}
+	if verdictSeverity(VerdictWarn) >= verdictSeverity(VerdictFail) {
+		t.Error("WARN should be less severe than FAIL")
+	}
+}
+
 func TestTruncateForError(t *testing.T) {
 	short := "hello"
 	if got := truncateForError(short, 10); got != short {

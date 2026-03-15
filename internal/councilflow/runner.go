@@ -177,11 +177,53 @@ func (r *Runner) runSingleReview(ctx context.Context, spec string, round int, pe
 		return review, nil //nolint:nilerr // nudge parse failure; initial review is valid
 	}
 
-	// Use nudge output if it has more findings (it should be the complete list).
-	if len(nudgeReview.Findings) > len(review.Findings) {
-		return nudgeReview, nil
+	// Merge initial + nudge findings. The nudge may return the complete list,
+	// only new findings, or a deduplicated subset — we can't assume which.
+	// Deduplicate by finding_id, preferring nudge version for conflicts.
+	review.Findings = mergeFindings(review.Findings, nudgeReview.Findings)
+
+	// Use the nudge verdict/confidence if it's stricter (higher severity).
+	if verdictSeverity(nudgeReview.Verdict) > verdictSeverity(review.Verdict) {
+		review.Verdict = nudgeReview.Verdict
 	}
+	if nudgeReview.Confidence != "" {
+		review.Confidence = nudgeReview.Confidence
+	}
+
 	return review, nil
+}
+
+// mergeFindings combines two finding lists, deduplicating by finding_id.
+// For duplicate IDs, the nudge version wins (it's the more considered response).
+func mergeFindings(initial, nudge []Finding) []Finding {
+	seen := make(map[string]int, len(initial))
+	merged := make([]Finding, len(initial))
+	copy(merged, initial)
+	for i := range merged {
+		seen[merged[i].FindingID] = i
+	}
+	for i := range nudge {
+		if idx, exists := seen[nudge[i].FindingID]; exists {
+			merged[idx] = nudge[i] // nudge version replaces initial
+		} else {
+			merged = append(merged, nudge[i])
+			seen[nudge[i].FindingID] = len(merged) - 1
+		}
+	}
+	return merged
+}
+
+func verdictSeverity(v Verdict) int {
+	switch v {
+	case VerdictFail:
+		return 3
+	case VerdictWarn:
+		return 2
+	case VerdictPass:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func matchesSpecHash(path, currentHash string) bool {
