@@ -4,6 +4,7 @@ package councilflow
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -13,6 +14,7 @@ type CouncilConfig struct {
 	CodebaseContext string // optional codebase context for reviewers
 	DryRun          bool   // generate prompts without executing
 	Force           bool   // re-run all reviewers even if cached results exist
+	SkipJudge       bool   // skip judge consolidation (review-only mode)
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -24,8 +26,10 @@ func DefaultConfig() CouncilConfig {
 
 // CouncilResult holds the full pipeline output across all rounds.
 type CouncilResult struct {
-	Rounds         []RoundResult `json:"rounds"`
-	OverallVerdict Verdict       `json:"overall_verdict"`
+	Rounds         []RoundResult         `json:"rounds"`
+	Consolidations []ConsolidationResult `json:"consolidations,omitempty"`
+	OverallVerdict Verdict               `json:"overall_verdict"`
+	FinalSpecPath  string                `json:"final_spec_path,omitempty"`
 }
 
 // RunCouncil executes the full council review pipeline for a technical spec.
@@ -38,6 +42,7 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 
 	result := &CouncilResult{}
 	var priorFindings []ReviewOutput
+	currentSpec := spec
 
 	for round := 1; round <= cfg.Rounds; round++ {
 		fmt.Printf("\n=== Council Review Round %d/%d ===\n", round, cfg.Rounds)
@@ -47,15 +52,15 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		runner.Force = cfg.Force
 
 		if cfg.DryRun {
-			if err := writeDryRunPrompts(roundDir, spec, round, personas, priorFindings, cfg.CodebaseContext); err != nil {
+			if err := writeDryRunPrompts(roundDir, currentSpec, round, personas, priorFindings, cfg.CodebaseContext); err != nil {
 				return nil, err
 			}
 			continue
 		}
 
-		roundResult, err := runner.RunRound(ctx, spec, round, personas, priorFindings, cfg.CodebaseContext)
+		roundResult, err := runner.RunRound(ctx, currentSpec, round, personas, priorFindings, cfg.CodebaseContext)
 		if err != nil {
-			return nil, fmt.Errorf("round %d: %w", round, err)
+			return nil, fmt.Errorf("round %d reviews: %w", round, err)
 		}
 
 		result.Rounds = append(result.Rounds, *roundResult)
@@ -65,8 +70,40 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		for i := range roundResult.Reviews {
 			totalFindings += len(roundResult.Reviews[i].Findings)
 		}
-		fmt.Printf("  Round %d complete: %s (%d findings from %d reviewers)\n",
+		fmt.Printf("  Round %d reviews: %s (%d findings from %d reviewers)\n",
 			round, roundResult.Consensus, totalFindings, len(roundResult.Reviews))
+
+		// Judge consolidation.
+		if cfg.SkipJudge || totalFindings == 0 {
+			continue
+		}
+
+		consolidation, judgeErr := RunJudge(ctx, currentSpec, round, roundResult.Reviews, roundDir, DefaultJudgeConfig())
+		if judgeErr != nil {
+			return nil, fmt.Errorf("round %d judge: %w", round, judgeErr)
+		}
+
+		// Drift detection.
+		consolidation.DriftWarnings = DetectDrift(currentSpec, consolidation.UpdatedSpec)
+		if len(consolidation.DriftWarnings) > 0 {
+			fmt.Printf("  [round %d] drift warnings:\n", round)
+			for _, w := range consolidation.DriftWarnings {
+				fmt.Printf("    - %s\n", w)
+			}
+		}
+
+		result.Consolidations = append(result.Consolidations, *consolidation)
+
+		// Write versioned spec.
+		specPath := filepath.Join(outputBaseDir, fmt.Sprintf("technical-spec-v%d.md", round))
+		if err := os.WriteFile(specPath, []byte(consolidation.UpdatedSpec), 0o644); err != nil {
+			return nil, fmt.Errorf("write spec v%d: %w", round, err)
+		}
+		result.FinalSpecPath = specPath
+		currentSpec = consolidation.UpdatedSpec
+
+		fmt.Printf("  Round %d consolidated: %d applied, %d rejected → %s\n",
+			round, consolidation.AppliedCount, consolidation.RejectedCount, specPath)
 	}
 
 	// Overall verdict is the consensus of the last round.

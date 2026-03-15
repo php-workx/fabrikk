@@ -325,6 +325,127 @@ func TestComputeConsensus(t *testing.T) {
 	}
 }
 
+func TestBuildJudgePromptContainsRequiredSections(t *testing.T) {
+	spec := "# Test Spec\n\n## 1. Architecture\nContent.\n"
+	reviews := []ReviewOutput{
+		{
+			PersonaID:  "security-perf-engineer",
+			Round:      1,
+			Verdict:    VerdictFail,
+			Confidence: ConfidenceHigh,
+			KeyInsight: "Missing auth",
+			Findings: []Finding{
+				{FindingID: "sec-001", Severity: "significant", Description: "No auth"},
+			},
+		},
+	}
+
+	prompt := buildJudgePrompt(spec, 1, reviews)
+
+	for _, want := range []string{
+		"Judge / Editor Consolidation",
+		"Cross-validate",
+		"MUST NOT dismiss a high-confidence finding",
+		"security-perf-engineer",
+		"sec-001",
+		"Missing auth",
+		"## Current Technical Specification",
+		"# Test Spec",
+		"updated_spec",
+		"rejected",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("judge prompt missing %q", want)
+		}
+	}
+}
+
+func TestParseJudgeOutputValid(t *testing.T) {
+	raw := `{
+  "updated_spec": "# Updated Spec\n\n## 1. Architecture\nImproved content.\n",
+  "applied": [
+    {"finding_id": "sec-001", "persona_id": "security-perf-engineer", "action": "Added auth requirement"}
+  ],
+  "rejected": [
+    {
+      "finding_id": "perf-003",
+      "persona_id": "security-perf-engineer",
+      "severity": "significant",
+      "description": "Add connection pooling",
+      "rejection_reason": "No database in this system",
+      "cross_reference": "Section 3.1"
+    }
+  ]
+}`
+
+	result, err := parseJudgeOutput(raw, 1)
+	if err != nil {
+		t.Fatalf("parseJudgeOutput: %v", err)
+	}
+	if result.AppliedCount != 1 {
+		t.Errorf("applied count = %d, want 1", result.AppliedCount)
+	}
+	if result.RejectedCount != 1 {
+		t.Errorf("rejected count = %d, want 1", result.RejectedCount)
+	}
+	if result.UpdatedSpec == "" {
+		t.Error("updated spec is empty")
+	}
+	if result.RejectionLog.Rejections[0].FindingID != "perf-003" {
+		t.Errorf("rejection finding_id = %q, want perf-003", result.RejectionLog.Rejections[0].FindingID)
+	}
+}
+
+func TestParseJudgeOutputRejectsMissingSpec(t *testing.T) {
+	raw := `{"applied": [], "rejected": []}`
+	_, err := parseJudgeOutput(raw, 1)
+	if err == nil {
+		t.Fatal("should reject output missing updated_spec")
+	}
+}
+
+func TestDetectDriftRemovedSection(t *testing.T) {
+	before := "# Spec\n\n## 1. Intro\nA\n\n## 2. Architecture\nB\n\n## 3. Details\nC\n"
+	after := "# Spec\n\n## 1. Intro\nA\n\n## 2. Architecture\nB\n"
+
+	warnings := DetectDrift(before, after)
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "## 3. Details") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected drift warning for removed section, got: %v", warnings)
+	}
+}
+
+func TestDetectDriftSignificantShrinkage(t *testing.T) {
+	before := strings.Repeat("x", 1000)
+	after := strings.Repeat("x", 500)
+
+	warnings := DetectDrift(before, after)
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "shrank") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected shrinkage warning, got: %v", warnings)
+	}
+}
+
+func TestDetectDriftNoWarningsWhenClean(t *testing.T) {
+	before := "# Spec\n\n## 1. Intro\nA\n"
+	after := "# Spec\n\n## 1. Intro\nA with improvements.\n"
+
+	warnings := DetectDrift(before, after)
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings, got: %v", warnings)
+	}
+}
+
 func TestTruncateForError(t *testing.T) {
 	short := "hello"
 	if got := truncateForError(short, 10); got != short {
