@@ -17,6 +17,7 @@ type ConsolidationResult struct {
 	RejectionLog   RejectionLog `json:"rejection_log"`
 	AppliedCount   int          `json:"applied_count"`
 	RejectedCount  int          `json:"rejected_count"`
+	FailedEdits    []string     `json:"failed_edits,omitempty"`
 	DriftWarnings  []string     `json:"drift_warnings,omitempty"`
 	ConsolidatedAt time.Time    `json:"consolidated_at"`
 }
@@ -186,8 +187,12 @@ func parseJudgeOutput(raw string, round int, currentSpec string) (*Consolidation
 	var failedEdits []string
 	for i := range parsed.Edits {
 		edit := &parsed.Edits[i]
-		if edit.Find == "" || edit.Replace == "" {
-			failedEdits = append(failedEdits, fmt.Sprintf("%s: empty find/replace", edit.FindingID))
+		if edit.Find == "" {
+			failedEdits = append(failedEdits, fmt.Sprintf("%s: empty find field", edit.FindingID))
+			continue
+		}
+		if edit.Replace == "" {
+			failedEdits = append(failedEdits, fmt.Sprintf("%s: empty replace field (would delete content)", edit.FindingID))
 			continue
 		}
 		if !strings.Contains(updatedSpec, edit.Find) {
@@ -196,6 +201,11 @@ func parseJudgeOutput(raw string, round int, currentSpec string) (*Consolidation
 		}
 		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
 		appliedCount++
+	}
+
+	// Guard: reject if edits wiped the spec.
+	if strings.TrimSpace(updatedSpec) == "" {
+		return nil, fmt.Errorf("judge edits produced an empty spec — aborting to prevent data loss")
 	}
 
 	if len(failedEdits) > 0 {
@@ -214,6 +224,7 @@ func parseJudgeOutput(raw string, round int, currentSpec string) (*Consolidation
 		},
 		AppliedCount:   appliedCount,
 		RejectedCount:  len(parsed.Rejected),
+		FailedEdits:    failedEdits,
 		ConsolidatedAt: time.Now(),
 	}, nil
 }

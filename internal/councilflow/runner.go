@@ -2,6 +2,7 @@ package councilflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,7 +41,7 @@ func BackendFor(persona *Persona) CLIBackend {
 	args := make([]string, len(base.Args))
 	copy(args, base.Args)
 	args = overrideModelArg(persona.Backend, args, persona.ModelPref)
-	return CLIBackend{Command: base.Command, Args: args}
+	return CLIBackend{Command: base.Command, Args: args, PromptFlag: base.PromptFlag}
 }
 
 // overrideModelArg replaces the model argument in a CLI args slice.
@@ -93,6 +94,14 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		return nil, fmt.Errorf("write personas: %w", err)
 	}
 
+	// Write spec hash for cache validation — if spec changes, cached reviews are stale.
+	specHash := fmt.Sprintf("%x", sha256.Sum256([]byte(spec)))
+	specHashPath := filepath.Join(r.OutputDir, "spec-hash.txt")
+	cacheValid := !r.Force && matchesSpecHash(specHashPath, specHash)
+	if err := os.WriteFile(specHashPath, []byte(specHash+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("write spec hash: %w", err)
+	}
+
 	result := &RoundResult{
 		Round:    round,
 		Personas: personas,
@@ -102,8 +111,8 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		persona := &personas[i]
 		reviewPath := filepath.Join(r.OutputDir, fmt.Sprintf("review-%s.json", persona.PersonaID))
 
-		// Check for cached review.
-		if !r.Force {
+		// Check for cached review — only valid if spec hasn't changed.
+		if cacheValid {
 			if cached, err := loadCachedReview(reviewPath); err == nil {
 				result.Reviews = append(result.Reviews, *cached)
 				fmt.Printf("  [round %d] %s: cached %s (%d findings)\n", round, persona.DisplayName, cached.Verdict, len(cached.Findings))
@@ -173,6 +182,14 @@ func (r *Runner) runSingleReview(ctx context.Context, spec string, round int, pe
 		return nudgeReview, nil
 	}
 	return review, nil
+}
+
+func matchesSpecHash(path, currentHash string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == currentHash
 }
 
 func loadCachedReview(path string) (*ReviewOutput, error) {
@@ -251,10 +268,29 @@ func extractJSON(s string) string {
 			return strings.TrimSpace(s[start : start+end])
 		}
 	}
+	// String-aware brace matching to handle braces inside JSON string values.
 	if idx := strings.Index(s, "{"); idx >= 0 {
 		depth := 0
+		inStr := false
+		esc := false
 		for i := idx; i < len(s); i++ {
-			switch s[i] {
+			ch := s[i]
+			if esc {
+				esc = false
+				continue
+			}
+			if ch == '\\' && inStr {
+				esc = true
+				continue
+			}
+			if ch == '"' {
+				inStr = !inStr
+				continue
+			}
+			if inStr {
+				continue
+			}
+			switch ch {
 			case '{':
 				depth++
 			case '}':

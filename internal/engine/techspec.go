@@ -180,10 +180,14 @@ func (e *Engine) CouncilReviewTechnicalSpec(ctx context.Context, cfg councilflow
 		return nil, fmt.Errorf("council review: %w", err)
 	}
 
-	// Update the active technical spec with the council-improved version.
+	// Update the active technical spec with the council-improved version,
+	// then re-run structural review to refresh the stored hash so approval works.
 	if result.FinalSpec != "" {
 		if err := e.RunDir.WriteTechnicalSpec([]byte(result.FinalSpec)); err != nil {
 			return nil, fmt.Errorf("update technical spec: %w", err)
+		}
+		if _, err := e.ReviewTechnicalSpec(ctx); err != nil {
+			return nil, fmt.Errorf("refresh structural review after council: %w", err)
 		}
 	}
 
