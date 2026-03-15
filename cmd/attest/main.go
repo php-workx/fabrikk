@@ -82,8 +82,8 @@ commands:
   prepare --spec <path> [--spec <path>...]   Ingest specs and create a draft run
   review <run-id>                            Show the run artifact for review
   tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
-                                              review --from <path> --council  (one-step shortcut)
-                                              review flags: --council --dry-run --force --round N
+                                              review --from <path>  (one-step council review)
+                                              review flags: --structural-only --dry-run --force --round N
   plan <draft|review|approve> ...            Manage run-scoped execution plans
   approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
@@ -291,14 +291,16 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags [
 }
 
 func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) error {
-	council := false
+	structuralOnly := false
 	dryRun := false
 	force := false
 	rounds := 2
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
+		case "--structural-only":
+			structuralOnly = true
 		case "--council":
-			council = true
+			// Accepted for backward compat but council is now the default.
 		case "--dry-run":
 			dryRun = true
 		case "--force":
@@ -311,6 +313,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 		}
 	}
 
+	// Structural review always runs first (pre-flight).
 	review, err := eng.ReviewTechnicalSpec(ctx)
 	if err != nil {
 		return err
@@ -318,7 +321,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 	data, _ := json.MarshalIndent(review, "", "  ")
 	fmt.Println(string(data))
 
-	if !council {
+	if structuralOnly {
 		return nil
 	}
 	if review.Status != state.ReviewPass {

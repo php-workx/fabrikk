@@ -116,7 +116,10 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 
 		review, err := r.runSingleReview(ctx, spec, round, persona, &backend, priorFindings, codebaseCtx)
 		if err != nil {
-			return nil, fmt.Errorf("review %s: %w", persona.PersonaID, err)
+			// Non-fatal: log the failure and continue with remaining reviewers.
+			// The failed reviewer can be retried by re-running without --force.
+			fmt.Printf("  [round %d] %s: FAILED (%v)\n", round, persona.DisplayName, err)
+			continue
 		}
 
 		if err := writeJSON(reviewPath, review); err != nil {

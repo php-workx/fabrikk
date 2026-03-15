@@ -180,6 +180,13 @@ func (e *Engine) CouncilReviewTechnicalSpec(ctx context.Context, cfg councilflow
 		return nil, fmt.Errorf("council review: %w", err)
 	}
 
+	// Update the active technical spec with the council-improved version.
+	if result.FinalSpec != "" {
+		if err := e.RunDir.WriteTechnicalSpec([]byte(result.FinalSpec)); err != nil {
+			return nil, fmt.Errorf("update technical spec: %w", err)
+		}
+	}
+
 	_ = e.RunDir.AppendEvent(state.Event{
 		Timestamp: time.Now(),
 		Type:      "technical_spec_council_reviewed",

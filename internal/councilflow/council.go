@@ -30,6 +30,7 @@ type CouncilResult struct {
 	Consolidations []ConsolidationResult `json:"consolidations,omitempty"`
 	OverallVerdict Verdict               `json:"overall_verdict"`
 	FinalSpecPath  string                `json:"final_spec_path,omitempty"`
+	FinalSpec      string                `json:"-"` // updated spec text (not serialized)
 }
 
 // RunCouncil executes the full council review pipeline for a technical spec.
@@ -100,6 +101,7 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 			return nil, fmt.Errorf("write spec v%d: %w", round, err)
 		}
 		result.FinalSpecPath = specPath
+		result.FinalSpec = consolidation.UpdatedSpec
 		currentSpec = consolidation.UpdatedSpec
 
 		fmt.Printf("  Round %d consolidated: %d applied, %d rejected → %s\n",

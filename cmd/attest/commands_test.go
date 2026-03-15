@@ -216,7 +216,7 @@ Pending
 	}
 
 	reviewOutput := captureStdout(t, func() {
-		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech"}); err != nil {
+		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech", "--structural-only"}); err != nil {
 			t.Fatalf("cmdTechSpec review: %v", err)
 		}
 	})
@@ -255,7 +255,7 @@ func TestCmdTechSpecReviewReportsMissingSections(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech-fail"}); err != nil {
+		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech-fail", "--structural-only"}); err != nil {
 			t.Fatalf("cmdTechSpec review: %v", err)
 		}
 	})
