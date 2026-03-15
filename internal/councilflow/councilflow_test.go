@@ -352,8 +352,10 @@ func TestBuildJudgePromptContainsRequiredSections(t *testing.T) {
 		"Missing auth",
 		"## Current Technical Specification",
 		"# Test Spec",
-		"updated_spec",
+		"edits",
 		"rejected",
+		"find",
+		"replace",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("judge prompt missing %q", want)
@@ -361,11 +363,17 @@ func TestBuildJudgePromptContainsRequiredSections(t *testing.T) {
 	}
 }
 
-func TestParseJudgeOutputValid(t *testing.T) {
+func TestParseJudgeOutputAppliesEdits(t *testing.T) {
 	raw := `{
-  "updated_spec": "# Updated Spec\n\n## 1. Architecture\nImproved content.\n",
-  "applied": [
-    {"finding_id": "sec-001", "persona_id": "security-perf-engineer", "action": "Added auth requirement"}
+  "edits": [
+    {
+      "finding_id": "sec-001",
+      "persona_id": "security-perf-engineer",
+      "action": "Added auth requirement",
+      "section": "## 1. Architecture",
+      "find": "No auth defined.",
+      "replace": "All inter-component communication must be authenticated."
+    }
   ],
   "rejected": [
     {
@@ -378,8 +386,9 @@ func TestParseJudgeOutputValid(t *testing.T) {
     }
   ]
 }`
+	spec := "# Spec\n\n## 1. Architecture\nNo auth defined.\n\n## 2. Other\nStuff.\n"
 
-	result, err := parseJudgeOutput(raw, 1)
+	result, err := parseJudgeOutput(raw, 1, spec)
 	if err != nil {
 		t.Fatalf("parseJudgeOutput: %v", err)
 	}
@@ -389,19 +398,45 @@ func TestParseJudgeOutputValid(t *testing.T) {
 	if result.RejectedCount != 1 {
 		t.Errorf("rejected count = %d, want 1", result.RejectedCount)
 	}
-	if result.UpdatedSpec == "" {
-		t.Error("updated spec is empty")
+	if !strings.Contains(result.UpdatedSpec, "must be authenticated") {
+		t.Error("edit was not applied to spec")
+	}
+	if strings.Contains(result.UpdatedSpec, "No auth defined") {
+		t.Error("old text was not replaced")
+	}
+	if !strings.Contains(result.UpdatedSpec, "## 2. Other") {
+		t.Error("unrelated section was lost")
 	}
 	if result.RejectionLog.Rejections[0].FindingID != "perf-003" {
 		t.Errorf("rejection finding_id = %q, want perf-003", result.RejectionLog.Rejections[0].FindingID)
 	}
 }
 
-func TestParseJudgeOutputRejectsMissingSpec(t *testing.T) {
-	raw := `{"applied": [], "rejected": []}`
-	_, err := parseJudgeOutput(raw, 1)
-	if err == nil {
-		t.Fatal("should reject output missing updated_spec")
+func TestParseJudgeOutputHandlesUnmatchedEdits(t *testing.T) {
+	raw := `{
+  "edits": [
+    {
+      "finding_id": "sec-001",
+      "persona_id": "test",
+      "action": "Fix auth",
+      "section": "## 1. Intro",
+      "find": "text that does not exist in spec",
+      "replace": "replacement"
+    }
+  ],
+  "rejected": []
+}`
+	spec := "# Spec\n\nSome content.\n"
+
+	result, err := parseJudgeOutput(raw, 1, spec)
+	if err != nil {
+		t.Fatalf("parseJudgeOutput: %v", err)
+	}
+	if result.AppliedCount != 0 {
+		t.Errorf("applied count = %d, want 0 (edit should fail to match)", result.AppliedCount)
+	}
+	if result.UpdatedSpec != spec {
+		t.Error("spec should be unchanged when edit doesn't match")
 	}
 }
 

@@ -58,7 +58,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 		return nil, fmt.Errorf("invoke judge: %w", err)
 	}
 
-	result, err := parseJudgeOutput(output, round)
+	result, err := parseJudgeOutput(output, round, spec)
 	if err != nil {
 		return nil, fmt.Errorf("parse judge output: %w", err)
 	}
@@ -124,12 +124,14 @@ func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
 	b.WriteString("Respond with ONLY a JSON object with this schema:\n\n")
 	b.WriteString("```json\n")
 	b.WriteString(`{
-  "updated_spec": "... the full updated technical specification markdown ...",
-  "applied": [
+  "edits": [
     {
       "finding_id": "sec-001",
       "persona_id": "security-perf-engineer",
-      "action": "Brief description of what was changed"
+      "action": "Brief description of what was changed",
+      "section": "## 2. Architecture",
+      "find": "exact text to find in the spec (copy-paste from the spec above)",
+      "replace": "replacement text with the finding addressed"
     }
   ],
   "rejected": [
@@ -145,22 +147,32 @@ func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
   ]
 }`)
 	b.WriteString("\n```\n\n")
-	b.WriteString("IMPORTANT: The `updated_spec` field must contain the COMPLETE updated specification. Do not truncate or summarize.\n")
+	b.WriteString("IMPORTANT:\n")
+	b.WriteString("- Each edit's `find` field must be an EXACT substring of the current spec text (copy-paste, do not paraphrase).\n")
+	b.WriteString("- The `replace` field contains the replacement text with the finding addressed.\n")
+	b.WriteString("- Keep edits minimal and surgical. Do NOT include the entire spec — only the changed portions.\n")
+	b.WriteString("- If multiple findings affect the same paragraph, combine them into one edit.\n")
+	b.WriteString("- Every finding must appear in either `edits` or `rejected` — none may be silently skipped.\n")
 
 	return b.String()
 }
 
+// SpecEdit is a single find-replace edit to apply to the spec.
+type SpecEdit struct {
+	FindingID string `json:"finding_id"`
+	PersonaID string `json:"persona_id"`
+	Action    string `json:"action"`
+	Section   string `json:"section"`
+	Find      string `json:"find"`
+	Replace   string `json:"replace"`
+}
+
 type judgeRawOutput struct {
-	UpdatedSpec string `json:"updated_spec"`
-	Applied     []struct {
-		FindingID string `json:"finding_id"`
-		PersonaID string `json:"persona_id"`
-		Action    string `json:"action"`
-	} `json:"applied"`
+	Edits    []SpecEdit  `json:"edits"`
 	Rejected []Rejection `json:"rejected"`
 }
 
-func parseJudgeOutput(raw string, round int) (*ConsolidationResult, error) {
+func parseJudgeOutput(raw string, round int, currentSpec string) (*ConsolidationResult, error) {
 	jsonStr := extractJSON(raw)
 
 	var parsed judgeRawOutput
@@ -168,18 +180,39 @@ func parseJudgeOutput(raw string, round int) (*ConsolidationResult, error) {
 		return nil, fmt.Errorf("unmarshal judge output: %w (raw: %s)", err, truncateForError(raw, 200))
 	}
 
-	if parsed.UpdatedSpec == "" {
-		return nil, fmt.Errorf("judge output missing updated_spec")
+	// Apply edits to the spec.
+	updatedSpec := currentSpec
+	appliedCount := 0
+	var failedEdits []string
+	for i := range parsed.Edits {
+		edit := &parsed.Edits[i]
+		if edit.Find == "" || edit.Replace == "" {
+			failedEdits = append(failedEdits, fmt.Sprintf("%s: empty find/replace", edit.FindingID))
+			continue
+		}
+		if !strings.Contains(updatedSpec, edit.Find) {
+			failedEdits = append(failedEdits, fmt.Sprintf("%s: find text not found in spec", edit.FindingID))
+			continue
+		}
+		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
+		appliedCount++
+	}
+
+	if len(failedEdits) > 0 {
+		fmt.Printf("  [judge] %d edits could not be applied:\n", len(failedEdits))
+		for _, msg := range failedEdits {
+			fmt.Printf("    - %s\n", msg)
+		}
 	}
 
 	return &ConsolidationResult{
 		Round:       round,
-		UpdatedSpec: parsed.UpdatedSpec,
+		UpdatedSpec: updatedSpec,
 		RejectionLog: RejectionLog{
 			Round:      round,
 			Rejections: parsed.Rejected,
 		},
-		AppliedCount:   len(parsed.Applied),
+		AppliedCount:   appliedCount,
 		RejectedCount:  len(parsed.Rejected),
 		ConsolidatedAt: time.Now(),
 	}, nil
