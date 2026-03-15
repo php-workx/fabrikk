@@ -15,6 +15,7 @@ type CouncilConfig struct {
 	DryRun          bool   // generate prompts without executing
 	Force           bool   // re-run all reviewers even if cached results exist
 	SkipJudge       bool   // skip judge consolidation (review-only mode)
+	SkipDynPersonas bool   // skip dynamic persona generation (fixed personas only)
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -39,8 +40,6 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		cfg.Rounds = 2
 	}
 
-	personas := FixedPersonas()
-
 	result := &CouncilResult{}
 	var priorFindings []ReviewOutput
 	currentSpec := spec
@@ -49,6 +48,9 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		fmt.Printf("\n=== Council Review Round %d/%d ===\n", round, cfg.Rounds)
 
 		roundDir := filepath.Join(outputBaseDir, fmt.Sprintf("round-%d", round))
+
+		personas := buildPersonaSet(ctx, currentSpec, roundDir, cfg)
+
 		runner := NewRunner(roundDir)
 		runner.Force = cfg.Force
 
@@ -114,6 +116,19 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 	}
 
 	return result, nil
+}
+
+func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConfig) []Persona {
+	personas := FixedPersonas()
+	if cfg.SkipDynPersonas || cfg.DryRun {
+		return personas
+	}
+	dynPersonas, err := GeneratePersonas(ctx, spec, roundDir)
+	if err != nil {
+		fmt.Printf("  dynamic persona generation failed: %v (continuing with fixed personas)\n", err)
+		return personas
+	}
+	return append(personas, dynPersonas...)
 }
 
 func writeDryRunPrompts(roundDir, spec string, round int, personas []Persona, priorFindings []ReviewOutput, codebaseCtx string) error {

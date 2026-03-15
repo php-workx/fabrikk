@@ -527,6 +527,66 @@ func TestVerdictSeverityOrdering(t *testing.T) {
 	}
 }
 
+func TestParsePersonaGenerationOutputArray(t *testing.T) {
+	raw := `[
+  {
+    "persona_id": "go-engineer",
+    "display_name": "Go Engineer",
+    "perspective": "Idiomatic Go expert",
+    "review_instructions": "Review for Go patterns",
+    "backend": "codex",
+    "rationale": "Spec targets Go CLI"
+  },
+  {
+    "persona_id": "state-machine-expert",
+    "display_name": "State Machine Expert",
+    "perspective": "Distributed state expert",
+    "review_instructions": "Review state transitions",
+    "backend": "gemini",
+    "rationale": "Spec describes file-based state machine"
+  }
+]`
+
+	personas, err := parsePersonaGenerationOutput(raw)
+	if err != nil {
+		t.Fatalf("parsePersonaGenerationOutput: %v", err)
+	}
+	if len(personas) != 2 {
+		t.Fatalf("got %d personas, want 2", len(personas))
+	}
+	if personas[0].PersonaID != "go-engineer" {
+		t.Errorf("persona[0] id = %q, want go-engineer", personas[0].PersonaID)
+	}
+	if personas[0].Type != PersonaDynamic {
+		t.Errorf("persona[0] type = %q, want dynamic", personas[0].Type)
+	}
+	if personas[0].GeneratedBy == "" {
+		t.Error("persona[0] generated_by is empty, want non-empty")
+	}
+	if personas[1].Backend != "gemini" {
+		t.Errorf("persona[1] backend = %q, want gemini", personas[1].Backend)
+	}
+}
+
+func TestParsePersonaGenerationOutputWrapped(t *testing.T) {
+	raw := `{"personas": [{"persona_id": "rust-engineer", "display_name": "Rust Engineer", "backend": "claude", "rationale": "Rust project"}]}`
+
+	personas, err := parsePersonaGenerationOutput(raw)
+	if err != nil {
+		t.Fatalf("parsePersonaGenerationOutput: %v", err)
+	}
+	if len(personas) != 1 || personas[0].PersonaID != "rust-engineer" {
+		t.Fatalf("unexpected personas: %+v", personas)
+	}
+}
+
+func TestParsePersonaGenerationOutputRejectsGarbage(t *testing.T) {
+	_, err := parsePersonaGenerationOutput("not json at all")
+	if err == nil {
+		t.Fatal("should reject non-JSON output")
+	}
+}
+
 func TestTruncateForError(t *testing.T) {
 	short := "hello"
 	if got := truncateForError(short, 10); got != short {

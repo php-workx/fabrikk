@@ -315,40 +315,58 @@ func extractJSON(s string) string {
 			return strings.TrimSpace(s[start : start+end])
 		}
 	}
-	// String-aware brace matching to handle braces inside JSON string values.
-	if idx := strings.Index(s, "{"); idx >= 0 {
-		depth := 0
-		inStr := false
-		esc := false
-		for i := idx; i < len(s); i++ {
-			ch := s[i]
-			if esc {
-				esc = false
-				continue
-			}
-			if ch == '\\' && inStr {
-				esc = true
-				continue
-			}
-			if ch == '"' {
-				inStr = !inStr
-				continue
-			}
-			if inStr {
-				continue
-			}
-			switch ch {
-			case '{':
-				depth++
-			case '}':
-				depth--
-				if depth == 0 {
-					return s[idx : i+1]
-				}
-			}
+	// String-aware bracket matching for JSON objects and arrays.
+	objIdx := strings.Index(s, "{")
+	arrIdx := strings.Index(s, "[")
+	idx := objIdx
+	if arrIdx >= 0 && (idx < 0 || arrIdx < idx) {
+		idx = arrIdx
+	}
+	if idx >= 0 {
+		if result := extractJSONBlock(s, idx); result != "" {
+			return result
 		}
 	}
 	return strings.TrimSpace(s)
+}
+
+func extractJSONBlock(s string, idx int) string {
+	open := s[idx]
+	closeCh := byte('}')
+	if open == '[' {
+		closeCh = ']'
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := idx; i < len(s); i++ {
+		ch := s[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if ch == '\\' && inStr {
+			esc = true
+			continue
+		}
+		if ch == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		switch ch {
+		case open:
+			depth++
+		case closeCh:
+			depth--
+			if depth == 0 {
+				return s[idx : i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func truncateForError(s string, maxLen int) string {
