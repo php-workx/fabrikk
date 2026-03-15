@@ -79,21 +79,26 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
 	var b strings.Builder
 
-	b.WriteString("# Judge / Editor Consolidation\n\n")
+	b.WriteString("# Judge / Editor — Finding-by-Finding Validation\n\n")
 	b.WriteString("You are the **Judge/Editor** — the most critical role in the council review pipeline.\n\n")
-	b.WriteString("Your job:\n")
-	b.WriteString("1. Cross-validate each finding against the spec for factual accuracy.\n")
-	b.WriteString("2. Reject findings that are wrong, already addressed, out of scope, or based on misunderstanding.\n")
-	b.WriteString("3. Apply valid findings by editing the spec text.\n")
-	b.WriteString("4. Preserve the spec's voice, structure, and existing content.\n")
-	b.WriteString("5. Explain every rejection with a clear reason.\n\n")
+	b.WriteString("## Process\n\n")
+	b.WriteString("Process each finding INDIVIDUALLY in order. For each finding:\n\n")
+	b.WriteString("1. Read the finding's description and recommendation.\n")
+	b.WriteString("2. Check: Is this factually correct against the current spec? Does the spec already address it?\n")
+	b.WriteString("3. Decide: APPLY (edit the spec) or REJECT (record why).\n")
+	b.WriteString("4. If applying: make a minimal, surgical edit to the spec. Do NOT rewrite surrounding text.\n")
+	b.WriteString("5. Move to the next finding.\n\n")
+	b.WriteString("DO NOT synthesize, summarize, or merge findings before processing them. ")
+	b.WriteString("Each finding must be validated on its own merits against the spec text. ")
+	b.WriteString("The only exception is exact duplicates from different reviewers — deduplicate those and apply once.\n\n")
 
 	b.WriteString("## Rules\n\n")
 	b.WriteString("- You MUST NOT dismiss a high-confidence finding without explicit counter-evidence.\n")
 	b.WriteString("- You MUST NOT drop existing spec content unless a finding explicitly calls for its removal.\n")
-	b.WriteString("- You MUST deduplicate findings that describe the same underlying issue.\n")
 	b.WriteString("- You MUST preserve all section headings and structure.\n")
-	b.WriteString("- Apply findings as minimal surgical edits, not wholesale rewrites.\n\n")
+	b.WriteString("- Every finding must appear in either `applied` or `rejected` — none may be silently skipped.\n")
+	b.WriteString("- Apply findings as minimal surgical edits, not wholesale rewrites.\n")
+	b.WriteString("- When two findings conflict, apply the higher-severity one and reject the other with an explanation.\n\n")
 
 	b.WriteString("## Reviewer Findings\n\n")
 	for i := range reviews {

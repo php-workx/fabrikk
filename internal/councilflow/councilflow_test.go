@@ -343,8 +343,9 @@ func TestBuildJudgePromptContainsRequiredSections(t *testing.T) {
 	prompt := buildJudgePrompt(spec, 1, reviews)
 
 	for _, want := range []string{
-		"Judge / Editor Consolidation",
-		"Cross-validate",
+		"Finding-by-Finding Validation",
+		"Process each finding INDIVIDUALLY",
+		"DO NOT synthesize",
 		"MUST NOT dismiss a high-confidence finding",
 		"security-perf-engineer",
 		"sec-001",
