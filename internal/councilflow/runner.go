@@ -195,14 +195,26 @@ func invokeBackend(ctx context.Context, backend *CLIBackend, prompt string, time
 	defer cancel()
 
 	args := append([]string(nil), backend.Args...)
-	if backend.PromptFlag != "" {
-		args = append(args, backend.PromptFlag, prompt)
-	} else {
-		args = append(args, prompt)
+
+	// For large prompts, pipe via stdin to avoid OS arg size limits.
+	// Claude and Gemini read from stdin when prompt is "-" or piped.
+	// Codex reads from stdin when no positional prompt is given.
+	useStdin := len(prompt) > 32000
+
+	if !useStdin {
+		if backend.PromptFlag != "" {
+			args = append(args, backend.PromptFlag, prompt)
+		} else {
+			args = append(args, prompt)
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, backend.Command, args...) //nolint:gosec // command is from trusted CLIBackend config, not user input
 	cmd.Stderr = os.Stderr
+
+	if useStdin {
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 
 	out, err := cmd.Output()
 	if err != nil {

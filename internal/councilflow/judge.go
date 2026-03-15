@@ -34,7 +34,7 @@ func DefaultJudgeConfig() JudgeConfig {
 			Command: "claude",
 			Args:    []string{"-p", "--model", "opus"},
 		},
-		TimeoutSec: 900, // 15 minutes — judge has more work
+		TimeoutSec: 1800, // 30 minutes — judge processes large specs with many findings
 	}
 }
 
