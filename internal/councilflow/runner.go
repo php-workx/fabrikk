@@ -108,11 +108,13 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		Personas: personas,
 	}
 
+	// Separate cached from pending reviews.
+	var pending []pendingReview
+
 	for i := range personas {
 		persona := &personas[i]
 		reviewPath := filepath.Join(r.OutputDir, fmt.Sprintf("review-%s.json", persona.PersonaID))
 
-		// Check for cached review — only valid if spec hasn't changed.
 		if cacheValid {
 			if cached, err := loadCachedReview(reviewPath); err == nil {
 				result.Reviews = append(result.Reviews, *cached)
@@ -120,30 +122,64 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 				continue
 			}
 		}
+		pending = append(pending, pendingReview{index: i, persona: persona})
+	}
 
-		backend := BackendFor(persona)
-		fmt.Printf("  [round %d] reviewing: %s (via %s) ...\n", round, persona.DisplayName, backend.Command)
-
-		review, err := r.runSingleReview(ctx, spec, round, persona, &backend, priorFindings, codebaseCtx)
-		if err != nil {
-			// Non-fatal: log the failure and continue with remaining reviewers.
-			// The failed reviewer can be retried by re-running without --force.
-			fmt.Printf("  [round %d] %s: FAILED (%v)\n", round, persona.DisplayName, err)
-			continue
-		}
-
-		if err := writeJSON(reviewPath, review); err != nil {
-			return nil, fmt.Errorf("write review %s: %w", persona.PersonaID, err)
-		}
-
-		result.Reviews = append(result.Reviews, *review)
-		fmt.Printf("  [round %d] %s: %s (%d findings)\n", round, persona.DisplayName, review.Verdict, len(review.Findings))
+	// Run pending reviews in parallel.
+	if len(pending) > 0 {
+		reviews := runParallelReviews(ctx, r, spec, round, pending, priorFindings, codebaseCtx)
+		result.Reviews = append(result.Reviews, reviews...)
 	}
 
 	result.Consensus = ComputeConsensus(result.Reviews)
 	fmt.Printf("  [round %d] consensus: %s\n", round, result.Consensus)
 
 	return result, nil
+}
+
+type pendingReview struct {
+	index   int
+	persona *Persona
+}
+
+type reviewResult struct {
+	review  *ReviewOutput
+	err     error
+	persona *Persona
+}
+
+func runParallelReviews(ctx context.Context, r *Runner, spec string, round int, pending []pendingReview, priorFindings []ReviewOutput, codebaseCtx string) []ReviewOutput {
+	ch := make(chan reviewResult, len(pending))
+
+	for _, p := range pending {
+		go func(pr pendingReview) {
+			backend := BackendFor(pr.persona)
+			fmt.Printf("  [round %d] reviewing: %s (via %s) ...\n", round, pr.persona.DisplayName, backend.Command)
+
+			review, err := r.runSingleReview(ctx, spec, round, pr.persona, &backend, priorFindings, codebaseCtx)
+			ch <- reviewResult{review: review, err: err, persona: pr.persona}
+		}(p)
+	}
+
+	var reviews []ReviewOutput
+	for range pending {
+		res := <-ch
+		if res.err != nil {
+			fmt.Printf("  [round %d] %s: FAILED (%v)\n", round, res.persona.DisplayName, res.err)
+			continue
+		}
+
+		reviewPath := filepath.Join(r.OutputDir, fmt.Sprintf("review-%s.json", res.persona.PersonaID))
+		if err := writeJSON(reviewPath, res.review); err != nil {
+			fmt.Printf("  [round %d] %s: write failed (%v)\n", round, res.persona.DisplayName, err)
+			continue
+		}
+
+		reviews = append(reviews, *res.review)
+		fmt.Printf("  [round %d] %s: %s (%d findings)\n", round, res.persona.DisplayName, res.review.Verdict, len(res.review.Findings))
+	}
+
+	return reviews
 }
 
 func (r *Runner) runSingleReview(ctx context.Context, spec string, round int, persona *Persona, backend *CLIBackend, priorFindings []ReviewOutput, codebaseCtx string) (*ReviewOutput, error) {
