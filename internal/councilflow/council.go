@@ -49,7 +49,10 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 
 		roundDir := filepath.Join(outputBaseDir, fmt.Sprintf("round-%d", round))
 
-		personas := buildPersonaSet(ctx, currentSpec, roundDir, cfg)
+		personas, err := buildPersonaSet(ctx, currentSpec, roundDir, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("round %d: %w", round, err)
+		}
 
 		runner := NewRunner(roundDir)
 		runner.Force = cfg.Force
@@ -118,17 +121,16 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 	return result, nil
 }
 
-func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConfig) []Persona {
+func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConfig) ([]Persona, error) {
 	personas := FixedPersonas()
 	if cfg.SkipDynPersonas || cfg.DryRun {
-		return personas
+		return personas, nil
 	}
 	dynPersonas, err := GeneratePersonas(ctx, spec, roundDir)
 	if err != nil {
-		fmt.Printf("  dynamic persona generation failed: %v (continuing with fixed personas)\n", err)
-		return personas
+		return nil, fmt.Errorf("dynamic persona generation: %w", err)
 	}
-	return append(personas, dynPersonas...)
+	return append(personas, dynPersonas...), nil
 }
 
 func writeDryRunPrompts(roundDir, spec string, round int, personas []Persona, priorFindings []ReviewOutput, codebaseCtx string) error {
