@@ -214,8 +214,8 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		return nil, fmt.Errorf("verify: %w", err)
 	}
 
-	// Write verifier result to the task's report directory.
-	reportDir := e.RunDir.ReportDir(task.TaskID)
+	// Write verifier result to the attempt-scoped report directory.
+	reportDir := e.RunDir.ReportDir(task.TaskID, report.AttemptID)
 	if err := state.WriteJSON(fmt.Sprintf("%s/verifier-result.json", reportDir), result); err != nil {
 		return nil, fmt.Errorf("write verifier result: %w", err)
 	}

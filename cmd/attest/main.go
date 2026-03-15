@@ -545,7 +545,7 @@ func cmdReport(args []string) error {
 		report.AttemptID = "manual-report"
 	}
 
-	reportPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	reportPath := filepath.Join(runDir.ReportDir(taskID, report.AttemptID), "completion-report.json")
 	if err := state.WriteJSON(reportPath, &report); err != nil {
 		return fmt.Errorf("write completion report: %w", err)
 	}
@@ -592,11 +592,10 @@ func cmdVerify(ctx context.Context, args []string) error {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	// Read completion report if it exists.
-	reportPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	// Read completion report: check task-level path (backward compat),
+	// then scan attempt subdirectories for the latest report.
 	var report state.CompletionReport
-	if err := state.ReadJSON(reportPath, &report); err != nil {
-		// Create a minimal report for verification testing.
+	if !readLatestCompletionReport(runDir, taskID, &report) {
 		report = state.CompletionReport{
 			TaskID:    taskID,
 			AttemptID: "manual-verify",
@@ -644,6 +643,29 @@ func cmdRetry(args []string) error {
 
 	fmt.Printf("Task requeued: %s\n", taskID)
 	return nil
+}
+
+func readLatestCompletionReport(runDir *state.RunDir, taskID string, report *state.CompletionReport) bool {
+	// Try task-level path first (backward compat).
+	taskPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	if state.ReadJSON(taskPath, report) == nil {
+		return true
+	}
+	// Scan attempt subdirectories.
+	entries, err := os.ReadDir(runDir.ReportDir(taskID))
+	if err != nil {
+		return false
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if !entries[i].IsDir() {
+			continue
+		}
+		attemptPath := filepath.Join(runDir.ReportDir(taskID, entries[i].Name()), "completion-report.json")
+		if state.ReadJSON(attemptPath, report) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {

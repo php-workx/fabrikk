@@ -480,7 +480,7 @@ func TestCmdReportImportsCompletionReportAndVerifyPasses(t *testing.T) {
 
 	runDir := state.NewRunDir(baseDir, "run-report")
 	var persisted state.CompletionReport
-	if err := state.ReadJSON(filepath.Join(runDir.ReportDir(task.TaskID), "completion-report.json"), &persisted); err != nil {
+	if err := state.ReadJSON(filepath.Join(runDir.ReportDir(task.TaskID, "attempt-report"), "completion-report.json"), &persisted); err != nil {
 		t.Fatalf("ReadJSON(persisted report): %v", err)
 	}
 	if persisted.AttemptID != "attempt-report" {

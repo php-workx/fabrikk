@@ -41,7 +41,20 @@ func WriteAtomic(path string, data []byte) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
 	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("fsync dir %s: %w", dir, err)
+	}
 	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	_ = d.Close()
+	return err
 }
 
 // WriteJSON marshals v to JSON and writes it atomically.

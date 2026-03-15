@@ -654,7 +654,7 @@ func TestVerifyTaskWritesVerifierResult(t *testing.T) {
 	}
 
 	var persisted state.VerifierResult
-	resultPath := filepath.Join(runDir.ReportDir(task.TaskID), "verifier-result.json")
+	resultPath := filepath.Join(runDir.ReportDir(task.TaskID, report.AttemptID), "verifier-result.json")
 	if err := state.ReadJSON(resultPath, &persisted); err != nil {
 		t.Fatalf("ReadJSON(verifier-result): %v", err)
 	}

@@ -90,8 +90,14 @@ func (d *RunDir) ClaimPath(taskID string) string {
 }
 
 // ReportDir returns the report directory for a specific task.
-func (d *RunDir) ReportDir(taskID string) string {
-	return filepath.Join(d.Root, "reports", taskID)
+// When attemptID is provided, returns an attempt-scoped subdirectory to prevent
+// retries from overwriting previous attempt artifacts.
+func (d *RunDir) ReportDir(taskID string, attemptID ...string) string {
+	base := filepath.Join(d.Root, "reports", taskID)
+	if len(attemptID) > 0 && attemptID[0] != "" {
+		return filepath.Join(base, attemptID[0])
+	}
+	return base
 }
 
 // AttemptPath returns the path to attempt.json for a specific task.
