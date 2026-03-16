@@ -17,11 +17,11 @@ default:
 
 # --- Quality gates ---
 
-# Pre-commit: fast local checks (~15s)
-pre-commit: fmt vet lint build-check mod-tidy actionlint gitleaks
+# Pre-commit: local checks + tests (~30s)
+pre-commit: fmt vet lint build-check mod-tidy actionlint gitleaks test
 
-# Full quality gate: pre-commit + tests + vuln (~45s)
-check: pre-commit test vuln
+# Full quality gate: pre-commit + vuln (~45s)
+check: pre-commit vuln
 
 # Full dev suite: quality gate + roam + sonar
 dev: check roam sonar
@@ -87,9 +87,9 @@ mod-tidy:
         if [ -f go.sum.bak ]; then mv go.sum.bak go.sum; elif [ -f go.sum ]; then rm go.sum; fi; \
         if [ "$$DIRTY" = "1" ]; then echo "go.mod/go.sum not tidy — run 'go mod tidy'" && exit 1; fi
 
-# Run all tests with race detector
+# Run all tests with race detector (no cache)
 test:
-    go test -race ./...
+    go test -race -count=1 ./...
 
 # Run tests with coverage report
 cover:
