@@ -271,15 +271,32 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 
 // cmdTechSpecReviewFromFile creates a temporary run, drafts the spec, and runs review in one step.
 func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags []string) error {
-	runDir := state.NewRunDir(wd, "placeholder")
-	eng := engine.New(runDir, wd)
-
-	// Prepare a minimal run from the spec file.
-	artifact, err := eng.Prepare(ctx, []string{fromPath})
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
+	runID := fmt.Sprintf("run-%d", time.Now().Unix())
+	runDir := state.NewRunDir(wd, runID)
+	if err := runDir.Init(); err != nil {
+		return fmt.Errorf("init run dir: %w", err)
 	}
-	fmt.Printf("Run created: %s (%d requirements)\n", artifact.RunID, len(artifact.Requirements))
+
+	// Write minimal run artifact (requirements are optional for council-only review).
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         runID,
+		SourceSpecs:   []state.SourceSpec{{Path: fromPath}},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		return fmt.Errorf("write artifact: %w", err)
+	}
+	if err := runDir.WriteStatus(&state.RunStatus{
+		RunID:              runID,
+		State:              state.RunAwaitingApproval,
+		LastTransitionTime: time.Now(),
+		TaskCountsByState:  map[string]int{},
+	}); err != nil {
+		return fmt.Errorf("write status: %w", err)
+	}
+
+	eng := engine.New(runDir, wd)
+	fmt.Printf("Run created: %s\n", runID)
 
 	// Draft the tech spec into the run.
 	if err := eng.DraftTechnicalSpec(ctx, fromPath); err != nil {
