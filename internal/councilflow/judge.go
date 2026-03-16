@@ -129,8 +129,18 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 		return nil, fmt.Errorf("judge edits produced an empty spec — aborting to prevent data loss")
 	}
 
-	if len(allFailed) > 0 {
-		fmt.Printf("  [round %d] judge: %d edits could not be applied\n", round, len(allFailed))
+	// Phase 3: Conflict resolution — use Opus to apply failed edits to the updated spec.
+	if len(allFailed) > 0 && len(conflictEdits(allEdits, allFailed)) > 0 {
+		resolved, resolveErr := resolveConflicts(ctx, updatedSpec, conflictEdits(allEdits, allFailed), outputDir, &cfg)
+		if resolveErr != nil {
+			fmt.Printf("  [round %d] judge: conflict resolution failed (%v)\n", round, resolveErr)
+		} else {
+			updatedSpec = resolved.spec
+			appliedCount += resolved.applied
+			allFailed = resolved.stillFailed
+			fmt.Printf("  [round %d] judge: conflict resolution — %d more applied, %d still failed\n",
+				round, resolved.applied, len(resolved.stillFailed))
+		}
 	}
 
 	combined := &ConsolidationResult{
@@ -157,6 +167,85 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 		round, appliedCount, len(allRejections), len(allFailed))
 
 	return combined, nil
+}
+
+type conflictResult struct {
+	spec        string
+	applied     int
+	stillFailed []string
+}
+
+// conflictEdits extracts the SpecEdit objects that correspond to failed edit IDs.
+func conflictEdits(allEdits []SpecEdit, failedIDs []string) []SpecEdit {
+	failed := make(map[string]bool, len(failedIDs))
+	for _, f := range failedIDs {
+		// Extract finding ID from "sec-004: find text not found in spec"
+		id := f
+		if idx := strings.Index(f, ":"); idx > 0 {
+			id = f[:idx]
+		}
+		failed[id] = true
+	}
+	var edits []SpecEdit
+	for i := range allEdits {
+		if failed[allEdits[i].FindingID] {
+			edits = append(edits, allEdits[i])
+		}
+	}
+	return edits
+}
+
+// resolveConflicts sends failed edits to Opus with the current (already-edited) spec
+// so it can apply them against the updated text.
+func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, outputDir string, cfg *JudgeConfig) (*conflictResult, error) {
+	var b strings.Builder
+	b.WriteString("# Conflict Resolution\n\n")
+	b.WriteString("The following edits could not be applied because the target text was already modified by other edits.\n")
+	b.WriteString("The spec below is the CURRENT version after other edits were applied.\n\n")
+	b.WriteString("For each edit, find the closest matching text in the current spec and produce an updated find/replace pair.\n")
+	b.WriteString("If the edit's intent is already addressed by existing changes, reject it.\n\n")
+	b.WriteString("## Failed Edits\n\n```json\n")
+	data, _ := json.MarshalIndent(edits, "", "  ")
+	b.Write(data)
+	b.WriteString("\n```\n\n## Current Specification\n\n")
+	b.WriteString(spec)
+	b.WriteString("\n\n## Output Format\n\nRespond with ONLY a JSON object:\n```json\n")
+	b.WriteString(`{"edits": [{"finding_id": "...", "persona_id": "...", "action": "...", "section": "...", "find": "...", "replace": "..."}], "rejected": [{"finding_id": "...", "persona_id": "...", "severity": "...", "description": "...", "rejection_reason": "already addressed by prior edit"}]}`)
+	b.WriteString("\n```\n")
+
+	promptPath := filepath.Join(outputDir, "judge-conflict-resolution.md")
+	_ = os.WriteFile(promptPath, []byte(b.String()), 0o644)
+
+	fmt.Printf("  [judge] resolving %d conflicts ...\n", len(edits))
+	output, err := invokeBackend(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
+	if err != nil {
+		return nil, err
+	}
+
+	parsed, err := parseJudgeRawOutput(output)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply resolved edits.
+	updatedSpec := spec
+	applied := 0
+	var stillFailed []string
+	for i := range parsed.Edits {
+		edit := &parsed.Edits[i]
+		if edit.Find == "" || edit.Replace == "" {
+			stillFailed = append(stillFailed, fmt.Sprintf("%s: empty find/replace after resolution", edit.FindingID))
+			continue
+		}
+		if !strings.Contains(updatedSpec, edit.Find) {
+			stillFailed = append(stillFailed, fmt.Sprintf("%s: still not found after resolution", edit.FindingID))
+			continue
+		}
+		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
+		applied++
+	}
+
+	return &conflictResult{spec: updatedSpec, applied: applied, stillFailed: stillFailed}, nil
 }
 
 func judgeOneReview(ctx context.Context, spec string, round int, review *ReviewOutput, outputDir string, cfg *JudgeConfig) judgeDecision {
