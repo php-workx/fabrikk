@@ -87,7 +87,7 @@
   - path: `.attest/runs/<run-id>/council/round-N/consolidation.json`
   - producer: Judge
   - consumer: Council orchestrator, human review
-  - schema: `ConsolidationResult` with `round`, `applied_count`, `rejected_count`, `failed_edits[]` (each with `finding_id`, `persona_id`, `original_find`, `error`), `drift_warnings[]` (each with `section`, `change_type`, `detail`). `ConsolidationResult` MUST NOT redundantly inline `rejection_log` — the canonical rejection data lives in `rejection-log.json`.
+  - schema: `ConsolidationResult` with `round`, `applied_count`, `rejected_count`, `failed_edits[]` (each with `finding_id`, `persona_id`, `original_find`, `error`), `drift_warnings[]` (each with `section`, `change_type`, `detail`), `rejection_log` (inline for programmatic access).
   - validation: Enum-valued fields across all schemas (`persona.type`, `persona.backend`, `review.verdict`, `review.confidence`, `finding.severity`) MUST be validated against a closed set of Go constants at parse time. Invalid enum values MUST produce `ErrInvalidReviewJSON`.
 
 - **Rejection log** (`rejection-log.json`):
@@ -95,7 +95,7 @@
   - producer: Judge (extracted from `ConsolidationResult.RejectionLog` as a convenience artifact for human review)
   - consumer: Human review
   - schema: `RejectionLog` with `round`, `rejections[]` (each with `finding_id`, `persona_id`, `severity`, `description`, `rejection_reason`, `dismissal_rationale`, `cross_reference`)
-  - note: This is the same data as the `rejection_log` field in `consolidation.json`, written separately for easier human inspection. `consolidation.json` is the authoritative source.
+  - note: Same data as `rejection_log` in `consolidation.json`, written separately for human inspection. Both are authoritative — `consolidation.json` for programmatic access, `rejection-log.json` for review.
 
 - **Versioned spec** (`technical-spec-vN.md`):
   - path: `.attest/runs/<run-id>/council/technical-spec-vN.md`
@@ -116,7 +116,7 @@
 ### 3.1 Schema validation requirements
 
 - Each JSON artifact (`personas.json`, `review-*.json`, `consolidation.json`, `rejection-log.json`) MUST have a corresponding Go struct with JSON tags that serves as the executable schema definition.
-- Artifact write functions MUST validate against these structs before writing (marshalling enforces required fields).
+- Artifact write functions MUST validate against these structs before writing. Go's `json.Marshal` serializes zero values by default — validation of required fields is the caller's responsibility (e.g., `ValidateReviewOutput` for reviews).
 - Cross-artifact invariants: every `finding_id` in `rejection-log.json` MUST reference an existing finding from a `review-*.json`; `spec-hash.txt` MUST match the SHA-256 of the spec bytes that were reviewed; `review-*.json` MUST have `schema_version: 3`.
 - Test fixtures MUST include golden JSON files for each artifact type to validate schema compliance in CI.
 - Cache key: computed over spec content, persona definition, backend identifier, model selection, prompt schema version, and review schema version. All inputs are concatenated in a deterministic order before hashing.

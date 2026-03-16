@@ -116,7 +116,10 @@ func parsePersonaGenerationOutput(raw string) ([]Persona, error) {
 	var wrapper struct {
 		Personas []Persona `json:"personas"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err == nil && len(wrapper.Personas) > 0 {
+	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err == nil {
+		if len(wrapper.Personas) == 0 {
+			return nil, fmt.Errorf("%w: model returned empty personas wrapper", ErrPersonaGenerationFailed)
+		}
 		for i := range wrapper.Personas {
 			wrapper.Personas[i].Type = PersonaDynamic
 			wrapper.Personas[i].GeneratedBy = "judge"
@@ -124,5 +127,5 @@ func parsePersonaGenerationOutput(raw string) ([]Persona, error) {
 		return wrapper.Personas, nil
 	}
 
-	return nil, fmt.Errorf("could not parse persona output (raw: %s)", truncateForError(raw, 200))
+	return nil, fmt.Errorf("%w: could not parse output (raw: %s)", ErrPersonaGenerationFailed, truncateForError(raw, 200))
 }
