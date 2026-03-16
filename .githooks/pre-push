@@ -1,6 +1,4 @@
 #!/usr/bin/env sh
 set -e
-repo_root=$(git rev-parse --show-toplevel)
-cd "$repo_root"
-# Pre-push: full quality gate — last safety net before CI
+cd "$(git rev-parse --show-toplevel)"
 just check

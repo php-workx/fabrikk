@@ -216,7 +216,7 @@ Pending
 	}
 
 	reviewOutput := captureStdout(t, func() {
-		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech"}); err != nil {
+		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech", "--structural-only"}); err != nil {
 			t.Fatalf("cmdTechSpec review: %v", err)
 		}
 	})
@@ -255,7 +255,7 @@ func TestCmdTechSpecReviewReportsMissingSections(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech-fail"}); err != nil {
+		if err := cmdTechSpec(context.Background(), []string{"review", "run-tech-fail", "--structural-only"}); err != nil {
 			t.Fatalf("cmdTechSpec review: %v", err)
 		}
 	})
@@ -480,7 +480,7 @@ func TestCmdReportImportsCompletionReportAndVerifyPasses(t *testing.T) {
 
 	runDir := state.NewRunDir(baseDir, "run-report")
 	var persisted state.CompletionReport
-	if err := state.ReadJSON(filepath.Join(runDir.ReportDir(task.TaskID), "completion-report.json"), &persisted); err != nil {
+	if err := state.ReadJSON(filepath.Join(runDir.ReportDir(task.TaskID, "attempt-report"), "completion-report.json"), &persisted); err != nil {
 		t.Fatalf("ReadJSON(persisted report): %v", err)
 	}
 	if persisted.AttemptID != "attempt-report" {

@@ -11,6 +11,11 @@ import (
 	"github.com/runger/attest/internal/state"
 )
 
+const (
+	sha256Prefix      = "sha256:"
+	graphFindingFmtID = "epr-graph-%03d"
+)
+
 // DraftExecutionPlan derives a run-scoped execution plan from an approved technical spec.
 func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, error) {
 	_ = ctx
@@ -182,7 +187,7 @@ func (e *Engine) ApproveExecutionPlan(ctx context.Context, approvedBy string) (*
 		RunID:         plan.RunID,
 		ArtifactType:  "execution_plan_approval",
 		ArtifactPath:  "execution-plan.json",
-		ArtifactHash:  "sha256:" + state.SHA256Bytes(data),
+		ArtifactHash:  sha256Prefix + state.SHA256Bytes(data),
 		Status:        state.ArtifactApproved,
 		ApprovedBy:    approvedBy,
 		ApprovedAt:    time.Now(),
@@ -221,7 +226,7 @@ func validateSliceIDs(slices []state.ExecutionSlice, review *state.ExecutionPlan
 		if idSet[id] {
 			review.Status = state.ReviewFail
 			review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-				FindingID:       fmt.Sprintf("epr-graph-%03d", len(review.BlockingFindings)+1),
+				FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
 				Severity:        "high",
 				Category:        "duplicate_slice_id",
 				SliceID:         id,
@@ -235,7 +240,7 @@ func validateSliceIDs(slices []state.ExecutionSlice, review *state.ExecutionPlan
 		if existing, collision := lowerSet[lower]; collision && existing != id {
 			review.Status = state.ReviewFail
 			review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-				FindingID:       fmt.Sprintf("epr-graph-%03d", len(review.BlockingFindings)+1),
+				FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
 				Severity:        "high",
 				Category:        "case_colliding_slice_id",
 				SliceID:         id,
@@ -256,7 +261,7 @@ func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, rev
 			if dep == id {
 				review.Status = state.ReviewFail
 				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-					FindingID:       fmt.Sprintf("epr-graph-%03d", len(review.BlockingFindings)+1),
+					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
 					Severity:        "high",
 					Category:        "self_dependency",
 					SliceID:         id,
@@ -268,7 +273,7 @@ func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, rev
 			if !idSet[dep] {
 				review.Status = state.ReviewFail
 				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-					FindingID:       fmt.Sprintf("epr-graph-%03d", len(review.BlockingFindings)+1),
+					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
 					Severity:        "high",
 					Category:        "unknown_dependency",
 					SliceID:         id,
@@ -304,6 +309,8 @@ func detectSliceCycles(slices []state.ExecutionSlice, adj map[string][]string, r
 				if dfs(dep) {
 					return true
 				}
+			default:
+				// colorBlack — already fully explored, skip.
 			}
 		}
 		color[node] = colorBlack
@@ -316,7 +323,7 @@ func detectSliceCycles(slices []state.ExecutionSlice, adj map[string][]string, r
 			if dfs(id) {
 				review.Status = state.ReviewFail
 				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-					FindingID:       fmt.Sprintf("epr-graph-%03d", len(review.BlockingFindings)+1),
+					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
 					Severity:        "high",
 					Category:        "dependency_cycle",
 					SliceID:         cycleNode,
@@ -448,7 +455,7 @@ func readArtifactHash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "sha256:" + state.SHA256Bytes(data), nil
+	return sha256Prefix + state.SHA256Bytes(data), nil
 }
 
 func (e *Engine) readApprovedTechnicalSpecHash() (string, error) {
@@ -480,7 +487,7 @@ func (e *Engine) readExecutionPlanWithHash() (*state.ExecutionPlan, string, erro
 	if err != nil {
 		return nil, "", fmt.Errorf("read execution plan: %w", err)
 	}
-	return plan, "sha256:" + state.SHA256Bytes(data), nil
+	return plan, sha256Prefix + state.SHA256Bytes(data), nil
 }
 
 func (e *Engine) readApprovedExecutionPlan() (*state.ExecutionPlan, error) {

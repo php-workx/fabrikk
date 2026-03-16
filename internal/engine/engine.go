@@ -16,7 +16,13 @@ import (
 	"github.com/runger/attest/internal/verifier"
 )
 
-const errReadArtifact = "read artifact: %w"
+const (
+	errReadArtifact  = "read artifact: %w"
+	errReadTasks     = "read tasks: %w"
+	errWriteTasks    = "write tasks: %w"
+	errRefreshStatus = "refresh status: %w"
+	errSyncCoverage  = "sync requirement coverage: %w"
+)
 
 // Engine is the Phase 1 run engine (spec section 18.3).
 // Serial execution, foreground, no council, no detached mode.
@@ -134,7 +140,7 @@ func (e *Engine) Approve(ctx context.Context) error {
 	})
 
 	if err := e.refreshRunStatus(state.RunApproved, "approved", nil); err != nil {
-		return fmt.Errorf("refresh status: %w", err)
+		return fmt.Errorf(errRefreshStatus, err)
 	}
 
 	return nil
@@ -176,7 +182,7 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 
 	// Write compiled tasks and coverage.
 	if err := e.RunDir.WriteTasks(result.Tasks); err != nil {
-		return nil, fmt.Errorf("write tasks: %w", err)
+		return nil, fmt.Errorf(errWriteTasks, err)
 	}
 	if err := e.RunDir.WriteCoverage(result.Coverage); err != nil {
 		return nil, fmt.Errorf("write coverage: %w", err)
@@ -190,7 +196,7 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 	})
 
 	if err := e.refreshRunStatus(state.RunRunning, "dispatch_ready", nil); err != nil {
-		return nil, fmt.Errorf("refresh status: %w", err)
+		return nil, fmt.Errorf(errRefreshStatus, err)
 	}
 
 	return result, nil
@@ -198,6 +204,10 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 
 // VerifyTask runs the deterministic verification pipeline for a single task (spec section 11.3).
 func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state.CompletionReport) (*state.VerifierResult, error) {
+	if report == nil || report.AttemptID == "" {
+		return nil, fmt.Errorf("verify task: attempt_id is required for per-attempt report isolation")
+	}
+
 	artifact, err := e.RunDir.ReadArtifact()
 	if err != nil {
 		return nil, fmt.Errorf(errReadArtifact, err)
@@ -208,8 +218,8 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		return nil, fmt.Errorf("verify: %w", err)
 	}
 
-	// Write verifier result to the task's report directory.
-	reportDir := e.RunDir.ReportDir(task.TaskID)
+	// Write verifier result to the attempt-scoped report directory.
+	reportDir := e.RunDir.ReportDir(task.TaskID, report.AttemptID)
 	if err := state.WriteJSON(fmt.Sprintf("%s/verifier-result.json", reportDir), result); err != nil {
 		return nil, fmt.Errorf("write verifier result: %w", err)
 	}
@@ -224,7 +234,7 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		return nil, fmt.Errorf("persist task verification outcome: %w", err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
-		return nil, fmt.Errorf("sync requirement coverage: %w", err)
+		return nil, fmt.Errorf(errSyncCoverage, err)
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{
@@ -244,7 +254,7 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		}
 	}
 	if err := e.refreshRunStatus(nextState, "verification", blockers); err != nil {
-		return nil, fmt.Errorf("refresh status: %w", err)
+		return nil, fmt.Errorf(errRefreshStatus, err)
 	}
 
 	return result, nil
@@ -254,7 +264,7 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 func (e *Engine) RetryTask(taskID string) error {
 	tasks, err := e.RunDir.ReadTasks()
 	if err != nil {
-		return fmt.Errorf("read tasks: %w", err)
+		return fmt.Errorf(errReadTasks, err)
 	}
 
 	found := false
@@ -277,10 +287,10 @@ func (e *Engine) RetryTask(taskID string) error {
 	}
 
 	if err := e.RunDir.WriteTasks(tasks); err != nil {
-		return fmt.Errorf("write tasks: %w", err)
+		return fmt.Errorf(errWriteTasks, err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
-		return fmt.Errorf("sync requirement coverage: %w", err)
+		return fmt.Errorf(errSyncCoverage, err)
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{
@@ -292,7 +302,7 @@ func (e *Engine) RetryTask(taskID string) error {
 	})
 
 	if err := e.refreshRunStatus(state.RunRunning, "dispatch_ready", nil); err != nil {
-		return fmt.Errorf("refresh status: %w", err)
+		return fmt.Errorf(errRefreshStatus, err)
 	}
 
 	return nil
@@ -318,7 +328,7 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 
 	tasks, err := e.RunDir.ReadTasks()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read tasks: %w", err)
+		return nil, fmt.Errorf(errReadTasks, err)
 	}
 
 	inferred := inferredRunStatus(status, artifact, tasks)
@@ -329,7 +339,7 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 		return status, nil
 	}
 	if err := e.refreshRunStatus(inferred.state, inferred.gate, inferred.blockers); err != nil {
-		return nil, fmt.Errorf("refresh status: %w", err)
+		return nil, fmt.Errorf(errRefreshStatus, err)
 	}
 	return e.RunDir.ReadStatus()
 }
@@ -338,7 +348,7 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, reason string) error {
 	tasks, err := e.RunDir.ReadTasks()
 	if err != nil {
-		return fmt.Errorf("read tasks: %w", err)
+		return fmt.Errorf(errReadTasks, err)
 	}
 
 	found := false
@@ -358,7 +368,7 @@ func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, rea
 		return err
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
-		return fmt.Errorf("sync requirement coverage: %w", err)
+		return fmt.Errorf(errSyncCoverage, err)
 	}
 	return nil
 }
@@ -467,7 +477,7 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	tasks, err := e.RunDir.ReadTasks()
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read tasks: %w", err)
+			return fmt.Errorf(errReadTasks, err)
 		}
 		tasks = []state.Task{*task}
 	}
@@ -492,7 +502,7 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	}
 
 	if err := e.RunDir.WriteTasks(tasks); err != nil {
-		return fmt.Errorf("write tasks: %w", err)
+		return fmt.Errorf(errWriteTasks, err)
 	}
 	return nil
 }
@@ -609,7 +619,7 @@ func (e *Engine) syncCoverageFromTasks() error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("read tasks: %w", err)
+		return fmt.Errorf(errReadTasks, err)
 	}
 
 	taskStates := make(map[string]state.TaskStatus, len(tasks))
@@ -649,6 +659,9 @@ func deriveCoverageStatus(cov *state.RequirementCoverage, taskStates map[string]
 			hasInProgress = true
 		case state.TaskBlocked, state.TaskFailed:
 			hasBlocked = true
+		default:
+			// Unknown status — treat as in-progress to avoid false negatives.
+			hasInProgress = true
 		}
 	}
 	if hasInProgress {

@@ -1,5 +1,5 @@
 # attest project quality gate
-# This is the single entry point for "my code is clean" (spec section 11.2)
+# Single source of truth for "my code is clean" — hooks and CI delegate here.
 
 # Pinned tool versions — keep in sync with CI (.github/workflows/ci.yml)
 golangci_lint_ver := "v2.11.3"
@@ -15,17 +15,24 @@ ldflags := "-X main.Version=" + version + " -X main.GitCommit=" + commit + " -X 
 default:
     @just --list
 
-# Run all quality checks (the quality gate)
-check: vet lint actionlint fmt mod-tidy test build-check
+# --- Quality gates ---
 
-# Run full dev suite: quality gate + vulnerability scan + roam + sonar
-dev: check vuln roam sonar
+# Pre-commit: local checks + tests (~30s)
+pre-commit: fmt vet lint build-check mod-tidy actionlint gitleaks test
+
+# Full quality gate: pre-commit + vuln (~45s)
+check: pre-commit vuln
+
+# Full dev suite: quality gate + roam + sonar
+dev: check roam sonar
     @echo "All checks passed!"
 
-# Build the attest binary with version info
-build:
-    mkdir -p bin
-    go build -ldflags '{{ldflags}}' -o bin/attest ./cmd/attest
+# --- Static analysis ---
+
+# Check formatting with gofumpt (detect-only, no auto-fix)
+fmt:
+    @command -v gofumpt >/dev/null 2>&1 || (echo "gofumpt not installed (run: just install-dev)" && exit 1)
+    @test -z "$(gofumpt --extra -l .)" || (echo "gofumpt: unformatted files:" && gofumpt --extra -l . && exit 1)
 
 # Go vet
 vet:
@@ -33,19 +40,41 @@ vet:
 
 # Lint with golangci-lint
 lint:
+    @command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint not installed (run: just install-dev)" && exit 1)
     golangci-lint run
 
 # Lint GitHub Actions workflows
 actionlint:
-    @command -v actionlint >/dev/null 2>&1 || (echo "actionlint not installed (run: just install-dev)" && exit 1)
-    actionlint .github/workflows/*.yml
+    @if [ -d .github/workflows ]; then \
+        command -v actionlint >/dev/null 2>&1 || (echo "actionlint not installed (run: just install-dev)" && exit 1); \
+        actionlint .github/workflows/*.yml; \
+    fi
 
-# Check formatting with gofumpt (fails if any file needs formatting)
-fmt:
-    @command -v gofumpt >/dev/null 2>&1 || (echo "gofumpt not installed (run: just install-dev)" && exit 1)
-    @test -z "$(gofumpt --extra -l .)" || (echo "gofumpt: unformatted files:" && gofumpt --extra -l . && exit 1)
+# --- Security ---
 
-# Verify go.mod and go.sum are tidy
+# Scan for leaked secrets
+gitleaks:
+    @if command -v gitleaks >/dev/null 2>&1; then \
+        gitleaks git --no-banner; \
+    else \
+        echo "warning: gitleaks not installed, skipping secret scan"; \
+    fi
+
+# Scan for known vulnerabilities in dependencies
+vuln:
+    @if command -v govulncheck >/dev/null 2>&1; then \
+        govulncheck ./...; \
+    else \
+        echo "govulncheck not installed, skipping (run: just install-dev)"; \
+    fi
+
+# --- Testing ---
+
+# Verify the project compiles (fast, no binary output)
+build-check:
+    go build ./...
+
+# Verify go.mod and go.sum are tidy (detect-only)
 mod-tidy:
     @cp go.mod go.mod.bak
     @if [ -f go.sum ]; then cp go.sum go.sum.bak; fi
@@ -58,13 +87,9 @@ mod-tidy:
         if [ -f go.sum.bak ]; then mv go.sum.bak go.sum; elif [ -f go.sum ]; then rm go.sum; fi; \
         if [ "$$DIRTY" = "1" ]; then echo "go.mod/go.sum not tidy — run 'go mod tidy'" && exit 1; fi
 
-# Verify the project compiles (fast, no binary output)
-build-check:
-    go build ./...
-
-# Run all tests with race detector
+# Run all tests with race detector (no cache)
 test:
-    go test -race ./...
+    go test -race -count=1 ./...
 
 # Run tests with coverage report
 cover:
@@ -72,13 +97,7 @@ cover:
     go tool cover -html=coverage.out -o coverage.html
     @echo "Coverage report: coverage.html"
 
-# Scan for known vulnerabilities
-vuln:
-    @if command -v govulncheck >/dev/null 2>&1; then \
-        govulncheck ./...; \
-    else \
-        echo "govulncheck not installed, skipping (run: just install-dev)"; \
-    fi
+# --- External analysis ---
 
 # Run roam architectural checks (optional, skip if not installed)
 roam:
@@ -95,14 +114,27 @@ sonar:
     elif [ ! -f .env ]; then \
         echo ".env missing, skipping sonar scan"; \
     else \
-        TOKEN=$(grep -E '^SONAR_TOKEN=[A-Za-z0-9_]+$$' .env | cut -d= -f2); \
-        if [ -z "$$TOKEN" ]; then \
+        TOKEN=$(grep -E '^SONAR_TOKEN=[A-Za-z0-9_]+$' .env | cut -d= -f2); \
+        if [ -z "$TOKEN" ]; then \
             echo "error: SONAR_TOKEN not found or invalid in .env"; exit 1; \
         fi; \
-        SONAR_TOKEN="$$TOKEN" sonar-scanner; \
+        SONAR_TOKEN="$TOKEN" sonar-scanner -Dsonar.qualitygate.wait=true; \
     fi
 
-# Format all Go files in-place
+# --- Build targets ---
+
+# Build the attest binary with version info
+build:
+    mkdir -p bin
+    go build -ldflags '{{ldflags}}' -o bin/attest ./cmd/attest
+
+# Install attest to $GOPATH/bin (or $GOBIN)
+install:
+    go install -ldflags '{{ldflags}}' ./cmd/attest
+
+# --- Setup ---
+
+# Format all Go files in-place (use when `just fmt` fails)
 format:
     gofumpt --extra -w .
 
@@ -114,7 +146,7 @@ setup: install-dev
 # Install required development tools (pinned versions)
 install-dev:
     @echo "Installing Go tools..."
-    go install github.com/golangci/golangci-lint/cmd/golangci-lint@{{golangci_lint_ver}}
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{golangci_lint_ver}}
     go install mvdan.cc/gofumpt@{{gofumpt_ver}}
     go install golang.org/x/vuln/cmd/govulncheck@{{govulncheck_ver}}
     go install github.com/rhysd/actionlint/cmd/actionlint@{{actionlint_ver}}

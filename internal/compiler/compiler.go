@@ -21,6 +21,8 @@ const (
 	riskLow    = "low"
 	riskMedium = "medium"
 	riskHigh   = "high"
+
+	defaultOwnedPath = "internal/engine"
 )
 
 // Compile produces a deterministic task graph from an approved run artifact (spec section 7.1).
@@ -310,6 +312,8 @@ func riskForGroup(group []state.Requirement) string {
 			return riskHigh
 		case riskMedium:
 			risk = riskMedium
+		default:
+			// riskLow — no change needed.
 		}
 	}
 	return risk
@@ -419,7 +423,7 @@ func inferEvidence(req state.Requirement) []string {
 func scopeForGroup(group []state.Requirement) state.TaskScope {
 	owned := inferOwnedPaths(joinRequirementText(group))
 	if len(owned) == 0 {
-		owned = []string{"internal/engine"}
+		owned = []string{defaultOwnedPath}
 	}
 	return state.TaskScope{
 		OwnedPaths:    owned,
@@ -430,7 +434,7 @@ func scopeForGroup(group []state.Requirement) state.TaskScope {
 func scopeForSlice(slice *state.ExecutionSlice) state.TaskScope {
 	owned := append([]string(nil), slice.OwnedPaths...)
 	if len(owned) == 0 {
-		owned = []string{"internal/engine"}
+		owned = []string{defaultOwnedPath}
 	}
 	return state.TaskScope{
 		OwnedPaths:    owned,
@@ -504,19 +508,19 @@ func inferOwnedPaths(text string) []string {
 		add("cmd/attest")
 	}
 	if containsAny(text, "ingest", "spec", "artifact", "requirement", "compile", "task graph") {
-		add("internal/compiler", "internal/engine")
+		add("internal/compiler", defaultOwnedPath)
 	}
 	if containsAny(text, "verify", "verification", "evidence", "quality gate") {
-		add("internal/verifier", "internal/engine")
+		add("internal/verifier", defaultOwnedPath)
 	}
 	if containsAny(text, "persist", "state", "session", "resume", "reattach", "claim", "wave") {
-		add("internal/state", "internal/engine")
+		add("internal/state", defaultOwnedPath)
 	}
 	if containsAny(text, "codex", "gemini", "opus", "council", "reviewer", "review") {
 		add("internal/councilflow")
 	}
 	if containsAny(text, "routing", "model tier", "sonnet", "haiku", "opus") {
-		add("internal/engine")
+		add(defaultOwnedPath)
 	}
 
 	owned := make([]string, 0, len(seen))

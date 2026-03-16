@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/engine"
 	"github.com/runger/attest/internal/state"
 )
@@ -81,6 +82,8 @@ commands:
   prepare --spec <path> [--spec <path>...]   Ingest specs and create a draft run
   review <run-id>                            Show the run artifact for review
   tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
+                                              review --from <path>  (one-step council review)
+                                              review flags: --structural-only --dry-run --force --round N
   plan <draft|review|approve> ...            Manage run-scoped execution plans
   approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
@@ -183,16 +186,57 @@ func cmdReview(_ context.Context, args []string) error {
 }
 
 func cmdTechSpec(ctx context.Context, args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> <run-id> [--from <path>]")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> [run-id] [--from <path>] [--council] [--force] [--round N]")
 	}
 
 	action := args[0]
-	runID := args[1]
+
+	// Parse --from from remaining args (needed for both draft and review shortcut).
+	var fromPath, runID string
+	var remaining []string
+	// Flags that consume the next arg as their value.
+	valuedFlags := map[string]bool{"--from": true, "--round": true}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--from" {
+			i++
+			if i < len(args) {
+				fromPath = args[i]
+			}
+			continue
+		}
+		if valuedFlags[arg] {
+			remaining = append(remaining, arg)
+			i++
+			if i < len(args) {
+				remaining = append(remaining, args[i])
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			remaining = append(remaining, arg)
+			continue
+		}
+		if runID == "" {
+			runID = arg
+			continue
+		}
+		remaining = append(remaining, arg)
+	}
 
 	wd, err := workDir()
 	if err != nil {
 		return err
+	}
+
+	// Shortcut: "review --from <path>" without a run-id creates a temporary run.
+	if action == commandReview && runID == "" && fromPath != "" {
+		return cmdTechSpecReviewFromFile(ctx, wd, fromPath, remaining)
+	}
+
+	if runID == "" {
+		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> <run-id> [--from <path>]")
 	}
 
 	runDir := state.NewRunDir(wd, runID)
@@ -200,13 +244,6 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 
 	switch action {
 	case "draft":
-		fromPath := ""
-		for i := 2; i < len(args); i++ {
-			if args[i] == "--from" && i+1 < len(args) {
-				fromPath = args[i+1]
-				i++
-			}
-		}
 		if fromPath == "" {
 			fromPath, err = detectTechnicalSpecSource(wd)
 			if err != nil {
@@ -219,13 +256,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 		fmt.Printf("Technical spec recorded: %s\n", runDir.TechnicalSpec())
 		return nil
 	case commandReview:
-		review, err := eng.ReviewTechnicalSpec(ctx)
-		if err != nil {
-			return err
-		}
-		data, _ := json.MarshalIndent(review, "", "  ")
-		fmt.Println(string(data))
-		return nil
+		return cmdTechSpecReview(ctx, eng, remaining)
 	case commandApprove:
 		approval, err := eng.ApproveTechnicalSpec(ctx, "user")
 		if err != nil {
@@ -234,8 +265,104 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 		fmt.Printf("Technical spec approved: %s (%s)\n", approval.ArtifactPath, approval.ArtifactHash)
 		return nil
 	default:
-		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> <run-id> [--from <path>]")
+		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> [run-id] [--from <path>]")
 	}
+}
+
+// cmdTechSpecReviewFromFile creates a temporary run, drafts the spec, and runs review in one step.
+func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags []string) error {
+	runID := fmt.Sprintf("run-%d", time.Now().Unix())
+	runDir := state.NewRunDir(wd, runID)
+	if err := runDir.Init(); err != nil {
+		return fmt.Errorf("init run dir: %w", err)
+	}
+
+	// Write minimal run artifact (requirements are optional for council-only review).
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         runID,
+		SourceSpecs:   []state.SourceSpec{{Path: fromPath}},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		return fmt.Errorf("write artifact: %w", err)
+	}
+	if err := runDir.WriteStatus(&state.RunStatus{
+		RunID:              runID,
+		State:              state.RunAwaitingApproval,
+		LastTransitionTime: time.Now(),
+		TaskCountsByState:  map[string]int{},
+	}); err != nil {
+		return fmt.Errorf("write status: %w", err)
+	}
+
+	eng := engine.New(runDir, wd)
+	fmt.Printf("Run created: %s\n", runID)
+
+	// Draft the tech spec into the run.
+	if err := eng.DraftTechnicalSpec(ctx, fromPath); err != nil {
+		return fmt.Errorf("draft: %w", err)
+	}
+
+	// Run the review.
+	return cmdTechSpecReview(ctx, eng, flags)
+}
+
+func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) error {
+	structuralOnly := false
+	dryRun := false
+	force := false
+	rounds := 2
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case "--structural-only":
+			structuralOnly = true
+		case "--council":
+			// Accepted for backward compat but council is now the default.
+		case "--dry-run":
+			dryRun = true
+		case "--force":
+			force = true
+		case "--round":
+			if i+1 < len(flags) {
+				_, _ = fmt.Sscanf(flags[i+1], "%d", &rounds)
+				i++
+			}
+		}
+	}
+
+	// Structural review always runs first (pre-flight).
+	review, err := eng.ReviewTechnicalSpec(ctx)
+	if err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(review, "", "  ")
+	fmt.Println(string(data))
+
+	if structuralOnly {
+		return nil
+	}
+	if review.Status != state.ReviewPass {
+		return fmt.Errorf("structural review failed — fix before running council")
+	}
+
+	cfg := councilflow.DefaultConfig()
+	cfg.Rounds = rounds
+	cfg.DryRun = dryRun
+	cfg.Force = force
+	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nCouncil verdict: %s\n", result.OverallVerdict)
+	for i := range result.Rounds {
+		round := &result.Rounds[i]
+		for j := range round.Reviews {
+			r := &round.Reviews[j]
+			fmt.Printf("  [round %d] %s: %s (%d findings)\n", round.Round, r.PersonaID, r.Verdict, len(r.Findings))
+		}
+	}
+	return nil
 }
 
 func cmdPlan(ctx context.Context, args []string) error {
@@ -438,7 +565,7 @@ func cmdReport(args []string) error {
 		report.AttemptID = "manual-report"
 	}
 
-	reportPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	reportPath := filepath.Join(runDir.ReportDir(taskID, report.AttemptID), "completion-report.json")
 	if err := state.WriteJSON(reportPath, &report); err != nil {
 		return fmt.Errorf("write completion report: %w", err)
 	}
@@ -485,11 +612,10 @@ func cmdVerify(ctx context.Context, args []string) error {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	// Read completion report if it exists.
-	reportPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	// Read completion report: check task-level path (backward compat),
+	// then scan attempt subdirectories for the latest report.
 	var report state.CompletionReport
-	if err := state.ReadJSON(reportPath, &report); err != nil {
-		// Create a minimal report for verification testing.
+	if !readLatestCompletionReport(runDir, taskID, &report) {
 		report = state.CompletionReport{
 			TaskID:    taskID,
 			AttemptID: "manual-verify",
@@ -537,6 +663,29 @@ func cmdRetry(args []string) error {
 
 	fmt.Printf("Task requeued: %s\n", taskID)
 	return nil
+}
+
+func readLatestCompletionReport(runDir *state.RunDir, taskID string, report *state.CompletionReport) bool {
+	// Try task-level path first (backward compat).
+	taskPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	if state.ReadJSON(taskPath, report) == nil {
+		return true
+	}
+	// Scan attempt subdirectories.
+	entries, err := os.ReadDir(runDir.ReportDir(taskID))
+	if err != nil {
+		return false
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if !entries[i].IsDir() {
+			continue
+		}
+		attemptPath := filepath.Join(runDir.ReportDir(taskID, entries[i].Name()), "completion-report.json")
+		if state.ReadJSON(attemptPath, report) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {

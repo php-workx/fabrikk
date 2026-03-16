@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/state"
 )
 
@@ -127,7 +129,7 @@ func (e *Engine) ReviewTechnicalSpec(ctx context.Context) (*state.TechnicalSpecR
 		SchemaVersion:     "0.1",
 		RunID:             filepathBase(e.RunDir.Root),
 		ArtifactType:      "technical_spec_review",
-		TechnicalSpecHash: "sha256:" + state.SHA256Bytes(data),
+		TechnicalSpecHash: sha256Prefix + state.SHA256Bytes(data),
 		Status:            state.ReviewPass,
 		Summary:           "Technical spec contains all required sections.",
 		ReviewedAt:        time.Now(),
@@ -164,6 +166,41 @@ func (e *Engine) ReviewTechnicalSpec(ctx context.Context) (*state.TechnicalSpecR
 	return review, nil
 }
 
+// CouncilReviewTechnicalSpec runs the multi-persona council review pipeline.
+// Structural checks must pass first (call ReviewTechnicalSpec before this).
+func (e *Engine) CouncilReviewTechnicalSpec(ctx context.Context, cfg councilflow.CouncilConfig) (*councilflow.CouncilResult, error) {
+	data, err := e.RunDir.ReadTechnicalSpec()
+	if err != nil {
+		return nil, fmt.Errorf("read technical spec: %w", err)
+	}
+
+	councilDir := filepath.Join(e.RunDir.Root, "council")
+	result, err := councilflow.RunCouncil(ctx, string(data), councilDir, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("council review: %w", err)
+	}
+
+	// Update the active technical spec with the council-improved version,
+	// then re-run structural review to refresh the stored hash so approval works.
+	if result.FinalSpec != "" {
+		if err := e.RunDir.WriteTechnicalSpec([]byte(result.FinalSpec)); err != nil {
+			return nil, fmt.Errorf("update technical spec: %w", err)
+		}
+		if _, err := e.ReviewTechnicalSpec(ctx); err != nil {
+			return nil, fmt.Errorf("refresh structural review after council: %w", err)
+		}
+	}
+
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "technical_spec_council_reviewed",
+		RunID:     filepathBase(e.RunDir.Root),
+		Detail:    fmt.Sprintf("verdict=%s rounds=%d", result.OverallVerdict, len(result.Rounds)),
+	})
+
+	return result, nil
+}
+
 // ApproveTechnicalSpec records explicit approval for the run-scoped technical spec.
 func (e *Engine) ApproveTechnicalSpec(ctx context.Context, approvedBy string) (*state.ArtifactApproval, error) {
 	_ = ctx
@@ -180,9 +217,15 @@ func (e *Engine) ApproveTechnicalSpec(ctx context.Context, approvedBy string) (*
 	if err != nil {
 		return nil, fmt.Errorf("read technical spec: %w", err)
 	}
-	currentHash := "sha256:" + state.SHA256Bytes(data)
+	currentHash := sha256Prefix + state.SHA256Bytes(data)
 	if review.TechnicalSpecHash != currentHash {
 		return nil, fmt.Errorf("technical spec review hash does not match current artifact")
+	}
+
+	// Block approval if the spec contains unresolved @@ annotations.
+	annotations := councilflow.ParseAnnotations(string(data))
+	if len(annotations) > 0 {
+		return nil, fmt.Errorf("cannot approve: %s", councilflow.FormatAnnotationsAsFindings(annotations))
 	}
 
 	approval := &state.ArtifactApproval{
