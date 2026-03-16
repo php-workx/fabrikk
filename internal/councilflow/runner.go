@@ -91,6 +91,11 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
+	// Validate persona uniqueness.
+	if err := validatePersonaUniqueness(personas); err != nil {
+		return nil, err
+	}
+
 	if err := writeJSON(filepath.Join(r.OutputDir, "personas.json"), personas); err != nil {
 		return nil, fmt.Errorf("write personas: %w", err)
 	}
@@ -267,6 +272,17 @@ func verdictSeverity(v Verdict) int {
 	}
 }
 
+func validatePersonaUniqueness(personas []Persona) error {
+	seen := make(map[string]bool, len(personas))
+	for i := range personas {
+		if seen[personas[i].PersonaID] {
+			return fmt.Errorf("%w: duplicate persona_id %q", ErrInvalidPersonaConfig, personas[i].PersonaID)
+		}
+		seen[personas[i].PersonaID] = true
+	}
+	return nil
+}
+
 func matchesSpecHash(path, currentHash string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -332,7 +348,10 @@ func parseReviewOutput(raw string) (*ReviewOutput, error) {
 
 	var review ReviewOutput
 	if err := json.Unmarshal([]byte(jsonStr), &review); err != nil {
-		return nil, fmt.Errorf("unmarshal review output: %w (raw: %s)", err, truncateForError(raw, 200))
+		return nil, fmt.Errorf("%w: %v (raw: %s)", ErrInvalidReviewJSON, err, truncateForError(raw, 200))
+	}
+	if err := ValidateReviewOutput(&review); err != nil {
+		return nil, err
 	}
 	review.ReviewedAt = time.Now()
 	return &review, nil

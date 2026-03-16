@@ -1,6 +1,9 @@
 package councilflow
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // PersonaType distinguishes fixed personas from dynamically generated ones.
 type PersonaType string
@@ -92,6 +95,32 @@ type Rejection struct {
 type RejectionLog struct {
 	Round      int         `json:"round"`
 	Rejections []Rejection `json:"rejections"`
+}
+
+// ValidVerdicts is the closed set of allowed verdict values.
+var ValidVerdicts = map[Verdict]bool{VerdictPass: true, VerdictWarn: true, VerdictFail: true}
+
+// ValidConfidences is the closed set of allowed confidence values.
+var ValidConfidences = map[string]bool{ConfidenceHigh: true, ConfidenceMedium: true, ConfidenceLow: true}
+
+// ValidSeverities is the closed set of allowed finding severity values.
+var ValidSeverities = map[string]bool{"critical": true, "significant": true, "minor": true}
+
+// ValidateReviewOutput checks that enum fields contain valid values.
+func ValidateReviewOutput(r *ReviewOutput) error {
+	if !ValidVerdicts[r.Verdict] {
+		return fmt.Errorf("%w: verdict %q not in {PASS, WARN, FAIL}", ErrInvalidReviewJSON, r.Verdict)
+	}
+	if r.Confidence != "" && !ValidConfidences[r.Confidence] {
+		return fmt.Errorf("%w: confidence %q not in {HIGH, MEDIUM, LOW}", ErrInvalidReviewJSON, r.Confidence)
+	}
+	for i := range r.Findings {
+		if !ValidSeverities[r.Findings[i].Severity] {
+			return fmt.Errorf("%w: finding %s severity %q not in {critical, significant, minor}",
+				ErrInvalidReviewJSON, r.Findings[i].FindingID, r.Findings[i].Severity)
+		}
+	}
+	return nil
 }
 
 // ComputeConsensus derives a round verdict from individual review verdicts.

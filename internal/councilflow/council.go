@@ -69,6 +69,10 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 			return nil, fmt.Errorf("round %d reviews: %w", round, err)
 		}
 
+		if len(roundResult.Reviews) == 0 {
+			return nil, fmt.Errorf("round %d: %w: all reviewers failed", round, ErrEmptyReview)
+		}
+
 		result.Rounds = append(result.Rounds, *roundResult)
 		priorFindings = append(priorFindings, roundResult.Reviews...)
 
