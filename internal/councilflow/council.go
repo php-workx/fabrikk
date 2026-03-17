@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -86,8 +87,11 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 	// Total timing.
 	result.TotalDuration = time.Since(pipelineStart)
 
-	// Print summary.
-	printFinalSummary(result)
+	// Write changelog and print summary.
+	if err := writeChangelog(outputBaseDir, result); err != nil {
+		fmt.Printf("  warning: failed to write changelog: %v\n", err)
+	}
+	printFinalSummary(result, outputBaseDir)
 
 	return result, nil
 }
@@ -194,13 +198,106 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	return consolidation.UpdatedSpec, nil
 }
 
-func printFinalSummary(result *CouncilResult) {
+func writeChangelog(outputBaseDir string, result *CouncilResult) error {
+	var b strings.Builder
+	b.WriteString("# Council Review Changelog\n\n")
+
+	if result.FinalSpecPath != "" {
+		fmt.Fprintf(&b, "Updated spec: `%s`\n\n", result.FinalSpecPath)
+	}
+	fmt.Fprintf(&b, "Verdict: **%s**\n\n", result.OverallVerdict)
+
+	for i := range result.Consolidations {
+		c := &result.Consolidations[i]
+		fmt.Fprintf(&b, "## Round %d\n\n", c.Round)
+		writeChangelogEdits(&b, c)
+		writeChangelogRejections(&b, c)
+		writeChangelogFailed(&b, c)
+	}
+
+	writeChangelogTiming(&b, result)
+
+	changelogPath := filepath.Join(outputBaseDir, "changelog.md")
+	return os.WriteFile(changelogPath, []byte(b.String()), 0o644)
+}
+
+func writeChangelogEdits(b *strings.Builder, c *ConsolidationResult) {
+	if len(c.AppliedEdits) == 0 {
+		return
+	}
+	b.WriteString("### Applied Changes\n\n")
+	for j := range c.AppliedEdits {
+		edit := &c.AppliedEdits[j]
+		section := edit.Section
+		if section == "" {
+			section = "(unspecified section)"
+		}
+		fmt.Fprintf(b, "**%d. [%s]** %s\n\n", j+1, edit.FindingID, section)
+		fmt.Fprintf(b, "- **Action:** %s\n", edit.Action)
+		fmt.Fprintf(b, "- **Reviewer:** %s\n", edit.PersonaID)
+		if edit.Find != "" {
+			fmt.Fprintf(b, "- **Before:** `%s`\n", previewText(edit.Find, 120))
+		}
+		if edit.Replace != "" {
+			fmt.Fprintf(b, "- **After:** `%s`\n", previewText(edit.Replace, 120))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func writeChangelogRejections(b *strings.Builder, c *ConsolidationResult) {
+	if c.RejectedCount == 0 {
+		return
+	}
+	b.WriteString("### Rejected Findings\n\n")
+	for j := range c.RejectionLog.Rejections {
+		r := &c.RejectionLog.Rejections[j]
+		fmt.Fprintf(b, "**[%s]** (%s, %s)\n\n", r.FindingID, r.PersonaID, r.Severity)
+		fmt.Fprintf(b, "- **Finding:** %s\n", r.Description)
+		fmt.Fprintf(b, "- **Rejection reason:** %s\n", r.RejectionReason)
+		if r.DismissalRationale != "" {
+			fmt.Fprintf(b, "- **Counter-evidence:** %s\n", r.DismissalRationale)
+		}
+		b.WriteString("\n")
+	}
+}
+
+func writeChangelogFailed(b *strings.Builder, c *ConsolidationResult) {
+	if len(c.FailedEdits) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "### Failed Edits (%d)\n\n", len(c.FailedEdits))
+	for _, f := range c.FailedEdits {
+		fmt.Fprintf(b, "- %s\n", f)
+	}
+	b.WriteString("\n")
+}
+
+func writeChangelogTiming(b *strings.Builder, result *CouncilResult) {
+	b.WriteString("## Timing\n\n")
+	b.WriteString("| Stage | Duration |\n|-------|----------|\n")
+	for _, t := range result.Timings {
+		fmt.Fprintf(b, "| %s | %s |\n", t.Stage, t.Duration.Round(time.Millisecond))
+	}
+	fmt.Fprintf(b, "| **TOTAL** | **%s** |\n", result.TotalDuration.Round(time.Millisecond))
+}
+
+func previewText(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func printFinalSummary(result *CouncilResult, outputBaseDir string) {
 	fmt.Printf("\n=== Review Summary ===\n\n")
 
 	// Output files.
 	if result.FinalSpecPath != "" {
-		fmt.Printf("  Updated spec: %s\n", result.FinalSpecPath)
+		fmt.Printf("  Updated spec:  %s\n", result.FinalSpecPath)
 	}
+	fmt.Printf("  Changelog:     %s\n", filepath.Join(outputBaseDir, "changelog.md"))
 
 	// Changelog — what was changed and why.
 	totalApplied := 0
