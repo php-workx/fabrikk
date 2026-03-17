@@ -228,7 +228,12 @@ func writeChangelog(outputBaseDir string, result *CouncilResult) error {
 	for i := range result.Consolidations {
 		c := &result.Consolidations[i]
 		fmt.Fprintf(&b, "## Round %d\n\n", c.Round)
-		writeChangelogEdits(&b, c)
+		// Build finding lookup from reviews for this round.
+		var findingLookup map[string]*Finding
+		if i < len(result.Rounds) {
+			findingLookup = buildFindingLookup(result.Rounds[i].Reviews)
+		}
+		writeChangelogEdits(&b, c, findingLookup)
 		writeChangelogRejections(&b, c)
 		writeChangelogFailed(&b, c)
 	}
@@ -239,7 +244,18 @@ func writeChangelog(outputBaseDir string, result *CouncilResult) error {
 	return os.WriteFile(changelogPath, []byte(b.String()), 0o644)
 }
 
-func writeChangelogEdits(b *strings.Builder, c *ConsolidationResult) {
+func buildFindingLookup(reviews []ReviewOutput) map[string]*Finding {
+	lookup := make(map[string]*Finding)
+	for i := range reviews {
+		for j := range reviews[i].Findings {
+			f := &reviews[i].Findings[j]
+			lookup[f.FindingID] = f
+		}
+	}
+	return lookup
+}
+
+func writeChangelogEdits(b *strings.Builder, c *ConsolidationResult, findingLookup map[string]*Finding) {
 	if len(c.AppliedEdits) == 0 {
 		return
 	}
@@ -251,13 +267,15 @@ func writeChangelogEdits(b *strings.Builder, c *ConsolidationResult) {
 			section = "(unspecified section)"
 		}
 		fmt.Fprintf(b, "**%d. [%s]** %s\n\n", j+1, edit.FindingID, section)
-		fmt.Fprintf(b, "- **Action:** %s\n", edit.Action)
-		fmt.Fprintf(b, "- **Reviewer:** %s\n", edit.PersonaID)
-		if edit.Find != "" {
-			fmt.Fprintf(b, "- **Before:** `%s`\n", previewText(edit.Find, 120))
-		}
-		if edit.Replace != "" {
-			fmt.Fprintf(b, "- **After:** `%s`\n", previewText(edit.Replace, 120))
+		fmt.Fprintf(b, "- **What changed:** %s\n", edit.Action)
+		// Look up the original finding for the "why".
+		if f, ok := findingLookup[edit.FindingID]; ok {
+			if f.Description != "" {
+				fmt.Fprintf(b, "- **Why:** %s\n", f.Description)
+			}
+			if f.Severity != "" {
+				fmt.Fprintf(b, "- **Severity:** %s\n", f.Severity)
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -298,14 +316,6 @@ func writeChangelogTiming(b *strings.Builder, result *CouncilResult) {
 		fmt.Fprintf(b, "| %s | %s |\n", t.Stage, t.Duration.Round(time.Millisecond))
 	}
 	fmt.Fprintf(b, "| **TOTAL** | **%s** |\n", result.TotalDuration.Round(time.Millisecond))
-}
-
-func previewText(s string, maxLen int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 func printFinalSummary(result *CouncilResult, outputBaseDir string) {
