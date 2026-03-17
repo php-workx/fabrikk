@@ -15,6 +15,7 @@ type ConsolidationResult struct {
 	Round          int          `json:"round"`
 	UpdatedSpec    string       `json:"updated_spec"`
 	RejectionLog   RejectionLog `json:"rejection_log"`
+	AppliedEdits   []SpecEdit   `json:"applied_edits,omitempty"`
 	AppliedCount   int          `json:"applied_count"`
 	RejectedCount  int          `json:"rejected_count"`
 	FailedEdits    []string     `json:"failed_edits,omitempty"`
@@ -93,6 +94,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 	// Phase 2: Apply all accepted edits to the spec (no LLM, pure string ops).
 	updatedSpec := spec
 	appliedCount := 0
+	var appliedEdits []SpecEdit
 	for i := range allEdits {
 		edit := &allEdits[i]
 		if edit.Find == "" {
@@ -108,6 +110,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 			continue
 		}
 		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
+		appliedEdits = append(appliedEdits, *edit)
 		appliedCount++
 	}
 
@@ -136,6 +139,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 			Round:      round,
 			Rejections: allRejections,
 		},
+		AppliedEdits:   appliedEdits,
 		AppliedCount:   appliedCount,
 		RejectedCount:  len(allRejections),
 		FailedEdits:    allFailed,

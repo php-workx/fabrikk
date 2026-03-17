@@ -87,11 +87,7 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 	result.TotalDuration = time.Since(pipelineStart)
 
 	// Print summary.
-	fmt.Printf("\n=== Timing Summary ===\n")
-	for _, t := range result.Timings {
-		fmt.Printf("  %-30s %s\n", t.Stage, t.Duration.Round(time.Millisecond))
-	}
-	fmt.Printf("  %-30s %s\n", "TOTAL", result.TotalDuration.Round(time.Millisecond))
+	printFinalSummary(result)
 
 	return result, nil
 }
@@ -196,6 +192,57 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	result.FinalSpec = consolidation.UpdatedSpec
 
 	return consolidation.UpdatedSpec, nil
+}
+
+func printFinalSummary(result *CouncilResult) {
+	fmt.Printf("\n=== Review Summary ===\n\n")
+
+	// Output files.
+	if result.FinalSpecPath != "" {
+		fmt.Printf("  Updated spec: %s\n", result.FinalSpecPath)
+	}
+
+	// Changelog — what was changed and why.
+	totalApplied := 0
+	totalRejected := 0
+	for i := range result.Consolidations {
+		c := &result.Consolidations[i]
+		totalApplied += c.AppliedCount
+		totalRejected += c.RejectedCount
+
+		if len(c.AppliedEdits) > 0 {
+			fmt.Printf("\n  Changes applied (round %d):\n", c.Round)
+			for j := range c.AppliedEdits {
+				edit := &c.AppliedEdits[j]
+				section := edit.Section
+				if section == "" {
+					section = "(unspecified)"
+				}
+				fmt.Printf("    %d. [%s] %s — %s\n", j+1, edit.FindingID, section, edit.Action)
+			}
+		}
+		if c.RejectedCount > 0 {
+			fmt.Printf("\n  Rejected findings (round %d): %d\n", c.Round, c.RejectedCount)
+			for j := range c.RejectionLog.Rejections {
+				r := &c.RejectionLog.Rejections[j]
+				fmt.Printf("    - [%s] %s\n", r.FindingID, r.RejectionReason)
+			}
+		}
+		if len(c.FailedEdits) > 0 {
+			fmt.Printf("\n  Failed edits (round %d): %d\n", c.Round, len(c.FailedEdits))
+		}
+	}
+
+	// Totals.
+	fmt.Printf("\n  Totals: %d applied, %d rejected, verdict: %s\n", totalApplied, totalRejected, result.OverallVerdict)
+
+	// Timing.
+	fmt.Printf("\n  Timing:\n")
+	for _, t := range result.Timings {
+		fmt.Printf("    %-28s %s\n", t.Stage, t.Duration.Round(time.Millisecond))
+	}
+	fmt.Printf("    %-28s %s\n", "TOTAL", result.TotalDuration.Round(time.Millisecond))
+	fmt.Println()
 }
 
 func maybeApprovePersonas(personas []Persona, cfg CouncilConfig) ([]Persona, error) {
