@@ -187,7 +187,7 @@ func TestRunCouncilEmptyReviewAborts(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfg := CouncilConfig{Rounds: 1, SkipDynPersonas: true}
+	cfg := CouncilConfig{Rounds: 1, SkipDynPersonas: true, SkipApproval: true}
 	_, err := RunCouncil(context.Background(), testSpec, dir, cfg)
 	if err == nil {
 		t.Fatal("RunCouncil should fail when all reviewers fail")
@@ -327,7 +327,7 @@ func TestFullPipelineWithStubs(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfg := CouncilConfig{Rounds: 1}
+	cfg := CouncilConfig{Rounds: 1, SkipApproval: true}
 	result, err := RunCouncil(context.Background(), testSpec, dir, cfg)
 	if err != nil {
 		t.Fatalf("RunCouncil: %v", err)
@@ -405,7 +405,7 @@ func TestMVPModeFlowsThroughPipeline(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfg := CouncilConfig{Rounds: 1, Mode: ReviewMVP}
+	cfg := CouncilConfig{Rounds: 1, Mode: ReviewMVP, SkipApproval: true}
 	_, err := RunCouncil(context.Background(), testSpec, dir, cfg)
 	if err != nil {
 		t.Fatalf("RunCouncil: %v", err)

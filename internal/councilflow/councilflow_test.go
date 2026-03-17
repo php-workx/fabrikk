@@ -731,6 +731,79 @@ func TestValidReviewModes(t *testing.T) {
 	}
 }
 
+func TestApprovePersonasApproveAll(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("a\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != len(personas) {
+		t.Errorf("got %d personas, want %d", len(result), len(personas))
+	}
+	if !strings.Contains(out.String(), "Review Personas") {
+		t.Error("output missing persona summary")
+	}
+}
+
+func TestApprovePersonasRemoveOne(t *testing.T) {
+	personas := FixedPersonas()
+	original := len(personas)
+	in := strings.NewReader("r 1\na\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != original-1 {
+		t.Errorf("got %d personas, want %d", len(result), original-1)
+	}
+	if !strings.Contains(out.String(), "Removed") {
+		t.Error("output missing removal confirmation")
+	}
+}
+
+func TestApprovePersonasDetail(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("d 1\na\n")
+	var out strings.Builder
+	_, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "ID:") || !strings.Contains(output, "Backend:") {
+		t.Error("detail output missing expected fields")
+	}
+}
+
+func TestApprovePersonasQuit(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("q\n")
+	var out strings.Builder
+	_, err := ApprovePersonas(personas, in, &out)
+	if err == nil {
+		t.Fatal("quit should return error")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error = %q, want cancelled", err)
+	}
+}
+
+func TestApprovePersonasInvalidIndex(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("r 99\na\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != len(personas) {
+		t.Error("invalid index should not remove any persona")
+	}
+}
+
 func TestTruncateForError(t *testing.T) {
 	short := "hello"
 	if got := truncateForError(short, 10); got != short {

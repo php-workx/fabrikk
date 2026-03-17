@@ -83,7 +83,7 @@ commands:
   review <run-id>                            Show the run artifact for review
   tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
                                               review --from <path>  (one-step council review)
-                                              review flags: --mode mvp|standard|production --structural-only --dry-run --force --round N
+                                              review flags: --mode mvp|standard|production --skip-approval --structural-only --dry-run --force --round N
   plan <draft|review|approve> ...            Manage run-scoped execution plans
   approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
@@ -311,6 +311,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 	structuralOnly := false
 	dryRun := false
 	force := false
+	skipApproval := false
 	rounds := 2
 	mode := councilflow.ReviewStandard
 	for i := 0; i < len(flags); i++ {
@@ -323,6 +324,8 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 			dryRun = true
 		case "--force":
 			force = true
+		case "--skip-approval":
+			skipApproval = true
 		case "--round":
 			if i+1 < len(flags) {
 				_, _ = fmt.Sscanf(flags[i+1], "%d", &rounds)
@@ -361,6 +364,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 	cfg.Mode = mode
 	cfg.DryRun = dryRun
 	cfg.Force = force
+	cfg.SkipApproval = skipApproval
 	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)
 	if err != nil {
 		return err

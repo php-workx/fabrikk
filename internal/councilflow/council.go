@@ -17,6 +17,7 @@ type CouncilConfig struct {
 	Force           bool       // re-run all reviewers even if cached results exist
 	SkipJudge       bool       // skip judge consolidation (review-only mode)
 	SkipDynPersonas bool       // skip dynamic persona generation (fixed personas only)
+	SkipApproval    bool       // skip interactive persona approval
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -51,6 +52,11 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		roundDir := filepath.Join(outputBaseDir, fmt.Sprintf("round-%d", round))
 
 		personas, err := buildPersonaSet(ctx, currentSpec, roundDir, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("round %d: %w", round, err)
+		}
+
+		personas, err = maybeApprovePersonas(personas, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("round %d: %w", round, err)
 		}
@@ -127,6 +133,13 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 	}
 
 	return result, nil
+}
+
+func maybeApprovePersonas(personas []Persona, cfg CouncilConfig) ([]Persona, error) {
+	if cfg.SkipApproval || cfg.DryRun {
+		return personas, nil
+	}
+	return ApprovePersonas(personas, nil, nil)
 }
 
 func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConfig) ([]Persona, error) {
