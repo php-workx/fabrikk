@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // CouncilConfig controls the council review pipeline.
@@ -27,13 +28,21 @@ func DefaultConfig() CouncilConfig {
 	}
 }
 
+// StageTiming records the duration of one pipeline stage.
+type StageTiming struct {
+	Stage    string        `json:"stage"`
+	Duration time.Duration `json:"duration_ms"`
+}
+
 // CouncilResult holds the full pipeline output across all rounds.
 type CouncilResult struct {
 	Rounds         []RoundResult         `json:"rounds"`
 	Consolidations []ConsolidationResult `json:"consolidations,omitempty"`
 	OverallVerdict Verdict               `json:"overall_verdict"`
 	FinalSpecPath  string                `json:"final_spec_path,omitempty"`
-	FinalSpec      string                `json:"-"` // updated spec text (not serialized)
+	FinalSpec      string                `json:"-"`
+	Timings        []StageTiming         `json:"timings,omitempty"`
+	TotalDuration  time.Duration         `json:"total_duration_ms"`
 }
 
 // RunCouncil executes the full council review pipeline for a technical spec.
@@ -42,6 +51,7 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 		cfg.Rounds = 2
 	}
 
+	pipelineStart := time.Now()
 	result := &CouncilResult{}
 	var priorFindings []ReviewOutput
 	currentSpec := spec
@@ -51,88 +61,135 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 
 		roundDir := filepath.Join(outputBaseDir, fmt.Sprintf("round-%d", round))
 
-		personas, err := buildPersonaSet(ctx, currentSpec, roundDir, cfg)
+		updatedSpec, err := executeRound(ctx, round, roundDir, currentSpec, priorFindings, cfg, result)
 		if err != nil {
-			return nil, fmt.Errorf("round %d: %w", round, err)
+			return nil, err
 		}
 
-		personas, err = maybeApprovePersonas(personas, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("round %d: %w", round, err)
+		if len(result.Rounds) > 0 {
+			latest := &result.Rounds[len(result.Rounds)-1]
+			priorFindings = append(priorFindings, latest.Reviews...)
 		}
-
-		runner := NewRunner(roundDir)
-		runner.Force = cfg.Force
-		runner.Mode = cfg.Mode
-
-		if cfg.DryRun {
-			if err := writeDryRunPrompts(roundDir, currentSpec, round, personas, priorFindings, cfg.CodebaseContext); err != nil {
-				return nil, err
-			}
-			continue
+		if updatedSpec != "" {
+			currentSpec = updatedSpec
 		}
-
-		roundResult, err := runner.RunRound(ctx, currentSpec, round, personas, priorFindings, cfg.CodebaseContext)
-		if err != nil {
-			return nil, fmt.Errorf("round %d reviews: %w", round, err)
-		}
-
-		if len(roundResult.Reviews) == 0 {
-			return nil, fmt.Errorf("round %d: %w: all reviewers failed", round, ErrEmptyReview)
-		}
-
-		result.Rounds = append(result.Rounds, *roundResult)
-		priorFindings = append(priorFindings, roundResult.Reviews...)
-
-		totalFindings := 0
-		for i := range roundResult.Reviews {
-			totalFindings += len(roundResult.Reviews[i].Findings)
-		}
-		fmt.Printf("  Round %d reviews: %s (%d findings from %d reviewers)\n",
-			round, roundResult.Consensus, totalFindings, len(roundResult.Reviews))
-
-		// Judge consolidation.
-		if cfg.SkipJudge || totalFindings == 0 {
-			continue
-		}
-
-		judgeCfg := DefaultJudgeConfig()
-		judgeCfg.Mode = cfg.Mode
-		consolidation, judgeErr := RunJudge(ctx, currentSpec, round, roundResult.Reviews, roundDir, judgeCfg)
-		if judgeErr != nil {
-			return nil, fmt.Errorf("round %d judge: %w", round, judgeErr)
-		}
-
-		// Drift detection.
-		consolidation.DriftWarnings = DetectDrift(currentSpec, consolidation.UpdatedSpec)
-		if len(consolidation.DriftWarnings) > 0 {
-			fmt.Printf("  [round %d] drift warnings:\n", round)
-			for _, w := range consolidation.DriftWarnings {
-				fmt.Printf("    - %s\n", w)
-			}
-		}
-
-		result.Consolidations = append(result.Consolidations, *consolidation)
-
-		// Write versioned spec.
-		specPath := filepath.Join(outputBaseDir, fmt.Sprintf("technical-spec-v%d.md", round))
-		if err := os.WriteFile(specPath, []byte(consolidation.UpdatedSpec), 0o644); err != nil {
-			return nil, fmt.Errorf("write spec v%d: %w", round, err)
-		}
-		result.FinalSpecPath = specPath
-		result.FinalSpec = consolidation.UpdatedSpec
-		currentSpec = consolidation.UpdatedSpec
-
-		fmt.Printf("  Round %d consolidated: %d applied, %d rejected → %s\n",
-			round, consolidation.AppliedCount, consolidation.RejectedCount, specPath)
 	}
 
-	// Overall verdict is the consensus of the last round.
+	// Overall verdict.
 	if len(result.Rounds) > 0 {
 		result.OverallVerdict = result.Rounds[len(result.Rounds)-1].Consensus
 	}
 
+	// Total timing.
+	result.TotalDuration = time.Since(pipelineStart)
+
+	// Print summary.
+	fmt.Printf("\n=== Timing Summary ===\n")
+	for _, t := range result.Timings {
+		fmt.Printf("  %-30s %s\n", t.Stage, t.Duration.Round(time.Millisecond))
+	}
+	fmt.Printf("  %-30s %s\n", "TOTAL", result.TotalDuration.Round(time.Millisecond))
+
 	return result, nil
+}
+
+func executeRound(ctx context.Context, round int, roundDir, spec string, priorFindings []ReviewOutput, cfg CouncilConfig, result *CouncilResult) (updatedSpec string, err error) {
+	// Stage: persona generation.
+	t0 := time.Now()
+	personas, err := buildPersonaSet(ctx, spec, roundDir, cfg)
+	if err != nil {
+		return "", fmt.Errorf("round %d: %w", round, err)
+	}
+	personaDur := time.Since(t0)
+	result.Timings = append(result.Timings, StageTiming{
+		Stage: fmt.Sprintf("round-%d/personas", round), Duration: personaDur,
+	})
+	fmt.Printf("  [timing] persona generation: %s\n", personaDur.Round(time.Millisecond))
+
+	// Stage: persona approval.
+	t0 = time.Now()
+	personas, err = maybeApprovePersonas(personas, cfg)
+	if err != nil {
+		return "", fmt.Errorf("round %d: %w", round, err)
+	}
+	approvalDur := time.Since(t0)
+	if approvalDur > time.Second {
+		result.Timings = append(result.Timings, StageTiming{
+			Stage: fmt.Sprintf("round-%d/approval", round), Duration: approvalDur,
+		})
+	}
+
+	runner := NewRunner(roundDir)
+	runner.Force = cfg.Force
+	runner.Mode = cfg.Mode
+
+	if cfg.DryRun {
+		return "", writeDryRunPrompts(roundDir, spec, round, personas, priorFindings, cfg.CodebaseContext)
+	}
+
+	// Stage: reviews.
+	t0 = time.Now()
+	roundResult, err := runner.RunRound(ctx, spec, round, personas, priorFindings, cfg.CodebaseContext)
+	if err != nil {
+		return "", fmt.Errorf("round %d reviews: %w", round, err)
+	}
+	reviewDur := time.Since(t0)
+	result.Timings = append(result.Timings, StageTiming{
+		Stage: fmt.Sprintf("round-%d/reviews", round), Duration: reviewDur,
+	})
+
+	if len(roundResult.Reviews) == 0 {
+		return "", fmt.Errorf("round %d: %w: all reviewers failed", round, ErrEmptyReview)
+	}
+
+	result.Rounds = append(result.Rounds, *roundResult)
+
+	totalFindings := 0
+	for i := range roundResult.Reviews {
+		totalFindings += len(roundResult.Reviews[i].Findings)
+	}
+	fmt.Printf("  [timing] reviews: %s (%d findings from %d reviewers)\n",
+		reviewDur.Round(time.Millisecond), totalFindings, len(roundResult.Reviews))
+
+	// Stage: judge consolidation.
+	if cfg.SkipJudge || totalFindings == 0 {
+		return "", nil
+	}
+
+	t0 = time.Now()
+	judgeCfg := DefaultJudgeConfig()
+	judgeCfg.Mode = cfg.Mode
+	consolidation, judgeErr := RunJudge(ctx, spec, round, roundResult.Reviews, roundDir, judgeCfg)
+	if judgeErr != nil {
+		return "", fmt.Errorf("round %d judge: %w", round, judgeErr)
+	}
+	judgeDur := time.Since(t0)
+	result.Timings = append(result.Timings, StageTiming{
+		Stage: fmt.Sprintf("round-%d/judge", round), Duration: judgeDur,
+	})
+	fmt.Printf("  [timing] judge: %s (%d applied, %d rejected, %d failed)\n",
+		judgeDur.Round(time.Millisecond), consolidation.AppliedCount, consolidation.RejectedCount, len(consolidation.FailedEdits))
+
+	// Drift detection.
+	consolidation.DriftWarnings = DetectDrift(spec, consolidation.UpdatedSpec)
+	if len(consolidation.DriftWarnings) > 0 {
+		fmt.Printf("  [round %d] drift warnings:\n", round)
+		for _, dw := range consolidation.DriftWarnings {
+			fmt.Printf("    - %s\n", dw)
+		}
+	}
+
+	result.Consolidations = append(result.Consolidations, *consolidation)
+
+	// Write versioned spec.
+	specPath := filepath.Join(filepath.Dir(roundDir), fmt.Sprintf("technical-spec-v%d.md", round))
+	if writeErr := os.WriteFile(specPath, []byte(consolidation.UpdatedSpec), 0o644); writeErr != nil {
+		return "", fmt.Errorf("write spec v%d: %w", round, writeErr)
+	}
+	result.FinalSpecPath = specPath
+	result.FinalSpec = consolidation.UpdatedSpec
+
+	return consolidation.UpdatedSpec, nil
 }
 
 func maybeApprovePersonas(personas []Persona, cfg CouncilConfig) ([]Persona, error) {
