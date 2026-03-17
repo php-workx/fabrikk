@@ -20,10 +20,19 @@ type CLIBackend struct {
 }
 
 // KnownBackends maps backend names to their default CLI invocation config.
+// Commands are resolved to absolute paths at init time to work regardless
+// of the subprocess PATH environment.
 var KnownBackends = map[string]CLIBackend{
-	BackendClaude: {Command: "claude", Args: []string{"-p", "--model", "opus"}},
-	BackendCodex:  {Command: "codex", Args: []string{"exec", "-m", "gpt-5.4", "-c", "reasoning_effort=high"}},
-	BackendGemini: {Command: "gemini", Args: []string{"-m", "gemini-3-pro-preview"}, PromptFlag: "-p"},
+	BackendClaude: {Command: resolveCommand("claude"), Args: []string{"-p", "--model", "opus"}},
+	BackendCodex:  {Command: resolveCommand("codex"), Args: []string{"exec", "-m", "gpt-5.4", "-c", "reasoning_effort=high"}},
+	BackendGemini: {Command: resolveCommand("gemini"), Args: []string{"-m", "gemini-3-pro-preview"}, PromptFlag: "-p"},
+}
+
+func resolveCommand(name string) string {
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	return name // fallback to bare name
 }
 
 // BackendFor returns the CLI backend for a persona.

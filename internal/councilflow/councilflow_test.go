@@ -74,8 +74,9 @@ func TestBackendForReturnsCorrectBackend(t *testing.T) {
 	for _, tt := range tests {
 		p := &Persona{Backend: tt.backend}
 		got := BackendFor(p)
-		if got.Command != tt.wantCmd {
-			t.Errorf("BackendFor(%q) command = %s, want %s", tt.backend, got.Command, tt.wantCmd)
+		// Command may be an absolute path (e.g., /usr/local/bin/claude) — check suffix.
+		if !strings.HasSuffix(got.Command, tt.wantCmd) {
+			t.Errorf("BackendFor(%q) command = %s, want suffix %s", tt.backend, got.Command, tt.wantCmd)
 		}
 	}
 }
