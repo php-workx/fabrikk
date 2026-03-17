@@ -11,6 +11,7 @@ type PromptContext struct {
 	Spec            string         // full technical spec markdown
 	Persona         Persona        // the reviewer persona
 	Round           int            // 1 or 2
+	Mode            ReviewMode     // review tone and strictness
 	PriorFindings   []ReviewOutput // findings from previous round (empty for round 1)
 	CodebaseContext string         // optional: relevant source code or structure summary
 }
@@ -25,6 +26,11 @@ func BuildReviewPrompt(ctx *PromptContext) string {
 
 	if len(ctx.Persona.FocusSections) > 0 {
 		fmt.Fprintf(&b, "Focus sections: %s\n\n", strings.Join(ctx.Persona.FocusSections, ", "))
+	}
+
+	if directive := ReviewModeDirective(ctx.Mode); directive != "" {
+		b.WriteString(directive)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("## Instructions\n\n")

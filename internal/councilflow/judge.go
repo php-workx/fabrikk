@@ -26,6 +26,7 @@ type ConsolidationResult struct {
 type JudgeConfig struct {
 	Backend    CLIBackend
 	TimeoutSec int
+	Mode       ReviewMode
 }
 
 // DefaultJudgeConfig returns a config targeting Claude Opus with extended thinking.
@@ -249,7 +250,7 @@ func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, output
 }
 
 func judgeOneReview(ctx context.Context, spec string, round int, review *ReviewOutput, outputDir string, cfg *JudgeConfig) judgeDecision {
-	prompt := buildJudgePrompt(spec, round, []ReviewOutput{*review})
+	prompt := buildJudgePrompt(spec, round, []ReviewOutput{*review}, cfg.Mode)
 
 	// Write per-reviewer prompt for audit.
 	promptPath := filepath.Join(outputDir, fmt.Sprintf("judge-prompt-%s.md", review.PersonaID))
@@ -281,7 +282,7 @@ func parseJudgeRawOutput(raw string) (*judgeRawOutput, error) {
 	return &parsed, nil
 }
 
-func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
+func buildJudgePrompt(spec string, round int, reviews []ReviewOutput, mode ...ReviewMode) string {
 	var b strings.Builder
 
 	b.WriteString("# Judge / Editor — Finding-by-Finding Validation\n\n")
@@ -314,6 +315,13 @@ func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
 	b.WriteString("For future-phase findings: APPLY them as clearly marked future-phase requirements ")
 	b.WriteString("(e.g., 'When multi-user mode is introduced, this must be addressed by...'). ")
 	b.WriteString("REJECT only findings that are factually wrong or already covered.\n\n")
+
+	if len(mode) > 0 && mode[0] != "" {
+		if directive := JudgeModeDirective(mode[0]); directive != "" {
+			b.WriteString(directive)
+			b.WriteString("\n")
+		}
+	}
 
 	b.WriteString("## Reviewer Findings\n\n")
 	for i := range reviews {

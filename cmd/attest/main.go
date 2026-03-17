@@ -83,7 +83,7 @@ commands:
   review <run-id>                            Show the run artifact for review
   tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
                                               review --from <path>  (one-step council review)
-                                              review flags: --structural-only --dry-run --force --round N
+                                              review flags: --mode mvp|standard|production --structural-only --dry-run --force --round N
   plan <draft|review|approve> ...            Manage run-scoped execution plans
   approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
@@ -196,7 +196,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 	var fromPath, runID string
 	var remaining []string
 	// Flags that consume the next arg as their value.
-	valuedFlags := map[string]bool{"--from": true, "--round": true}
+	valuedFlags := map[string]bool{"--from": true, "--round": true, "--mode": true}
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--from" {
@@ -312,6 +312,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 	dryRun := false
 	force := false
 	rounds := 2
+	mode := councilflow.ReviewStandard
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case "--structural-only":
@@ -325,6 +326,16 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 		case "--round":
 			if i+1 < len(flags) {
 				_, _ = fmt.Sscanf(flags[i+1], "%d", &rounds)
+				i++
+			}
+		case "--mode":
+			if i+1 < len(flags) {
+				m := councilflow.ReviewMode(flags[i+1])
+				if councilflow.ValidReviewModes[m] {
+					mode = m
+				} else {
+					return fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
+				}
 				i++
 			}
 		}
@@ -347,6 +358,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 
 	cfg := councilflow.DefaultConfig()
 	cfg.Rounds = rounds
+	cfg.Mode = mode
 	cfg.DryRun = dryRun
 	cfg.Force = force
 	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)

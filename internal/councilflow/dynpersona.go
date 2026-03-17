@@ -13,8 +13,8 @@ const MaxDynamicPersonas = 3
 
 // GeneratePersonas analyzes a spec and produces dynamic review personas.
 // Returns up to MaxDynamicPersonas personas (language engineer + domain experts).
-func GeneratePersonas(ctx context.Context, spec, outputDir string) ([]Persona, error) {
-	prompt := buildPersonaGenerationPrompt(spec)
+func GeneratePersonas(ctx context.Context, spec, outputDir string, mode ReviewMode) ([]Persona, error) {
+	prompt := buildPersonaGenerationPrompt(spec, mode)
 
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
@@ -53,7 +53,7 @@ func GeneratePersonas(ctx context.Context, spec, outputDir string) ([]Persona, e
 	return personas, nil
 }
 
-func buildPersonaGenerationPrompt(spec string) string {
+func buildPersonaGenerationPrompt(spec string, mode ReviewMode) string {
 	return `# Persona Generation
 
 You are a review planning expert. Analyze the technical specification below and generate review personas.
@@ -91,7 +91,9 @@ Respond with ONLY a JSON array of persona objects:
     "rationale": "Spec targets a Go CLI tool with concurrent task execution."
   }
 ]
-` + "```\n\n" + `## Technical Specification
+` + "```\n\n" + PersonaModeDirective(mode) + `
+
+## Technical Specification
 
 ` + spec
 }

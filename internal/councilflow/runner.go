@@ -78,10 +78,11 @@ var InvokeFunc InvokeFn = invokeBackend
 
 // Runner executes council reviews for a technical spec.
 type Runner struct {
-	OutputDir   string // directory to write review artifacts
-	TimeoutSec  int    // per-reviewer timeout in seconds
-	Force       bool   // re-run all reviewers even if cached results exist
-	EnableNudge bool   // enable nudge pass (disabled by default — needs session resume for quality)
+	OutputDir   string     // directory to write review artifacts
+	TimeoutSec  int        // per-reviewer timeout in seconds
+	Mode        ReviewMode // review tone and strictness
+	Force       bool       // re-run all reviewers even if cached results exist
+	EnableNudge bool       // enable nudge pass (disabled by default — needs session resume for quality)
 }
 
 // NewRunner creates a runner with defaults.
@@ -200,6 +201,7 @@ func (r *Runner) runSingleReview(ctx context.Context, spec string, round int, pe
 		Spec:            spec,
 		Persona:         *persona,
 		Round:           round,
+		Mode:            r.Mode,
 		PriorFindings:   priorFindings,
 		CodebaseContext: codebaseCtx,
 	})

@@ -10,12 +10,13 @@ import (
 
 // CouncilConfig controls the council review pipeline.
 type CouncilConfig struct {
-	Rounds          int    // number of review rounds (default: 2)
-	CodebaseContext string // optional codebase context for reviewers
-	DryRun          bool   // generate prompts without executing
-	Force           bool   // re-run all reviewers even if cached results exist
-	SkipJudge       bool   // skip judge consolidation (review-only mode)
-	SkipDynPersonas bool   // skip dynamic persona generation (fixed personas only)
+	Rounds          int        // number of review rounds (default: 2)
+	Mode            ReviewMode // review tone and strictness (default: standard)
+	CodebaseContext string     // optional codebase context for reviewers
+	DryRun          bool       // generate prompts without executing
+	Force           bool       // re-run all reviewers even if cached results exist
+	SkipJudge       bool       // skip judge consolidation (review-only mode)
+	SkipDynPersonas bool       // skip dynamic persona generation (fixed personas only)
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -56,6 +57,7 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 
 		runner := NewRunner(roundDir)
 		runner.Force = cfg.Force
+		runner.Mode = cfg.Mode
 
 		if cfg.DryRun {
 			if err := writeDryRunPrompts(roundDir, currentSpec, round, personas, priorFindings, cfg.CodebaseContext); err != nil {
@@ -88,7 +90,9 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 			continue
 		}
 
-		consolidation, judgeErr := RunJudge(ctx, currentSpec, round, roundResult.Reviews, roundDir, DefaultJudgeConfig())
+		judgeCfg := DefaultJudgeConfig()
+		judgeCfg.Mode = cfg.Mode
+		consolidation, judgeErr := RunJudge(ctx, currentSpec, round, roundResult.Reviews, roundDir, judgeCfg)
 		if judgeErr != nil {
 			return nil, fmt.Errorf("round %d judge: %w", round, judgeErr)
 		}
@@ -130,7 +134,7 @@ func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConf
 	if cfg.SkipDynPersonas || cfg.DryRun {
 		return personas, nil
 	}
-	dynPersonas, err := GeneratePersonas(ctx, spec, roundDir)
+	dynPersonas, err := GeneratePersonas(ctx, spec, roundDir, cfg.Mode)
 	if err != nil {
 		return nil, fmt.Errorf("dynamic persona generation: %w", err)
 	}
