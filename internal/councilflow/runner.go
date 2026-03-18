@@ -20,10 +20,40 @@ type CLIBackend struct {
 }
 
 // KnownBackends maps backend names to their default CLI invocation config.
+// Commands are resolved to absolute paths at init time to work regardless
+// of the subprocess PATH environment.
 var KnownBackends = map[string]CLIBackend{
-	BackendClaude: {Command: "claude", Args: []string{"-p", "--model", "opus"}},
-	BackendCodex:  {Command: "codex", Args: []string{"exec", "-m", "gpt-5.4", "-c", "reasoning_effort=high"}},
-	BackendGemini: {Command: "gemini", Args: []string{"-m", "gemini-3-pro-preview"}, PromptFlag: "-p"},
+	BackendClaude: {Command: resolveCommand("claude"), Args: []string{"-p", "--model", "opus"}},
+	BackendCodex:  {Command: resolveCommand("codex"), Args: []string{"exec", "-m", "gpt-5.4", "-c", "reasoning_effort=high"}},
+	BackendGemini: {Command: resolveCommand("gemini"), Args: []string{"-m", "gemini-3-pro-preview"}, PromptFlag: "-p"},
+}
+
+func resolveCommand(name string) string {
+	// Try standard PATH first.
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	// Search common tool directories not always in PATH.
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		candidates := []string{
+			filepath.Join(home, ".local", "bin", name),
+			filepath.Join(home, "go", "bin", name),
+		}
+		// Check nvm node directories.
+		nvmDir := filepath.Join(home, ".nvm", "versions", "node")
+		if entries, err := os.ReadDir(nvmDir); err == nil {
+			for _, e := range entries {
+				candidates = append(candidates, filepath.Join(nvmDir, e.Name(), "bin", name))
+			}
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+	return name
 }
 
 // BackendFor returns the CLI backend for a persona.
@@ -78,10 +108,13 @@ var InvokeFunc InvokeFn = invokeBackend
 
 // Runner executes council reviews for a technical spec.
 type Runner struct {
-	OutputDir   string // directory to write review artifacts
-	TimeoutSec  int    // per-reviewer timeout in seconds
-	Force       bool   // re-run all reviewers even if cached results exist
-	EnableNudge bool   // enable nudge pass (disabled by default — needs session resume for quality)
+	OutputDir   string     // directory to write review artifacts
+	TimeoutSec  int        // per-reviewer timeout in seconds
+	Mode        ReviewMode // review tone and strictness
+	SpecPath    string     // absolute path to spec file (if set, reviewers read from file instead of inline)
+	StaggerSec  int        // seconds between launching parallel reviewers (0 = no stagger)
+	Force       bool       // re-run all reviewers even if cached results exist
+	EnableNudge bool       // enable nudge pass (disabled by default — needs session resume for quality)
 }
 
 // NewRunner creates a runner with defaults.
@@ -108,8 +141,9 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		return nil, fmt.Errorf("write personas: %w", err)
 	}
 
-	// Write spec hash for cache validation — if spec changes, cached reviews are stale.
-	specHash := fmt.Sprintf("%x", sha256.Sum256([]byte(spec)))
+	// Cache key includes spec content + review mode — changing either invalidates cache.
+	cacheInput := spec + "\n__mode__:" + string(r.Mode)
+	specHash := fmt.Sprintf("%x", sha256.Sum256([]byte(cacheInput)))
 	specHashPath := filepath.Join(r.OutputDir, "spec-hash.txt")
 	cacheValid := !r.Force && matchesSpecHash(specHashPath, specHash)
 	if err := os.WriteFile(specHashPath, []byte(specHash+"\n"), 0o644); err != nil {
@@ -164,7 +198,11 @@ type reviewResult struct {
 func runParallelReviews(ctx context.Context, r *Runner, spec string, round int, pending []pendingReview, priorFindings []ReviewOutput, codebaseCtx string) []ReviewOutput {
 	ch := make(chan reviewResult, len(pending))
 
-	for _, p := range pending {
+	for i, p := range pending {
+		if i > 0 && r.StaggerSec > 0 {
+			fmt.Printf("  [round %d] stagger: waiting %ds before next reviewer ...\n", round, r.StaggerSec)
+			time.Sleep(time.Duration(r.StaggerSec) * time.Second)
+		}
 		go func(pr pendingReview) {
 			backend := BackendFor(pr.persona)
 			fmt.Printf("  [round %d] reviewing: %s (via %s) ...\n", round, pr.persona.DisplayName, backend.Command)
@@ -198,8 +236,10 @@ func runParallelReviews(ctx context.Context, r *Runner, spec string, round int, 
 func (r *Runner) runSingleReview(ctx context.Context, spec string, round int, persona *Persona, backend *CLIBackend, priorFindings []ReviewOutput, codebaseCtx string) (*ReviewOutput, error) {
 	prompt := BuildReviewPrompt(&PromptContext{
 		Spec:            spec,
+		SpecPath:        r.SpecPath,
 		Persona:         *persona,
 		Round:           round,
+		Mode:            r.Mode,
 		PriorFindings:   priorFindings,
 		CodebaseContext: codebaseCtx,
 	})
@@ -366,16 +406,11 @@ func parseReviewOutput(raw string) (*ReviewOutput, error) {
 }
 
 func extractJSON(s string) string {
-	if idx := strings.Index(s, "```json"); idx >= 0 {
-		start := idx + len("```json")
-		if end := strings.Index(s[start:], "```"); end >= 0 {
-			return strings.TrimSpace(s[start : start+end])
-		}
-	}
-	if idx := strings.Index(s, "```"); idx >= 0 {
-		start := idx + len("```")
-		if end := strings.Index(s[start:], "```"); end >= 0 {
-			return strings.TrimSpace(s[start : start+end])
+	// Try code fence extraction, but validate the result parses as JSON.
+	// Code fences can break when JSON values contain backticks (e.g., spec markdown).
+	if candidate := extractFromCodeFence(s); candidate != "" {
+		if json.Valid([]byte(candidate)) {
+			return candidate
 		}
 	}
 	// String-aware bracket matching for JSON objects and arrays.
@@ -391,6 +426,22 @@ func extractJSON(s string) string {
 		}
 	}
 	return strings.TrimSpace(s)
+}
+
+func extractFromCodeFence(s string) string {
+	if idx := strings.Index(s, "```json"); idx >= 0 {
+		start := idx + len("```json")
+		if end := strings.Index(s[start:], "```"); end >= 0 {
+			return strings.TrimSpace(s[start : start+end])
+		}
+	}
+	if idx := strings.Index(s, "```"); idx >= 0 {
+		start := idx + len("```")
+		if end := strings.Index(s[start:], "```"); end >= 0 {
+			return strings.TrimSpace(s[start : start+end])
+		}
+	}
+	return ""
 }
 
 func extractJSONBlock(s string, idx int) string {

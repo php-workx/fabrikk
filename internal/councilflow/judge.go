@@ -15,6 +15,7 @@ type ConsolidationResult struct {
 	Round          int          `json:"round"`
 	UpdatedSpec    string       `json:"updated_spec"`
 	RejectionLog   RejectionLog `json:"rejection_log"`
+	AppliedEdits   []SpecEdit   `json:"applied_edits,omitempty"`
 	AppliedCount   int          `json:"applied_count"`
 	RejectedCount  int          `json:"rejected_count"`
 	FailedEdits    []string     `json:"failed_edits,omitempty"`
@@ -26,6 +27,8 @@ type ConsolidationResult struct {
 type JudgeConfig struct {
 	Backend    CLIBackend
 	TimeoutSec int
+	Mode       ReviewMode
+	StaggerSec int
 }
 
 // DefaultJudgeConfig returns a config targeting Claude Opus with extended thinking.
@@ -55,33 +58,17 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
-	// Filter to reviews with findings worth judging.
-	var judgeable []ReviewOutput
-	for i := range reviews {
-		review := &reviews[i]
-		if len(review.Findings) == 0 {
-			fmt.Printf("  [round %d] judge: skip %s (no findings)\n", round, review.PersonaID)
-			continue
-		}
-		hasNonMinor := false
-		for j := range review.Findings {
-			if review.Findings[j].Severity != "minor" {
-				hasNonMinor = true
-				break
-			}
-		}
-		if !hasNonMinor {
-			fmt.Printf("  [round %d] judge: skip %s (minor only)\n", round, review.PersonaID)
-			continue
-		}
-		judgeable = append(judgeable, *review)
-	}
+	judgeable := filterJudgeableReviews(reviews, round)
 
 	fmt.Printf("  [round %d] judge: %d reviewers to process (parallel) ...\n", round, len(judgeable))
 
 	// Phase 1: Parallel judgment — each reviewer's findings judged independently.
 	ch := make(chan judgeDecision, len(judgeable))
 	for i := range judgeable {
+		if i > 0 && cfg.StaggerSec > 0 {
+			fmt.Printf("  [round %d] judge stagger: waiting %ds ...\n", round, cfg.StaggerSec)
+			time.Sleep(time.Duration(cfg.StaggerSec) * time.Second)
+		}
 		go func(review ReviewOutput) {
 			decision := judgeOneReview(ctx, spec, round, &review, outputDir, &cfg)
 			ch <- decision
@@ -107,6 +94,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 	// Phase 2: Apply all accepted edits to the spec (no LLM, pure string ops).
 	updatedSpec := spec
 	appliedCount := 0
+	var appliedEdits []SpecEdit
 	for i := range allEdits {
 		edit := &allEdits[i]
 		if edit.Find == "" {
@@ -122,6 +110,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 			continue
 		}
 		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
+		appliedEdits = append(appliedEdits, *edit)
 		appliedCount++
 	}
 
@@ -150,6 +139,7 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 			Round:      round,
 			Rejections: allRejections,
 		},
+		AppliedEdits:   appliedEdits,
 		AppliedCount:   appliedCount,
 		RejectedCount:  len(allRejections),
 		FailedEdits:    allFailed,
@@ -248,8 +238,32 @@ func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, output
 	return &conflictResult{spec: updatedSpec, applied: applied, stillFailed: stillFailed}, nil
 }
 
+func filterJudgeableReviews(reviews []ReviewOutput, round int) []ReviewOutput {
+	var judgeable []ReviewOutput
+	for i := range reviews {
+		review := &reviews[i]
+		if len(review.Findings) == 0 {
+			fmt.Printf("  [round %d] judge: skip %s (no findings)\n", round, review.PersonaID)
+			continue
+		}
+		hasNonMinor := false
+		for j := range review.Findings {
+			if review.Findings[j].Severity != "minor" {
+				hasNonMinor = true
+				break
+			}
+		}
+		if !hasNonMinor {
+			fmt.Printf("  [round %d] judge: skip %s (minor only)\n", round, review.PersonaID)
+			continue
+		}
+		judgeable = append(judgeable, *review)
+	}
+	return judgeable
+}
+
 func judgeOneReview(ctx context.Context, spec string, round int, review *ReviewOutput, outputDir string, cfg *JudgeConfig) judgeDecision {
-	prompt := buildJudgePrompt(spec, round, []ReviewOutput{*review})
+	prompt := buildJudgePrompt(spec, round, []ReviewOutput{*review}, cfg.Mode)
 
 	// Write per-reviewer prompt for audit.
 	promptPath := filepath.Join(outputDir, fmt.Sprintf("judge-prompt-%s.md", review.PersonaID))
@@ -281,7 +295,7 @@ func parseJudgeRawOutput(raw string) (*judgeRawOutput, error) {
 	return &parsed, nil
 }
 
-func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
+func buildJudgePrompt(spec string, round int, reviews []ReviewOutput, mode ...ReviewMode) string {
 	var b strings.Builder
 
 	b.WriteString("# Judge / Editor — Finding-by-Finding Validation\n\n")
@@ -314,6 +328,13 @@ func buildJudgePrompt(spec string, round int, reviews []ReviewOutput) string {
 	b.WriteString("For future-phase findings: APPLY them as clearly marked future-phase requirements ")
 	b.WriteString("(e.g., 'When multi-user mode is introduced, this must be addressed by...'). ")
 	b.WriteString("REJECT only findings that are factually wrong or already covered.\n\n")
+
+	if len(mode) > 0 && mode[0] != "" {
+		if directive := JudgeModeDirective(mode[0]); directive != "" {
+			b.WriteString(directive)
+			b.WriteString("\n")
+		}
+	}
 
 	b.WriteString("## Reviewer Findings\n\n")
 	for i := range reviews {

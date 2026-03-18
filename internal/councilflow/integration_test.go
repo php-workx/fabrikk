@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -186,7 +187,7 @@ func TestRunCouncilEmptyReviewAborts(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfg := CouncilConfig{Rounds: 1, SkipDynPersonas: true}
+	cfg := CouncilConfig{Rounds: 1, SkipDynPersonas: true, SkipApproval: true}
 	_, err := RunCouncil(context.Background(), testSpec, dir, cfg)
 	if err == nil {
 		t.Fatal("RunCouncil should fail when all reviewers fail")
@@ -239,6 +240,28 @@ func TestRunJudgeAppliesEdits(t *testing.T) {
 	}
 	if strings.Contains(result.UpdatedSpec, "no error handling") {
 		t.Error("old text was not replaced")
+	}
+}
+
+func TestRunJudgeWithRejections(t *testing.T) {
+	old := InvokeFunc
+	defer func() { InvokeFunc = old }()
+
+	InvokeFunc = stubInvoke(map[string]string{
+		"Judge": fixtureJudgeJSON(
+			nil,
+			[]Rejection{{FindingID: "sec-002", PersonaID: "test", Severity: "minor", Description: "minor issue", RejectionReason: "not relevant for MVP"}},
+		),
+	})
+
+	dir := t.TempDir()
+	reviews := []ReviewOutput{{PersonaID: "test", Verdict: VerdictWarn, Findings: []Finding{{FindingID: "sec-002", Severity: "significant"}}}}
+	result, err := RunJudge(context.Background(), testSpec, 1, reviews, dir, DefaultJudgeConfig())
+	if err != nil {
+		t.Fatalf("RunJudge: %v", err)
+	}
+	if result.RejectedCount != 1 {
+		t.Errorf("rejected = %d, want 1", result.RejectedCount)
 	}
 }
 
@@ -304,7 +327,7 @@ func TestFullPipelineWithStubs(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfg := CouncilConfig{Rounds: 1}
+	cfg := CouncilConfig{Rounds: 1, SkipApproval: true}
 	result, err := RunCouncil(context.Background(), testSpec, dir, cfg)
 	if err != nil {
 		t.Fatalf("RunCouncil: %v", err)
@@ -359,6 +382,52 @@ func TestDuplicatePersonaIDRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate persona_id") {
 		t.Fatalf("error = %q, want duplicate persona_id", err)
+	}
+}
+
+func TestMVPModeFlowsThroughPipeline(t *testing.T) {
+	old := InvokeFunc
+	defer func() { InvokeFunc = old }()
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+	InvokeFunc = func(_ context.Context, _ *CLIBackend, prompt string, _ int) (string, error) {
+		mu.Lock()
+		capturedPrompts = append(capturedPrompts, prompt)
+		mu.Unlock()
+		if strings.Contains(prompt, "Persona Generation") {
+			return fixturePersonaJSON(), nil
+		}
+		if strings.Contains(prompt, "Judge") {
+			return fixtureJudgeJSON(nil, nil), nil
+		}
+		return fixtureReviewJSON("test", VerdictPass, nil), nil
+	}
+
+	dir := t.TempDir()
+	cfg := CouncilConfig{Rounds: 1, Mode: ReviewMVP, SkipApproval: true}
+	_, err := RunCouncil(context.Background(), testSpec, dir, cfg)
+	if err != nil {
+		t.Fatalf("RunCouncil: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	foundPersonaMVP := false
+	foundReviewMVP := false
+	for _, p := range capturedPrompts {
+		if strings.Contains(p, "Persona Generation") && strings.Contains(p, "MVP") {
+			foundPersonaMVP = true
+		}
+		if strings.Contains(p, "Review Assignment") && strings.Contains(p, "MVP") {
+			foundReviewMVP = true
+		}
+	}
+	if !foundPersonaMVP {
+		t.Error("MVP directive not found in persona generation prompt")
+	}
+	if !foundReviewMVP {
+		t.Error("MVP directive not found in reviewer prompts")
 	}
 }
 

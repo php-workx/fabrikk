@@ -83,7 +83,7 @@ commands:
   review <run-id>                            Show the run artifact for review
   tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
                                               review --from <path>  (one-step council review)
-                                              review flags: --structural-only --dry-run --force --round N
+                                              review flags: --mode mvp|standard|production --skip-approval --structural-only --dry-run --force --round N
   plan <draft|review|approve> ...            Manage run-scoped execution plans
   approve <run-id> [--launch]                 Approve and compile tasks
   status [<run-id>]                          Show run status
@@ -196,7 +196,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 	var fromPath, runID string
 	var remaining []string
 	// Flags that consume the next arg as their value.
-	valuedFlags := map[string]bool{"--from": true, "--round": true}
+	valuedFlags := map[string]bool{"--from": true, "--round": true, "--mode": true}
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--from" {
@@ -256,7 +256,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 		fmt.Printf("Technical spec recorded: %s\n", runDir.TechnicalSpec())
 		return nil
 	case commandReview:
-		return cmdTechSpecReview(ctx, eng, remaining)
+		return cmdTechSpecReview(ctx, eng, remaining, false)
 	case commandApprove:
 		approval, err := eng.ApproveTechnicalSpec(ctx, "user")
 		if err != nil {
@@ -269,19 +269,38 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 	}
 }
 
-// cmdTechSpecReviewFromFile creates a temporary run, drafts the spec, and runs review in one step.
+// cmdTechSpecReviewFromFile creates or reuses a run for reviewing a spec file.
+// If a previous run exists with the same spec hash, it is reused (reviews/personas cached).
 func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags []string) error {
+	// Hash the spec to find an existing run.
+	specData, err := os.ReadFile(fromPath) //nolint:gosec // fromPath is user-provided CLI input, path traversal is intentional
+	if err != nil {
+		return fmt.Errorf("read spec: %w", err)
+	}
+	specHash := state.SHA256Bytes(specData)
+
+	// Search for existing run with matching spec.
+	if runDir, runID := findRunBySpecHash(wd, specHash); runDir != nil {
+		fmt.Printf("Reusing run: %s (spec unchanged)\n", runID)
+		eng := engine.New(runDir, wd)
+		// Re-draft to ensure in-run spec matches source (council may have rewritten it).
+		if err := eng.DraftTechnicalSpec(ctx, fromPath); err != nil {
+			return fmt.Errorf("re-draft: %w", err)
+		}
+		return cmdTechSpecReview(ctx, eng, flags, true)
+	}
+
+	// Create new run.
 	runID := fmt.Sprintf("run-%d", time.Now().Unix())
 	runDir := state.NewRunDir(wd, runID)
 	if err := runDir.Init(); err != nil {
 		return fmt.Errorf("init run dir: %w", err)
 	}
 
-	// Write minimal run artifact (requirements are optional for council-only review).
 	artifact := &state.RunArtifact{
 		SchemaVersion: "0.1",
 		RunID:         runID,
-		SourceSpecs:   []state.SourceSpec{{Path: fromPath}},
+		SourceSpecs:   []state.SourceSpec{{Path: fromPath, Fingerprint: specHash}},
 	}
 	if err := runDir.WriteArtifact(artifact); err != nil {
 		return fmt.Errorf("write artifact: %w", err)
@@ -298,20 +317,49 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags [
 	eng := engine.New(runDir, wd)
 	fmt.Printf("Run created: %s\n", runID)
 
-	// Draft the tech spec into the run.
 	if err := eng.DraftTechnicalSpec(ctx, fromPath); err != nil {
 		return fmt.Errorf("draft: %w", err)
 	}
 
-	// Run the review.
-	return cmdTechSpecReview(ctx, eng, flags)
+	return cmdTechSpecReview(ctx, eng, flags, true)
 }
 
-func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) error {
+// findRunBySpecHash scans existing runs for one whose source spec matches the given hash.
+// Returns the most recent matching run, or nil if none found.
+func findRunBySpecHash(wd, specHash string) (runDir *state.RunDir, runID string) {
+	runsDir := filepath.Join(wd, ".attest", "runs")
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		return nil, ""
+	}
+
+	// Iterate newest first (entries are sorted alphabetically; run-<timestamp> sorts chronologically).
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if !e.IsDir() {
+			continue
+		}
+		runDir := state.NewRunDir(wd, e.Name())
+		artifact, err := runDir.ReadArtifact()
+		if err != nil {
+			continue
+		}
+		for _, src := range artifact.SourceSpecs {
+			if src.Fingerprint == specHash {
+				return runDir, e.Name()
+			}
+		}
+	}
+	return nil, ""
+}
+
+func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, externalSpec bool) error {
 	structuralOnly := false
 	dryRun := false
 	force := false
+	skipApproval := false
 	rounds := 2
+	mode := councilflow.ReviewStandard
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case "--structural-only":
@@ -322,33 +370,49 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string) 
 			dryRun = true
 		case "--force":
 			force = true
+		case "--skip-approval":
+			skipApproval = true
 		case "--round":
 			if i+1 < len(flags) {
 				_, _ = fmt.Sscanf(flags[i+1], "%d", &rounds)
 				i++
 			}
+		case "--mode":
+			if i+1 < len(flags) {
+				m := councilflow.ReviewMode(flags[i+1])
+				if councilflow.ValidReviewModes[m] {
+					mode = m
+				} else {
+					return fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
+				}
+				i++
+			}
 		}
 	}
 
-	// Structural review always runs first (pre-flight).
-	review, err := eng.ReviewTechnicalSpec(ctx)
-	if err != nil {
-		return err
-	}
-	data, _ := json.MarshalIndent(review, "", "  ")
-	fmt.Println(string(data))
+	// Structural review (pre-flight). Skipped for external specs that don't follow our template.
+	if !externalSpec {
+		review, err := eng.ReviewTechnicalSpec(ctx)
+		if err != nil {
+			return err
+		}
+		data, _ := json.MarshalIndent(review, "", "  ")
+		fmt.Println(string(data))
 
-	if structuralOnly {
-		return nil
-	}
-	if review.Status != state.ReviewPass {
-		return fmt.Errorf("structural review failed — fix before running council")
+		if structuralOnly {
+			return nil
+		}
+		if review.Status != state.ReviewPass {
+			return fmt.Errorf("structural review failed — fix before running council")
+		}
 	}
 
 	cfg := councilflow.DefaultConfig()
 	cfg.Rounds = rounds
+	cfg.Mode = mode
 	cfg.DryRun = dryRun
 	cfg.Force = force
+	cfg.SkipApproval = skipApproval
 	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)
 	if err != nil {
 		return err

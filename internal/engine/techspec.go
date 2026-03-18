@@ -174,6 +174,11 @@ func (e *Engine) CouncilReviewTechnicalSpec(ctx context.Context, cfg councilflow
 		return nil, fmt.Errorf("read technical spec: %w", err)
 	}
 
+	// Set spec path so reviewers can read from file instead of inline content.
+	if cfg.SpecPath == "" {
+		cfg.SpecPath = e.RunDir.TechnicalSpec()
+	}
+
 	councilDir := filepath.Join(e.RunDir.Root, "council")
 	result, err := councilflow.RunCouncil(ctx, string(data), councilDir, cfg)
 	if err != nil {

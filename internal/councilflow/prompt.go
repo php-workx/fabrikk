@@ -8,9 +8,11 @@ import (
 
 // PromptContext holds all inputs needed to construct a review prompt.
 type PromptContext struct {
-	Spec            string         // full technical spec markdown
+	Spec            string         // full technical spec markdown (used if SpecPath is empty)
+	SpecPath        string         // absolute path to spec file (preferred over inline Spec)
 	Persona         Persona        // the reviewer persona
 	Round           int            // 1 or 2
+	Mode            ReviewMode     // review tone and strictness
 	PriorFindings   []ReviewOutput // findings from previous round (empty for round 1)
 	CodebaseContext string         // optional: relevant source code or structure summary
 }
@@ -25,6 +27,11 @@ func BuildReviewPrompt(ctx *PromptContext) string {
 
 	if len(ctx.Persona.FocusSections) > 0 {
 		fmt.Fprintf(&b, "Focus sections: %s\n\n", strings.Join(ctx.Persona.FocusSections, ", "))
+	}
+
+	if directive := ReviewModeDirective(ctx.Mode); directive != "" {
+		b.WriteString(directive)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("## Instructions\n\n")
@@ -58,9 +65,14 @@ func BuildReviewPrompt(ctx *PromptContext) string {
 	}
 
 	b.WriteString("## Technical Specification\n\n")
-	b.WriteString("Review the following technical specification:\n\n")
-	b.WriteString(ctx.Spec)
-	b.WriteString("\n")
+	if ctx.SpecPath != "" {
+		fmt.Fprintf(&b, "Read the technical specification from this file: %s\n\n", ctx.SpecPath)
+		b.WriteString("You MUST read the ENTIRE file before producing findings. Do not summarize or skip sections.\n")
+	} else {
+		b.WriteString("Review the following technical specification:\n\n")
+		b.WriteString(ctx.Spec)
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }

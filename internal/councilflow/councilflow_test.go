@@ -74,8 +74,9 @@ func TestBackendForReturnsCorrectBackend(t *testing.T) {
 	for _, tt := range tests {
 		p := &Persona{Backend: tt.backend}
 		got := BackendFor(p)
-		if got.Command != tt.wantCmd {
-			t.Errorf("BackendFor(%q) command = %s, want %s", tt.backend, got.Command, tt.wantCmd)
+		// Command may be an absolute path (e.g., /usr/local/bin/claude) — check suffix.
+		if !strings.HasSuffix(got.Command, tt.wantCmd) {
+			t.Errorf("BackendFor(%q) command = %s, want suffix %s", tt.backend, got.Command, tt.wantCmd)
 		}
 	}
 }
@@ -640,6 +641,167 @@ func TestHasUnresolvedAnnotations(t *testing.T) {
 	}
 	if !HasUnresolvedAnnotations("# Spec\n@@ Fix this.\n") {
 		t.Error("doc with @@ should have unresolved annotations")
+	}
+}
+
+func TestReviewModeDirectivesNonEmpty(t *testing.T) {
+	for _, mode := range []ReviewMode{ReviewMVP, ReviewStandard, ReviewProduction} {
+		if ReviewModeDirective(mode) == "" {
+			t.Errorf("ReviewModeDirective(%s) is empty", mode)
+		}
+		if JudgeModeDirective(mode) == "" {
+			t.Errorf("JudgeModeDirective(%s) is empty", mode)
+		}
+		if PersonaModeDirective(mode) == "" {
+			t.Errorf("PersonaModeDirective(%s) is empty", mode)
+		}
+	}
+}
+
+func TestReviewModeDirectivesDistinct(t *testing.T) {
+	mvp := ReviewModeDirective(ReviewMVP)
+	std := ReviewModeDirective(ReviewStandard)
+	prod := ReviewModeDirective(ReviewProduction)
+	if mvp == std || std == prod || mvp == prod {
+		t.Error("review mode directives should be distinct")
+	}
+}
+
+func TestMVPModeInReviewPrompt(t *testing.T) {
+	persona := FixedPersonas()[0]
+	prompt := BuildReviewPrompt(&PromptContext{
+		Spec: "# Spec\n", Persona: persona, Round: 1, Mode: ReviewMVP,
+	})
+	for _, want := range []string{"MVP", "block implementation", "Do NOT suggest improvements"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("MVP review prompt missing %q", want)
+		}
+	}
+}
+
+func TestProductionModeInReviewPrompt(t *testing.T) {
+	persona := FixedPersonas()[0]
+	prompt := BuildReviewPrompt(&PromptContext{
+		Spec: "# Spec\n", Persona: persona, Round: 1, Mode: ReviewProduction,
+	})
+	for _, want := range []string{"Production", "thorough and adversarial", "10x scale"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("production review prompt missing %q", want)
+		}
+	}
+}
+
+func TestStandardModeIsDefault(t *testing.T) {
+	persona := FixedPersonas()[0]
+	prompt := BuildReviewPrompt(&PromptContext{
+		Spec: "# Spec\n", Persona: persona, Round: 1,
+	})
+	if !strings.Contains(prompt, "Standard") {
+		t.Error("empty mode should produce standard directive")
+	}
+}
+
+func TestMVPModeInJudgePrompt(t *testing.T) {
+	reviews := []ReviewOutput{{PersonaID: "test", Verdict: VerdictWarn, Findings: []Finding{{FindingID: "t-001", Severity: "significant"}}}}
+	prompt := buildJudgePrompt("# Spec\n", 1, reviews, ReviewMVP)
+	for _, want := range []string{"MVP", "REJECT findings about future phases", "goal is to ship"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("MVP judge prompt missing %q", want)
+		}
+	}
+}
+
+func TestProductionModeInJudgePrompt(t *testing.T) {
+	reviews := []ReviewOutput{{PersonaID: "test", Verdict: VerdictWarn, Findings: []Finding{{FindingID: "t-001", Severity: "significant"}}}}
+	prompt := buildJudgePrompt("# Spec\n", 1, reviews, ReviewProduction)
+	for _, want := range []string{"Production", "APPLY findings at all severity levels", "goal is completeness"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("production judge prompt missing %q", want)
+		}
+	}
+}
+
+func TestValidReviewModes(t *testing.T) {
+	for _, mode := range []ReviewMode{"mvp", "standard", "production"} {
+		if !ValidReviewModes[mode] {
+			t.Errorf("mode %q should be valid", mode)
+		}
+	}
+	if ValidReviewModes["turbo"] {
+		t.Error("invalid mode should not be accepted")
+	}
+}
+
+func TestApprovePersonasApproveAll(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("a\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != len(personas) {
+		t.Errorf("got %d personas, want %d", len(result), len(personas))
+	}
+	if !strings.Contains(out.String(), "Review Personas") {
+		t.Error("output missing persona summary")
+	}
+}
+
+func TestApprovePersonasRemoveOne(t *testing.T) {
+	personas := FixedPersonas()
+	original := len(personas)
+	in := strings.NewReader("r 1\na\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != original-1 {
+		t.Errorf("got %d personas, want %d", len(result), original-1)
+	}
+	if !strings.Contains(out.String(), "Removed") {
+		t.Error("output missing removal confirmation")
+	}
+}
+
+func TestApprovePersonasDetail(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("d 1\na\n")
+	var out strings.Builder
+	_, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "ID:") || !strings.Contains(output, "Backend:") {
+		t.Error("detail output missing expected fields")
+	}
+}
+
+func TestApprovePersonasQuit(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("q\n")
+	var out strings.Builder
+	_, err := ApprovePersonas(personas, in, &out)
+	if err == nil {
+		t.Fatal("quit should return error")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error = %q, want cancelled", err)
+	}
+}
+
+func TestApprovePersonasInvalidIndex(t *testing.T) {
+	personas := FixedPersonas()
+	in := strings.NewReader("r 99\na\n")
+	var out strings.Builder
+	result, err := ApprovePersonas(personas, in, &out)
+	if err != nil {
+		t.Fatalf("ApprovePersonas: %v", err)
+	}
+	if len(result) != len(personas) {
+		t.Error("invalid index should not remove any persona")
 	}
 }
 
