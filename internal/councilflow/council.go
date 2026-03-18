@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -228,11 +229,11 @@ func writeChangelog(outputBaseDir string, result *CouncilResult) error {
 	for i := range result.Consolidations {
 		c := &result.Consolidations[i]
 		fmt.Fprintf(&b, "## Round %d\n\n", c.Round)
-		// Build finding lookup from reviews for this round.
 		var findingLookup map[string]*Finding
 		if i < len(result.Rounds) {
 			findingLookup = buildFindingLookup(result.Rounds[i].Reviews)
 		}
+		sortEditsBySpecPosition(c)
 		writeChangelogEdits(&b, c, findingLookup)
 		writeChangelogRejections(&b, c)
 		writeChangelogFailed(&b, c)
@@ -242,6 +243,27 @@ func writeChangelog(outputBaseDir string, result *CouncilResult) error {
 
 	changelogPath := filepath.Join(outputBaseDir, "changelog.md")
 	return os.WriteFile(changelogPath, []byte(b.String()), 0o644)
+}
+
+// sortEditsBySpecPosition orders edits by where their Replace text appears
+// in the updated spec, so the changelog follows the document top to bottom.
+func sortEditsBySpecPosition(c *ConsolidationResult) {
+	if c.UpdatedSpec == "" || len(c.AppliedEdits) == 0 {
+		return
+	}
+	spec := c.UpdatedSpec
+	sort.SliceStable(c.AppliedEdits, func(i, j int) bool {
+		posI := strings.Index(spec, c.AppliedEdits[i].Replace)
+		posJ := strings.Index(spec, c.AppliedEdits[j].Replace)
+		// If Replace text not found (shouldn't happen), sort to end.
+		if posI < 0 {
+			posI = len(spec)
+		}
+		if posJ < 0 {
+			posJ = len(spec)
+		}
+		return posI < posJ
+	})
 }
 
 func buildFindingLookup(reviews []ReviewOutput) map[string]*Finding {
