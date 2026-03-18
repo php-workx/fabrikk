@@ -283,6 +283,10 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags [
 	if runDir, runID := findRunBySpecHash(wd, specHash); runDir != nil {
 		fmt.Printf("Reusing run: %s (spec unchanged)\n", runID)
 		eng := engine.New(runDir, wd)
+		// Re-draft to ensure in-run spec matches source (council may have rewritten it).
+		if err := eng.DraftTechnicalSpec(ctx, fromPath); err != nil {
+			return fmt.Errorf("re-draft: %w", err)
+		}
 		return cmdTechSpecReview(ctx, eng, flags, true)
 	}
 

@@ -32,7 +32,10 @@ func ApprovePersonas(personas []Persona, in io.Reader, out io.Writer) ([]Persona
 	for {
 		w(out, "Action: [a]pprove all, [r]emove N, [d]etail N, [q]uit > ")
 		if !scanner.Scan() {
-			return nil, fmt.Errorf("persona approval: no input")
+			if err := scanner.Err(); err != nil {
+				return nil, fmt.Errorf("persona approval: %w", err)
+			}
+			return nil, fmt.Errorf("persona approval: no input (EOF)")
 		}
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {

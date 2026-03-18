@@ -37,7 +37,7 @@ func DefaultConfig() CouncilConfig {
 // StageTiming records the duration of one pipeline stage.
 type StageTiming struct {
 	Stage    string        `json:"stage"`
-	Duration time.Duration `json:"duration_ms"`
+	Duration time.Duration `json:"duration_ns"`
 }
 
 // CouncilResult holds the full pipeline output across all rounds.

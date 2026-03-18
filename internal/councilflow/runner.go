@@ -141,8 +141,9 @@ func (r *Runner) RunRound(ctx context.Context, spec string, round int, personas 
 		return nil, fmt.Errorf("write personas: %w", err)
 	}
 
-	// Write spec hash for cache validation — if spec changes, cached reviews are stale.
-	specHash := fmt.Sprintf("%x", sha256.Sum256([]byte(spec)))
+	// Cache key includes spec content + review mode — changing either invalidates cache.
+	cacheInput := spec + "\n__mode__:" + string(r.Mode)
+	specHash := fmt.Sprintf("%x", sha256.Sum256([]byte(cacheInput)))
 	specHashPath := filepath.Join(r.OutputDir, "spec-hash.txt")
 	cacheValid := !r.Force && matchesSpecHash(specHashPath, specHash)
 	if err := os.WriteFile(specHashPath, []byte(specHash+"\n"), 0o644); err != nil {
