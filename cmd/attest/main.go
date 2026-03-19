@@ -13,6 +13,7 @@ import (
 	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/engine"
 	"github.com/runger/attest/internal/state"
+	"github.com/runger/attest/internal/ticket"
 )
 
 const (
@@ -498,6 +499,10 @@ func cmdApprove(ctx context.Context, args []string) error {
 
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
+
+	// Wire ticket store for dual-write: tasks go to both tasks.json and .tickets/.
+	ticketStore := ticket.NewStore(filepath.Join(wd, ".tickets"))
+	eng.TaskStore = ticketStore
 
 	if err := eng.Approve(ctx); err != nil {
 		return err

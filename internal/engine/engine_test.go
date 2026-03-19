@@ -11,6 +11,7 @@ import (
 	"github.com/runger/attest/internal/compiler"
 	"github.com/runger/attest/internal/engine"
 	"github.com/runger/attest/internal/state"
+	"github.com/runger/attest/internal/ticket"
 )
 
 func writeTestSpec(t *testing.T, dir string) string {
@@ -1200,5 +1201,65 @@ func TestCompileRejectsStaleExecutionPlan(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "re-draft the execution plan") {
 		t.Fatalf("Compile() error = %q, want re-draft context", err)
+	}
+}
+
+func TestCompileDualWrite(t *testing.T) {
+	dir := t.TempDir()
+	specPath := writeTestSpec(t, dir)
+	ctx := context.Background()
+
+	runDir := state.NewRunDir(dir, "placeholder")
+	eng := engine.New(runDir, dir)
+
+	if _, err := eng.Prepare(ctx, []string{specPath}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := eng.RunDir.ReadArtifact()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeApprovedExecutionPlanForArtifact(t, eng.RunDir, artifact)
+	if err := eng.Approve(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wire a ticket store for dual-write.
+	ticketDir := filepath.Join(dir, ".tickets")
+	ticketStore := ticket.NewStore(ticketDir)
+	eng.TaskStore = ticketStore
+
+	result, err := eng.Compile(ctx)
+	if err != nil {
+		t.Fatalf("Compile with dual-write: %v", err)
+	}
+
+	// Verify tasks exist in both stores.
+	jsonStore := eng.RunDir.AsTaskStore()
+	jsonTasks, err := jsonStore.ReadTasks(artifact.RunID)
+	if err != nil {
+		t.Fatalf("read tasks.json: %v", err)
+	}
+	ticketTasks, err := ticketStore.ReadTasks(artifact.RunID)
+	if err != nil {
+		t.Fatalf("read .tickets/: %v", err)
+	}
+
+	if len(jsonTasks) != len(result.Tasks) {
+		t.Errorf("tasks.json has %d tasks, want %d", len(jsonTasks), len(result.Tasks))
+	}
+	if len(ticketTasks) != len(result.Tasks) {
+		t.Errorf(".tickets/ has %d tasks, want %d", len(ticketTasks), len(result.Tasks))
+	}
+
+	// Verify same task IDs in both stores.
+	jsonIDs := make(map[string]bool, len(jsonTasks))
+	for i := range jsonTasks {
+		jsonIDs[jsonTasks[i].TaskID] = true
+	}
+	for i := range ticketTasks {
+		if !jsonIDs[ticketTasks[i].TaskID] {
+			t.Errorf("task %s in .tickets/ but not in tasks.json", ticketTasks[i].TaskID)
+		}
 	}
 }

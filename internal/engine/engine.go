@@ -198,6 +198,16 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 	if err := e.taskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
 		return nil, fmt.Errorf(errWriteTasks, err)
 	}
+
+	// Dual-write: when TaskStore is set (e.g. ticket.Store), also persist tasks.json
+	// for backward compatibility. RunDir always reads tasks.json.
+	if e.TaskStore != nil {
+		if err := e.RunDir.AsTaskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
+			return nil, fmt.Errorf("dual-write tasks.json: %w", err)
+		}
+		e.validateDualWrite(artifact.RunID, result.Tasks)
+	}
+
 	if err := e.RunDir.WriteCoverage(result.Coverage); err != nil {
 		return nil, fmt.Errorf("write coverage: %w", err)
 	}
@@ -276,39 +286,24 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 
 // RetryTask clears a blocked task for another manual attempt.
 func (e *Engine) RetryTask(taskID string) error {
-	tasks, err := e.taskStore().ReadTasks(e.runID())
+	// Validate task exists and is retryable before updating.
+	task, err := e.taskStore().ReadTask(taskID)
 	if err != nil {
-		return fmt.Errorf(errReadTasks, err)
+		return fmt.Errorf("read task: %w", err)
+	}
+	if task.Status != state.TaskBlocked && task.Status != state.TaskRepairPending {
+		return fmt.Errorf("task %s is not retryable from status %s", taskID, task.Status)
 	}
 
-	found := false
-	now := time.Now()
-	for i := range tasks {
-		if tasks[i].TaskID != taskID {
-			continue
-		}
-		if tasks[i].Status != state.TaskBlocked && tasks[i].Status != state.TaskRepairPending {
-			return fmt.Errorf("task %s is not retryable from status %s", taskID, tasks[i].Status)
-		}
-		tasks[i].Status = state.TaskPending
-		tasks[i].StatusReason = ""
-		tasks[i].UpdatedAt = now
-		found = true
-		break
-	}
-	if !found {
-		return fmt.Errorf("task %s not found", taskID)
-	}
-
-	if err := e.taskStore().WriteTasks(e.runID(), tasks); err != nil {
-		return fmt.Errorf(errWriteTasks, err)
+	if err := e.taskStore().UpdateStatus(taskID, state.TaskPending, ""); err != nil {
+		return fmt.Errorf("update task status: %w", err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
 		return fmt.Errorf(errSyncCoverage, err)
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{
-		Timestamp: now,
+		Timestamp: time.Now(),
 		Type:      "task_retried",
 		RunID:     filepathBase(e.RunDir.Root),
 		TaskID:    taskID,
@@ -358,29 +353,10 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 	return e.RunDir.ReadStatus()
 }
 
-// UpdateTaskStatus updates a task's status in tasks.json (single-writer rule, spec section 4.1).
+// UpdateTaskStatus updates a single task's status via per-ticket write (spec section 4.1).
 func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, reason string) error {
-	tasks, err := e.taskStore().ReadTasks(e.runID())
-	if err != nil {
-		return fmt.Errorf(errReadTasks, err)
-	}
-
-	found := false
-	for i := range tasks {
-		if tasks[i].TaskID == taskID {
-			tasks[i].Status = newStatus
-			tasks[i].StatusReason = reason
-			tasks[i].UpdatedAt = time.Now()
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("task %s not found", taskID)
-	}
-
-	if err := e.taskStore().WriteTasks(e.runID(), tasks); err != nil {
-		return err
+	if err := e.taskStore().UpdateStatus(taskID, newStatus, reason); err != nil {
+		return fmt.Errorf("update task status: %w", err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
 		return fmt.Errorf(errSyncCoverage, err)
@@ -489,37 +465,80 @@ func filepathBase(path string) string {
 }
 
 func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, reason string) error {
-	tasks, err := e.taskStore().ReadTasks(e.runID())
+	// Try per-ticket read first; if not found, write the full task as new.
+	existing, err := e.taskStore().ReadTask(task.TaskID)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf(errReadTasks, err)
-		}
-		tasks = []state.Task{*task}
+		// Task doesn't exist yet — write it as new with the verified status.
+		newTask := *task
+		newTask.Status = status
+		newTask.StatusReason = reason
+		newTask.UpdatedAt = time.Now()
+		return e.taskStore().WriteTask(&newTask)
 	}
 
-	found := false
-	for i := range tasks {
-		if tasks[i].TaskID != task.TaskID {
-			continue
-		}
-		tasks[i].Status = status
-		tasks[i].StatusReason = reason
-		tasks[i].UpdatedAt = time.Now()
-		found = true
-		break
-	}
-	if !found {
-		verifiedTask := *task
-		verifiedTask.Status = status
-		verifiedTask.StatusReason = reason
-		verifiedTask.UpdatedAt = time.Now()
-		tasks = append(tasks, verifiedTask)
+	existing.Status = status
+	existing.StatusReason = reason
+	existing.UpdatedAt = time.Now()
+	return e.taskStore().WriteTask(existing)
+}
+
+// validateDualWrite reads back tasks from both TaskStore and RunDir,
+// compares counts and IDs, and logs warnings on divergence.
+func (e *Engine) validateDualWrite(runID string, expected []state.Task) {
+	// Build expected ID set.
+	expectedIDs := make(map[string]struct{}, len(expected))
+	for i := range expected {
+		expectedIDs[expected[i].TaskID] = struct{}{}
 	}
 
-	if err := e.taskStore().WriteTasks(e.runID(), tasks); err != nil {
-		return fmt.Errorf(errWriteTasks, err)
+	// Read back from ticket store.
+	ticketTasks, ticketErr := e.TaskStore.ReadTasks(runID)
+	if ticketErr != nil {
+		e.logDualWriteWarning(runID, fmt.Sprintf("ticket store read-back failed: %v", ticketErr))
+		return
 	}
-	return nil
+
+	// Read back from RunDir.
+	jsonTasks, jsonErr := e.RunDir.AsTaskStore().ReadTasks(runID)
+	if jsonErr != nil {
+		e.logDualWriteWarning(runID, fmt.Sprintf("tasks.json read-back failed: %v", jsonErr))
+		return
+	}
+
+	// Compare counts.
+	if len(ticketTasks) != len(jsonTasks) {
+		e.logDualWriteWarning(runID, fmt.Sprintf(
+			"task count mismatch: .tickets/ has %d, tasks.json has %d",
+			len(ticketTasks), len(jsonTasks)))
+	}
+
+	// Compare IDs.
+	ticketIDs := make(map[string]struct{}, len(ticketTasks))
+	for i := range ticketTasks {
+		ticketIDs[ticketTasks[i].TaskID] = struct{}{}
+	}
+	jsonIDs := make(map[string]struct{}, len(jsonTasks))
+	for i := range jsonTasks {
+		jsonIDs[jsonTasks[i].TaskID] = struct{}{}
+	}
+
+	for id := range expectedIDs {
+		if _, ok := ticketIDs[id]; !ok {
+			e.logDualWriteWarning(runID, fmt.Sprintf("task %s missing from .tickets/", id))
+		}
+		if _, ok := jsonIDs[id]; !ok {
+			e.logDualWriteWarning(runID, fmt.Sprintf("task %s missing from tasks.json", id))
+		}
+	}
+}
+
+func (e *Engine) logDualWriteWarning(runID, detail string) {
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "dual_write_warning",
+		RunID:     runID,
+		Detail:    detail,
+	})
 }
 
 func summarizeFindings(findings []state.Finding) string {

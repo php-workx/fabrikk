@@ -37,5 +37,8 @@ coverage.html
 # Firebase
 firebase-debug.log
 
+# Ticket lock files
+.tickets/*.lock
+
 # AgentOps session artifacts
 .agents/
