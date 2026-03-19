@@ -370,6 +370,7 @@ func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, rea
 		if tasks[i].TaskID == taskID {
 			tasks[i].Status = newStatus
 			tasks[i].StatusReason = reason
+			tasks[i].UpdatedAt = time.Now()
 			found = true
 			break
 		}

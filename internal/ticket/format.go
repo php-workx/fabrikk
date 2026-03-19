@@ -237,7 +237,7 @@ func splitFrontmatterBody(data []byte) (*Frontmatter, string, error) {
 
 	yamlStr := content[4 : 4+end]
 	body := ""
-	bodyStart := 4 + end + 4 // past "\n---\n"
+	bodyStart := 4 + end + 5 // past "\n---\n" (5 chars)
 	if bodyStart < len(content) {
 		body = content[bodyStart:]
 	}

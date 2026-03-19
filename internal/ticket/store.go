@@ -23,8 +23,13 @@ func NewStore(dir string) *Store {
 	return &Store{Dir: dir}
 }
 
-// CreateRun creates an epic ticket for a run.
+// CreateRun creates an epic ticket for a run. Idempotent — skips if epic exists.
 func (s *Store) CreateRun(runID string) error {
+	epicPath := filepath.Join(s.Dir, runID+".md")
+	if _, err := os.Stat(epicPath); err == nil {
+		return nil // epic already exists
+	}
+
 	epic := &state.Task{
 		TaskID:    runID,
 		Title:     fmt.Sprintf("Run %s", runID),
@@ -56,12 +61,27 @@ func (s *Store) ReadTasks(runID string) ([]state.Task, error) {
 }
 
 // WriteTasks creates an epic for the run and writes all tasks as children.
+// For existing tickets, preserves the markdown body (notes, descriptions).
 func (s *Store) WriteTasks(runID string, tasks []state.Task) error {
 	if err := s.CreateRun(runID); err != nil {
 		return fmt.Errorf("create run epic: %w", err)
 	}
 	for i := range tasks {
 		tasks[i].ParentTaskID = runID
+		path := filepath.Join(s.Dir, tasks[i].TaskID+".md")
+
+		// If file exists, preserve body via frontmatter-only update.
+		if existing, readErr := os.ReadFile(path); readErr == nil {
+			updated, fmErr := UpdateFrontmatter(existing, &tasks[i])
+			if fmErr == nil {
+				if writeErr := atomicWrite(path, updated); writeErr != nil {
+					return fmt.Errorf("update task %s: %w", tasks[i].TaskID, writeErr)
+				}
+				continue
+			}
+		}
+
+		// New file — full marshal.
 		data, err := MarshalTicket(&tasks[i])
 		if err != nil {
 			return fmt.Errorf("marshal task %s: %w", tasks[i].TaskID, err)
@@ -117,15 +137,33 @@ func (s *Store) WriteTask(task *state.Task) error {
 }
 
 // UpdateStatus updates a task's status (both attest_status and tk status).
+// Read and write are inside the same lock to prevent race conditions.
 func (s *Store) UpdateStatus(taskID string, status state.TaskStatus, reason string) error {
-	task, err := s.ReadTask(taskID)
+	resolvedID, err := ResolveID(s.Dir, taskID)
 	if err != nil {
 		return err
 	}
-	task.Status = status
-	task.StatusReason = reason
-	task.UpdatedAt = time.Now()
-	return s.WriteTask(task)
+	path := filepath.Join(s.Dir, resolvedID+".md")
+
+	return s.withLock(path, func() error {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+		}
+		task, parseErr := UnmarshalTicket(data)
+		if parseErr != nil {
+			return parseErr
+		}
+		task.Status = status
+		task.StatusReason = reason
+		task.UpdatedAt = time.Now()
+
+		updated, fmErr := UpdateFrontmatter(data, task)
+		if fmErr != nil {
+			return fmErr
+		}
+		return atomicWrite(path, updated)
+	})
 }
 
 // AddNote appends a timestamped note to a ticket's Notes section.
@@ -277,12 +315,12 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + fmt.Sprintf(".tmp.%d", os.Getpid())
 
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(dir, ".attest-ticket-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
