@@ -1,6 +1,7 @@
 package ticket
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -308,5 +309,101 @@ func TestReadTasksPropagatesPartialRead(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0].TaskID != "task-ok" {
 		t.Errorf("got tasks %v, want [task-ok]", tasks)
+	}
+}
+
+func TestAtomicWriteDoesNotCorruptOnPartialFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "task-atomic.md")
+
+	// Write initial content.
+	original := []byte("---\nid: task-atomic\nstatus: open\npriority: 0\norder: 0\n---\n# Original\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a "crash" by writing a leftover temp file (as if atomicWrite
+	// was interrupted after creating the temp but before rename).
+	leftover := filepath.Join(dir, ".attest-ticket-leftover")
+	if err := os.WriteFile(leftover, []byte("partial garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The original file should be intact — leftover temp doesn't affect it.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, original) {
+		t.Error("original file was corrupted by leftover temp")
+	}
+
+	// A subsequent atomicWrite should succeed, overwriting the original.
+	replacement := []byte("---\nid: task-atomic\nstatus: closed\npriority: 0\norder: 0\n---\n# Updated\n")
+	if err := atomicWrite(path, replacement); err != nil {
+		t.Fatalf("atomicWrite after simulated crash: %v", err)
+	}
+
+	// Verify the new content is correct.
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, replacement) {
+		t.Error("atomicWrite did not produce expected content after simulated crash")
+	}
+
+	// Verify the temp file from the successful write was cleaned up
+	// (os.CreateTemp creates new files, doesn't reuse the leftover).
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != "task-atomic.md" && e.Name() != ".attest-ticket-leftover" {
+			t.Errorf("unexpected file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestAddDepValidatesDepTargetExists(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	task := testTask()
+	task.TaskID = "task-source"
+	if err := store.WriteTask(&task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adding a dep on a nonexistent target should fail.
+	err := store.AddDep("task-source", "nonexistent-dep")
+	if err == nil {
+		t.Fatal("expected error when dep target does not exist")
+	}
+	if !errors.Is(err, ErrTicketNotFound) {
+		t.Fatalf("expected ErrTicketNotFound, got: %v", err)
+	}
+
+	// Adding a dep on an existing target should succeed.
+	dep := testTask()
+	dep.TaskID = "task-dep"
+	if err := store.WriteTask(&dep); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddDep("task-source", "task-dep"); err != nil {
+		t.Fatalf("AddDep on existing target: %v", err)
+	}
+
+	// Verify the dep was recorded.
+	updated, err := store.ReadTask("task-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range updated.DependsOn {
+		if d == "task-dep" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dep was not recorded on source task")
 	}
 }

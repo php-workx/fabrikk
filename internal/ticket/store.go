@@ -198,10 +198,15 @@ func (s *Store) AddNote(id, text string) error {
 
 // AddDep adds a directional dependency (id depends on depID).
 // The full read-check-write is inside a single lock to prevent TOCTOU races.
+// Returns ErrTicketNotFound if depID does not resolve to an existing ticket.
 func (s *Store) AddDep(id, depID string) error {
 	resolvedID, err := ResolveID(s.Dir, id)
 	if err != nil {
 		return err
+	}
+	// Validate that the dependency target exists.
+	if _, depErr := ResolveID(s.Dir, depID); depErr != nil {
+		return fmt.Errorf("dep target %s: %w", depID, depErr)
 	}
 	path := filepath.Join(s.Dir, resolvedID+".md")
 

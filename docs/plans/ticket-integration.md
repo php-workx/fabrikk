@@ -146,8 +146,8 @@ shared_paths: []
 status_reason: ""         # explanation for blocked/failed status
 required_evidence: [quality_gate_pass, test_pass]
 created_from: ""          # source task ID if repair/followup
-parent_task_id: ""        # attest parent (different from tk parent)
 updated_at: "2026-03-19T10:00:00Z"  # last modification timestamp
+# Note: parent_task_id is unified with tk-native 'parent' field (pm-017)
 ---
 # Implement auth module
 
@@ -270,7 +270,7 @@ func (s *Store) DetectCycles() ([][]string, error):
   Return list of cycles (each is []string of IDs)
 ```
 
-**Bidirectional links** (`store.go`):
+**Bidirectional links** (`store.go`) — **deferred** (tracked as att-j911):
 ```
 func (s *Store) Link(idA, idB string) error:
   taskA = ReadTask(idA)
@@ -280,6 +280,7 @@ func (s *Store) Link(idA, idB string) error:
 ```
 - Links are symmetric: stored in both files
 - Idempotent: skip if already linked
+- **Status**: Stubbed with "not yet implemented" — not needed until agent coordination requires links
 
 **Deps** (`store.go`):
 ```
@@ -303,13 +304,14 @@ func (s *Store) AddNote(id, text string) error:
 **Atomic writes** (`store.go`):
 ```
 func atomicWrite(path string, data []byte) error:
-  tmp = path + ".tmp." + strconv.Itoa(os.Getpid())
+  tmp = os.CreateTemp(dir, ".attest-ticket-*")  // random suffix, safer than PID
   Write data to tmp
   fsync tmp
   os.Rename(tmp, path)
-  fsync parent directory
+  fsync parent directory (best-effort)
 ```
-- Uses existing `internal/state.WriteAtomic` pattern (already battle-tested in attest)
+- Uses `os.CreateTemp` for unique temp files (avoids PID-reuse collisions)
+- Cleanup on every failure path (remove tmp on write/sync/close/rename errors)
 
 **File locking** (`store.go`):
 ```
@@ -374,8 +376,9 @@ func (s *Store) DetectCycles(runID string) ([][]string, error)  // scoped to run
 
 **format.go:**
 ```go
-// TicketFrontmatter holds all YAML fields (both tk-native and attest-custom)
-type TicketFrontmatter struct {
+// Frontmatter holds all YAML fields (both tk-native and attest-custom).
+// (Named Frontmatter in implementation, not TicketFrontmatter — shorter.)
+type Frontmatter struct {
     // tk-native fields
     ID          string   `yaml:"id"`
     Title       string   `yaml:"title,omitempty"`
@@ -417,13 +420,13 @@ type TicketFrontmatter struct {
 **Note on time formatting** (pm-018 resolution): All time fields use `time.RFC3339` format, always UTC. Conversion helpers:
 ```go
 func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
-func parseTime(s string) (time.Time, error) { return time.Parse(time.RFC3339, s) }
+func parseTime(s string) time.Time   // returns zero time on parse failure (pragmatic — callers don't check)
 ```
 
 func MarshalTicket(task *state.Task) ([]byte, error)    // Task → markdown bytes
 func UnmarshalTicket(data []byte) (*state.Task, error)  // markdown bytes → Task
-func TaskToFrontmatter(task *state.Task) *TicketFrontmatter
-func FrontmatterToTask(fm *TicketFrontmatter, body string) *state.Task
+func TaskToFrontmatter(task *state.Task) *Frontmatter
+func FrontmatterToTask(fm *Frontmatter) *state.Task
 func StatusToTicket(s state.TaskStatus) string           // attest → tk status
 func StatusFromTicket(tkStatus, attestStatus string) state.TaskStatus  // tk → attest
 ```
