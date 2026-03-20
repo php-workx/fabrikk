@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/runger/attest/internal/state"
 )
 
 // DefaultLeaseDuration is unused here but exported for consistency.
@@ -136,6 +138,31 @@ func (s *Store) Query(opts QueryOpts) ([]Learning, error) {
 		results = results[:opts.Limit]
 	}
 	return results, nil
+}
+
+// QueryByTagsAndPaths satisfies state.LearningEnricher. Returns top learnings
+// matching the given tags or paths, sorted by utility.
+func (s *Store) QueryByTagsAndPaths(tags, paths []string, limit int) ([]state.LearningRef, error) {
+	results, err := s.Query(QueryOpts{
+		Tags:       tags,
+		Paths:      paths,
+		MinUtility: 0.1,
+		Limit:      limit,
+		SortBy:     "utility",
+	})
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]state.LearningRef, len(results))
+	for i := range results {
+		refs[i] = state.LearningRef{
+			ID:       results[i].ID,
+			Category: string(results[i].Category),
+			Utility:  results[i].Utility,
+			Summary:  results[i].Summary,
+		}
+	}
+	return refs, nil
 }
 
 // Get returns a single learning by ID.

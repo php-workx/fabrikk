@@ -13,6 +13,7 @@ import (
 
 	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/engine"
+	"github.com/runger/attest/internal/learning"
 	"github.com/runger/attest/internal/state"
 )
 
@@ -91,6 +92,7 @@ func newEngine(wd, runID string) *engine.Engine {
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
 	eng.TaskStore = taskStoreForRun(wd, runID)
+	eng.LearningEnricher = learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
 	return eng
 }
 

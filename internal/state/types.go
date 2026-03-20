@@ -37,6 +37,23 @@ type ClaimableStore interface {
 	RenewClaim(taskID, ownerID string, lease time.Duration) error
 }
 
+// LearningCategory classifies learnings for enrichment mapping.
+type LearningCategory string
+
+// Learning categories used by enrichTaskWithLearnings.
+const (
+	LearningCategoryAntiPattern LearningCategory = "anti_pattern"
+	LearningCategoryCodebase    LearningCategory = "codebase"
+	LearningCategoryTooling     LearningCategory = "tooling"
+)
+
+// LearningEnricher enriches tasks with learnings from a learning store.
+// The engine type-asserts to this interface. Implemented by learning.Store.
+type LearningEnricher interface {
+	QueryByTagsAndPaths(tags, paths []string, limit int) ([]LearningRef, error)
+	RecordCitation(id string) error
+}
+
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).
 type RunArtifact struct {
 	SchemaVersion  string          `json:"schema_version"`

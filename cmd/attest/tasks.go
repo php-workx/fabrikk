@@ -8,7 +8,9 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/runger/attest/internal/learning"
 	"github.com/runger/attest/internal/state"
 	"github.com/runger/attest/internal/ticket"
 )
@@ -321,6 +323,7 @@ func cmdNext(args []string) error {
 		} else {
 			fmt.Println("Next task:")
 			outputTasks(ready[:1], false)
+			showLatestHandoff(wd)
 		}
 		return nil
 	}
@@ -347,6 +350,9 @@ func cmdNext(args []string) error {
 	}
 
 	fmt.Println("No ready or blocked tasks.")
+
+	// Show handoff if recent.
+	showLatestHandoff(wd)
 	return nil
 }
 
@@ -420,4 +426,22 @@ func cmdProgress(args []string) error {
 		}
 	}
 	return nil
+}
+
+// showLatestHandoff displays the latest session handoff if less than 24h old.
+func showLatestHandoff(wd string) {
+	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	h, err := store.LatestHandoff()
+	if err != nil || h == nil {
+		return
+	}
+	age := time.Since(h.CreatedAt)
+	if age > 24*time.Hour {
+		return
+	}
+	fmt.Printf("\nSession continuity (%s ago):\n  %s\n",
+		age.Truncate(time.Minute), h.Summary)
+	for _, s := range h.NextSteps {
+		fmt.Printf("  Next: %s\n", s)
+	}
 }
