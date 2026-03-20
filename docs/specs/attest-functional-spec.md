@@ -175,7 +175,7 @@ v1 will not:
 
 `attest` includes a built-in lightweight task tracker. This is a simplified, less invasive alternative to tools like Beads. It tracks tasks, epics (waves), and related work items, and supports claims and releases for parallel workers.
 
-Task tracking is file-based and lives within the run directory. It does not require git hooks, external services, or a separate CLI. The orchestrator reads and writes task state directly as part of the pipeline.
+Task tracking is file-based and lives in the project-scoped `.tickets/` directory as markdown files with YAML frontmatter. Each run creates an epic ticket; tasks are children scoped via the `parent` field. The ticket store (`internal/ticket`) implements the `TaskStore` and `ClaimableStore` interfaces. It does not require git hooks, external services, or a separate CLI. The orchestrator reads and writes task state directly as part of the pipeline.
 
 ### 6.2 Source specs
 
@@ -461,9 +461,9 @@ The council is the independent multi-model review stage. The reviewer set is plu
 
 **Context budget rule.** Reviewers write ALL analysis to files. Messages to the orchestrator are MINIMAL — verdict, confidence, and file path only. The orchestrator reads reviewer output files during synthesis. This prevents N reviewers from flooding the orchestrator's context.
 
-**Consensus verdict computation.** Simple, deterministic rules:
+**Consensus verdict computation.** Simple, deterministic rules (matches AT-FR-071):
 
-- **PASS:** All reviewers PASS (or majority PASS, none FAIL)
+- **PASS:** All reviewers PASS
 - **WARN:** Any reviewer WARN, none FAIL
 - **FAIL:** Any reviewer FAIL
 
