@@ -403,3 +403,110 @@ func TestRunDirAppendEventWritesJSONLines(t *testing.T) {
 		t.Fatalf("unexpected decoded events: %+v", decoded)
 	}
 }
+
+func TestRunDirTaskStoreReadWriteTask(t *testing.T) {
+	baseDir := t.TempDir()
+	runDir := state.NewRunDir(baseDir, "run-store-test")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	store := runDir.AsTaskStore()
+
+	// Write tasks via store.
+	tasks := []state.Task{
+		{TaskID: "task-1", Title: "First", Status: state.TaskPending},
+		{TaskID: "task-2", Title: "Second", Status: state.TaskPending},
+	}
+	if err := store.WriteTasks("run-store-test", tasks); err != nil {
+		t.Fatalf("WriteTasks: %v", err)
+	}
+
+	// Read all tasks.
+	got, err := store.ReadTasks("run-store-test")
+	if err != nil {
+		t.Fatalf("ReadTasks: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(got))
+	}
+
+	// Read single task.
+	task, err := store.ReadTask("task-1")
+	if err != nil {
+		t.Fatalf("ReadTask: %v", err)
+	}
+	if task.Title != "First" {
+		t.Errorf("Title = %q, want First", task.Title)
+	}
+
+	// Read nonexistent.
+	_, err = store.ReadTask("nonexistent")
+	if err == nil {
+		t.Error("ReadTask should error on nonexistent")
+	}
+
+	// WriteTask updates existing.
+	task.Status = state.TaskDone
+	if err := store.WriteTask(task); err != nil {
+		t.Fatalf("WriteTask: %v", err)
+	}
+	updated, _ := store.ReadTask("task-1")
+	if updated.Status != state.TaskDone {
+		t.Errorf("Status = %q, want done", updated.Status)
+	}
+
+	// WriteTask appends new.
+	if err := store.WriteTask(&state.Task{TaskID: "task-3", Title: "Third"}); err != nil {
+		t.Fatalf("WriteTask (new): %v", err)
+	}
+	all, _ := store.ReadTasks("run-store-test")
+	if len(all) != 3 {
+		t.Fatalf("got %d tasks after append, want 3", len(all))
+	}
+}
+
+func TestRunDirTaskStoreUpdateStatus(t *testing.T) {
+	baseDir := t.TempDir()
+	runDir := state.NewRunDir(baseDir, "run-status-test")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	store := runDir.AsTaskStore()
+	if err := store.WriteTasks("run-status-test", []state.Task{
+		{TaskID: "task-1", Status: state.TaskPending},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpdateStatus("task-1", state.TaskDone, "verified"); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	task, _ := store.ReadTask("task-1")
+	if task.Status != state.TaskDone {
+		t.Errorf("Status = %q, want done", task.Status)
+	}
+	if task.StatusReason != "verified" {
+		t.Errorf("StatusReason = %q, want verified", task.StatusReason)
+	}
+	if task.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt should be set")
+	}
+
+	// Nonexistent task.
+	err := store.UpdateStatus("nonexistent", state.TaskDone, "")
+	if err == nil {
+		t.Error("UpdateStatus should error on nonexistent")
+	}
+}
+
+func TestRunDirTaskStoreCreateRunNoop(t *testing.T) {
+	baseDir := t.TempDir()
+	runDir := state.NewRunDir(baseDir, "run-noop")
+	store := runDir.AsTaskStore()
+	if err := store.CreateRun("run-noop"); err != nil {
+		t.Fatalf("CreateRun should be no-op: %v", err)
+	}
+}

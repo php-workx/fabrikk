@@ -13,6 +13,7 @@ import (
 	"github.com/runger/attest/internal/compiler"
 	"github.com/runger/attest/internal/engine"
 	"github.com/runger/attest/internal/state"
+	"github.com/runger/attest/internal/ticket"
 )
 
 func TestCmdStatusListsRunsAndSingleRun(t *testing.T) {
@@ -495,7 +496,8 @@ func TestCmdReportImportsCompletionReportAndVerifyPasses(t *testing.T) {
 	assertContains(t, verifyOutput, `"pass": true`)
 	assertContains(t, verifyOutput, "Verification: PASS")
 
-	tasks, err := runDir.ReadTasks()
+	verifyStore := ticket.NewStore(filepath.Join(baseDir, ".tickets"))
+	tasks, err := verifyStore.ReadTasks("run-report")
 	if err != nil {
 		t.Fatalf("ReadTasks(after verify): %v", err)
 	}
@@ -580,8 +582,8 @@ func TestCmdApproveCompilesTasksAndLaunchNotice(t *testing.T) {
 	assertContains(t, output, "Tasks: 1")
 	assertContains(t, output, "--launch: detached execution not yet implemented (Phase 4)")
 
-	compiledRunDir := state.NewRunDir(baseDir, artifact.RunID)
-	tasks, err := compiledRunDir.ReadTasks()
+	approveStore := ticket.NewStore(filepath.Join(baseDir, ".tickets"))
+	tasks, err := approveStore.ReadTasks(artifact.RunID)
 	if err != nil {
 		t.Fatalf("ReadTasks: %v", err)
 	}
@@ -736,13 +738,13 @@ func TestCmdRetryRequeuesBlockedTask(t *testing.T) {
 		},
 	})
 
-	runDir := state.NewRunDir(baseDir, "run-retry")
-	tasks, err := runDir.ReadTasks()
+	retryStore := ticket.NewStore(filepath.Join(baseDir, ".tickets"))
+	tasks, err := retryStore.ReadTasks("run-retry")
 	if err != nil {
 		t.Fatalf("ReadTasks(before retry): %v", err)
 	}
 	tasks[0].StatusReason = "missing evidence"
-	if err := runDir.WriteTasks(tasks); err != nil {
+	if err := retryStore.WriteTasks("run-retry", tasks); err != nil {
 		t.Fatalf("WriteTasks(before retry): %v", err)
 	}
 
@@ -753,7 +755,7 @@ func TestCmdRetryRequeuesBlockedTask(t *testing.T) {
 	})
 	assertContains(t, output, "Task requeued: task-blocked")
 
-	tasks, err = runDir.ReadTasks()
+	tasks, err = retryStore.ReadTasks("run-retry")
 	if err != nil {
 		t.Fatalf("ReadTasks(after retry): %v", err)
 	}
@@ -761,7 +763,8 @@ func TestCmdRetryRequeuesBlockedTask(t *testing.T) {
 		t.Fatalf("task after retry = %+v, want pending with cleared reason", tasks)
 	}
 
-	coverage, err := runDir.ReadCoverage()
+	retryRunDir := state.NewRunDir(baseDir, "run-retry")
+	coverage, err := retryRunDir.ReadCoverage()
 	if err != nil {
 		t.Fatalf("ReadCoverage(after retry): %v", err)
 	}
@@ -769,7 +772,7 @@ func TestCmdRetryRequeuesBlockedTask(t *testing.T) {
 		t.Fatalf("coverage after retry = %+v, want in_progress", coverage)
 	}
 
-	status, err := runDir.ReadStatus()
+	status, err := retryRunDir.ReadStatus()
 	if err != nil {
 		t.Fatalf("ReadStatus(after retry): %v", err)
 	}
@@ -916,8 +919,10 @@ func writeRunFixture(t *testing.T, baseDir, runID string, fixture runFixture) {
 		}
 	}
 	if fixture.tasks != nil {
-		if err := runDir.WriteTasks(fixture.tasks); err != nil {
-			t.Fatalf("WriteTasks: %v", err)
+		// Write to ticket store (sole task backend).
+		ticketStore := ticket.NewStore(filepath.Join(baseDir, ".tickets"))
+		if err := ticketStore.WriteTasks(runID, fixture.tasks); err != nil {
+			t.Fatalf("WriteTasks (ticket store): %v", err)
 		}
 	}
 	if fixture.coverage != nil {

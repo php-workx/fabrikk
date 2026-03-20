@@ -27,8 +27,22 @@ const (
 // Engine is the Phase 1 run engine (spec section 18.3).
 // Serial execution, foreground, no council, no detached mode.
 type Engine struct {
-	RunDir  *state.RunDir
-	WorkDir string // repository root
+	RunDir    *state.RunDir
+	WorkDir   string          // repository root
+	TaskStore state.TaskStore // nil = fall back to RunDir
+}
+
+// taskStore returns the configured TaskStore or falls back to RunDir.
+func (e *Engine) taskStore() state.TaskStore {
+	if e.TaskStore != nil {
+		return e.TaskStore
+	}
+	return e.RunDir.AsTaskStore()
+}
+
+// runID returns the run ID from the RunDir path.
+func (e *Engine) runID() string {
+	return filepathBase(e.RunDir.Root)
 }
 
 // New creates a new engine for the given run directory.
@@ -180,10 +194,11 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 		return nil, fmt.Errorf("unassigned requirements after compilation (spec 7.2): %v", unassigned)
 	}
 
-	// Write compiled tasks and coverage.
-	if err := e.RunDir.WriteTasks(result.Tasks); err != nil {
+	// Write compiled tasks — ticket.Store is the sole task backend.
+	if err := e.taskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
 		return nil, fmt.Errorf(errWriteTasks, err)
 	}
+
 	if err := e.RunDir.WriteCoverage(result.Coverage); err != nil {
 		return nil, fmt.Errorf("write coverage: %w", err)
 	}
@@ -262,39 +277,24 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 
 // RetryTask clears a blocked task for another manual attempt.
 func (e *Engine) RetryTask(taskID string) error {
-	tasks, err := e.RunDir.ReadTasks()
+	// Validate task exists and is retryable before updating.
+	task, err := e.taskStore().ReadTask(taskID)
 	if err != nil {
-		return fmt.Errorf(errReadTasks, err)
+		return fmt.Errorf("read task: %w", err)
+	}
+	if task.Status != state.TaskBlocked && task.Status != state.TaskRepairPending {
+		return fmt.Errorf("task %s is not retryable from status %s", taskID, task.Status)
 	}
 
-	found := false
-	now := time.Now()
-	for i := range tasks {
-		if tasks[i].TaskID != taskID {
-			continue
-		}
-		if tasks[i].Status != state.TaskBlocked && tasks[i].Status != state.TaskRepairPending {
-			return fmt.Errorf("task %s is not retryable from status %s", taskID, tasks[i].Status)
-		}
-		tasks[i].Status = state.TaskPending
-		tasks[i].StatusReason = ""
-		tasks[i].UpdatedAt = now
-		found = true
-		break
-	}
-	if !found {
-		return fmt.Errorf("task %s not found", taskID)
-	}
-
-	if err := e.RunDir.WriteTasks(tasks); err != nil {
-		return fmt.Errorf(errWriteTasks, err)
+	if err := e.taskStore().UpdateStatus(taskID, state.TaskPending, ""); err != nil {
+		return fmt.Errorf("update task status: %w", err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
 		return fmt.Errorf(errSyncCoverage, err)
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{
-		Timestamp: now,
+		Timestamp: time.Now(),
 		Type:      "task_retried",
 		RunID:     filepathBase(e.RunDir.Root),
 		TaskID:    taskID,
@@ -326,8 +326,8 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 		return nil, fmt.Errorf(errReadArtifact, err)
 	}
 
-	tasks, err := e.RunDir.ReadTasks()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	tasks, err := e.taskStore().ReadTasks(e.runID())
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, state.ErrPartialRead) {
 		return nil, fmt.Errorf(errReadTasks, err)
 	}
 
@@ -344,28 +344,10 @@ func (e *Engine) ReconcileRunStatus() (*state.RunStatus, error) {
 	return e.RunDir.ReadStatus()
 }
 
-// UpdateTaskStatus updates a task's status in tasks.json (single-writer rule, spec section 4.1).
+// UpdateTaskStatus updates a single task's status via per-ticket write (spec section 4.1).
 func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, reason string) error {
-	tasks, err := e.RunDir.ReadTasks()
-	if err != nil {
-		return fmt.Errorf(errReadTasks, err)
-	}
-
-	found := false
-	for i := range tasks {
-		if tasks[i].TaskID == taskID {
-			tasks[i].Status = newStatus
-			tasks[i].StatusReason = reason
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("task %s not found", taskID)
-	}
-
-	if err := e.RunDir.WriteTasks(tasks); err != nil {
-		return err
+	if err := e.taskStore().UpdateStatus(taskID, newStatus, reason); err != nil {
+		return fmt.Errorf("update task status: %w", err)
 	}
 	if err := e.syncCoverageFromTasks(); err != nil {
 		return fmt.Errorf(errSyncCoverage, err)
@@ -375,8 +357,8 @@ func (e *Engine) UpdateTaskStatus(taskID string, newStatus state.TaskStatus, rea
 
 // GetPendingTasks returns tasks in pending state with satisfied dependencies.
 func (e *Engine) GetPendingTasks() ([]state.Task, error) {
-	tasks, err := e.RunDir.ReadTasks()
-	if err != nil {
+	tasks, err := e.taskStore().ReadTasks(e.runID())
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
 		return nil, err
 	}
 
@@ -387,7 +369,7 @@ func (e *Engine) GetPendingTasks() ([]state.Task, error) {
 
 	var pending []state.Task
 	for i := range tasks {
-		if tasks[i].Status != state.TaskPending {
+		if tasks[i].Status != state.TaskPending && tasks[i].Status != state.TaskRepairPending {
 			continue
 		}
 		// Check dependencies (spec section 7.4).
@@ -403,6 +385,74 @@ func (e *Engine) GetPendingTasks() ([]state.Task, error) {
 		}
 	}
 	return pending, nil
+}
+
+// ClaimAndDispatch claims a task for an agent, transitioning it to TaskClaimed.
+// If the store does not support claims (e.g. RunDir), falls back to UpdateStatus.
+func (e *Engine) ClaimAndDispatch(taskID, ownerID, backend string, lease time.Duration) error {
+	cs, ok := e.taskStore().(state.ClaimableStore)
+	if !ok {
+		return e.taskStore().UpdateStatus(taskID, state.TaskClaimed, "claimed by "+ownerID)
+	}
+	if err := cs.ClaimTask(taskID, ownerID, backend, lease); err != nil {
+		return fmt.Errorf("claim task %s: %w", taskID, err)
+	}
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "task_claimed",
+		RunID:     e.runID(),
+		TaskID:    taskID,
+		Detail:    fmt.Sprintf("claimed by %s (%s)", ownerID, backend),
+	})
+	return nil
+}
+
+// ReleaseTask releases a claim and sets the task to a new status.
+// Falls back to UpdateStatus if the store does not support claims.
+func (e *Engine) ReleaseTask(taskID, ownerID string, newStatus state.TaskStatus, reason string) error {
+	cs, ok := e.taskStore().(state.ClaimableStore)
+	if !ok {
+		return e.taskStore().UpdateStatus(taskID, newStatus, reason)
+	}
+	if err := cs.ReleaseClaim(taskID, ownerID, newStatus, reason); err != nil {
+		return fmt.Errorf("release task %s: %w", taskID, err)
+	}
+	if err := e.syncCoverageFromTasks(); err != nil {
+		return fmt.Errorf(errSyncCoverage, err)
+	}
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "task_released",
+		RunID:     e.runID(),
+		TaskID:    taskID,
+		Detail:    fmt.Sprintf("released by %s → %s", ownerID, newStatus),
+	})
+	return nil
+}
+
+// SweepExpiredClaims reclaims tasks with expired leases, resetting them to pending.
+func (e *Engine) SweepExpiredClaims() ([]string, error) {
+	type expiredSweeper interface {
+		ReclaimExpired(runID string) ([]string, error)
+	}
+	sweeper, ok := e.taskStore().(expiredSweeper)
+	if !ok {
+		return nil, nil
+	}
+	reclaimed, err := sweeper.ReclaimExpired(e.runID())
+	if err != nil {
+		return nil, fmt.Errorf("sweep expired claims: %w", err)
+	}
+	for _, taskID := range reclaimed {
+		_ = e.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "claim_expired",
+			RunID:     e.runID(),
+			TaskID:    taskID,
+			Detail:    "claim expired, task reset to pending",
+		})
+	}
+	return reclaimed, nil
 }
 
 func (e *Engine) refreshRunStatus(nextState state.RunState, currentGate string, openBlockers []string) error {
@@ -425,7 +475,7 @@ func (e *Engine) refreshRunStatus(nextState state.RunState, currentGate string, 
 	status.TaskDetails = nil
 
 	var tasks []state.Task
-	if tasks, err = e.RunDir.ReadTasks(); err == nil {
+	if tasks, err = e.taskStore().ReadTasks(e.runID()); err == nil || errors.Is(err, state.ErrPartialRead) {
 		for i := range tasks {
 			status.TaskCountsByState[string(tasks[i].Status)]++
 			if tasks[i].StatusReason == "" {
@@ -474,37 +524,26 @@ func filepathBase(path string) string {
 }
 
 func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, reason string) error {
-	tasks, err := e.RunDir.ReadTasks()
+	// Try per-ticket read first; if not found, write the full task as new.
+	existing, err := e.taskStore().ReadTask(task.TaskID)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf(errReadTasks, err)
+		// Only insert on genuine not-found. Other errors (parse, permission,
+		// ambiguous ID) should not silently overwrite the existing file.
+		if !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("read task for verification: %w", err)
 		}
-		tasks = []state.Task{*task}
+		// Task doesn't exist yet — write it as new with the verified status.
+		newTask := *task
+		newTask.Status = status
+		newTask.StatusReason = reason
+		newTask.UpdatedAt = time.Now()
+		return e.taskStore().WriteTask(&newTask)
 	}
 
-	found := false
-	for i := range tasks {
-		if tasks[i].TaskID != task.TaskID {
-			continue
-		}
-		tasks[i].Status = status
-		tasks[i].StatusReason = reason
-		tasks[i].UpdatedAt = time.Now()
-		found = true
-		break
-	}
-	if !found {
-		verifiedTask := *task
-		verifiedTask.Status = status
-		verifiedTask.StatusReason = reason
-		verifiedTask.UpdatedAt = time.Now()
-		tasks = append(tasks, verifiedTask)
-	}
-
-	if err := e.RunDir.WriteTasks(tasks); err != nil {
-		return fmt.Errorf(errWriteTasks, err)
-	}
-	return nil
+	existing.Status = status
+	existing.StatusReason = reason
+	existing.UpdatedAt = time.Now()
+	return e.taskStore().WriteTask(existing)
 }
 
 func summarizeFindings(findings []state.Finding) string {
@@ -614,12 +653,16 @@ func (e *Engine) syncCoverageFromTasks() error {
 		return fmt.Errorf("read coverage: %w", err)
 	}
 
-	tasks, err := e.RunDir.ReadTasks()
+	tasks, err := e.taskStore().ReadTasks(e.runID())
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, state.ErrPartialRead) {
+			// Partial read: use whatever tasks we got. Not-exist: nothing to sync.
+			if !errors.Is(err, state.ErrPartialRead) {
+				return nil
+			}
+		} else {
+			return fmt.Errorf(errReadTasks, err)
 		}
-		return fmt.Errorf(errReadTasks, err)
 	}
 
 	taskStates := make(map[string]state.TaskStatus, len(tasks))

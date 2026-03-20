@@ -93,15 +93,18 @@ func TestRunRoundWithStubBackend(t *testing.T) {
 	old := InvokeFunc
 	defer func() { InvokeFunc = old }()
 
+	// Keys use "You are: **<name>**" prefix to avoid ambiguous matching — short
+	// keys like "Architecture" match focus sections in other personas' prompts,
+	// causing flaky results due to map iteration order.
 	InvokeFunc = stubInvoke(map[string]string{
-		"Security Engineer": fixtureReviewJSON("security-engineer", VerdictWarn, []Finding{
+		"You are: **Security Engineer**": fixtureReviewJSON("security-engineer", VerdictWarn, []Finding{
 			{FindingID: "sec-001", Severity: "significant", Description: "No error handling"},
 		}),
-		"Performance Engineer": fixtureReviewJSON("performance-engineer", VerdictPass, nil),
-		"Testability": fixtureReviewJSON("testability-reviewer", VerdictWarn, []Finding{
+		"You are: **Performance Engineer**": fixtureReviewJSON("performance-engineer", VerdictPass, nil),
+		"You are: **Testability & Test Design Reviewer**": fixtureReviewJSON("testability-reviewer", VerdictWarn, []Finding{
 			{FindingID: "test-001", Severity: "minor", Description: "Missing edge cases"},
 		}),
-		"Architecture": fixtureReviewJSON("architecture-reviewer", VerdictPass, nil),
+		"You are: **Architecture Reviewer**": fixtureReviewJSON("architecture-reviewer", VerdictPass, nil),
 	})
 
 	dir := t.TempDir()
@@ -135,7 +138,7 @@ func TestRunRoundPartialFailure(t *testing.T) {
 	defer func() { InvokeFunc = old }()
 
 	InvokeFunc = stubInvoke(map[string]string{
-		"Security Engineer": fixtureReviewJSON("security-engineer", VerdictFail, []Finding{
+		"You are: **Security Engineer**": fixtureReviewJSON("security-engineer", VerdictFail, []Finding{
 			{FindingID: "sec-001", Severity: "critical", Description: "Critical issue"},
 		}),
 		// Other personas get no response → fail
@@ -437,10 +440,10 @@ func TestCacheInvalidatedOnSpecChange(t *testing.T) {
 
 	var callCount atomic.Int32
 	InvokeFunc = stubInvoke(map[string]string{
-		"Security Engineer":    fixtureReviewJSON("security-engineer", VerdictPass, nil),
-		"Performance Engineer": fixtureReviewJSON("performance-engineer", VerdictPass, nil),
-		"Testability":          fixtureReviewJSON("testability-reviewer", VerdictPass, nil),
-		"Architecture":         fixtureReviewJSON("architecture-reviewer", VerdictPass, nil),
+		"You are: **Security Engineer**":                  fixtureReviewJSON("security-engineer", VerdictPass, nil),
+		"You are: **Performance Engineer**":               fixtureReviewJSON("performance-engineer", VerdictPass, nil),
+		"You are: **Testability & Test Design Reviewer**": fixtureReviewJSON("testability-reviewer", VerdictPass, nil),
+		"You are: **Architecture Reviewer**":              fixtureReviewJSON("architecture-reviewer", VerdictPass, nil),
 	})
 	// Wrap to count calls.
 	realInvoke := InvokeFunc

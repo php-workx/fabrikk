@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,12 +28,15 @@ func main() {
 func run(ctx context.Context, args []string, stderr io.Writer) int {
 	if len(args) < 1 {
 		usage(stderr)
-		return 1
+		return 0
 	}
 
 	var err error
 
 	switch args[0] {
+	case "help", "--help", "-h":
+		usage(stderr)
+		return 0
 	case "prepare":
 		err = cmdPrepare(ctx, args[1:])
 	case commandReview:
@@ -75,26 +79,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 
-func usage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, `usage: attest <command> [args]
+// usage is defined in help.go — renders grouped command help with lipgloss.
 
-commands:
-  prepare --spec <path> [--spec <path>...]   Ingest specs and create a draft run
-  review <run-id>                            Show the run artifact for review
-  tech-spec <draft|review|approve> ...       Manage run-scoped technical specs
-                                              review --from <path>  (one-step council review)
-                                              review flags: --mode mvp|standard|production --skip-approval --structural-only --dry-run --force --round N
-  plan <draft|review|approve> ...            Manage run-scoped execution plans
-  approve <run-id> [--launch]                 Approve and compile tasks
-  status [<run-id>]                          Show run status
-  report <run-id> <task-id> --from <path>    Import a completion report JSON for a task
-  verify <run-id> <task-id>                  Run deterministic verification
-  retry <run-id> <task-id>                   Requeue a blocked task for another attempt
-  tasks <run-id> [--status X] [--json]       Query tasks with filters
-  ready <run-id> [--json]                    Show dispatchable tasks
-  blocked <run-id> [--json]                  Show blocked tasks
-  next <run-id> [--json]                     Show next task to work on
-  progress <run-id> [--json]                 Show run progress`)
+// newEngine creates an engine with the TaskStore from taskStoreForRun.
+// Single backend-selection rule — both engine and CLI commands use the same store.
+func newEngine(wd, runID string) *engine.Engine {
+	runDir := state.NewRunDir(wd, runID)
+	eng := engine.New(runDir, wd)
+	eng.TaskStore = taskStoreForRun(wd, runID)
+	return eng
 }
 
 func workDir() (string, error) {
@@ -496,8 +489,7 @@ func cmdApprove(ctx context.Context, args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 
 	if err := eng.Approve(ctx); err != nil {
 		return err
@@ -542,8 +534,7 @@ func cmdStatus(_ context.Context, args []string) error {
 			if !e.IsDir() {
 				continue
 			}
-			runDir := state.NewRunDir(wd, e.Name())
-			eng := engine.New(runDir, wd)
+			eng := newEngine(wd, e.Name())
 			status, err := eng.ReconcileRunStatus()
 			if err != nil {
 				fmt.Printf("  %s (status unreadable)\n", e.Name())
@@ -555,8 +546,7 @@ func cmdStatus(_ context.Context, args []string) error {
 	}
 
 	runID := args[0]
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 	status, err := eng.ReconcileRunStatus()
 	if err != nil {
 		return fmt.Errorf("read status: %w", err)
@@ -599,9 +589,10 @@ func cmdReport(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
-	if err != nil {
+	runDir := state.NewRunDir(wd, runID) // needed for ReportDir + AppendEvent (not task ops)
+	eng := newEngine(wd, runID)
+	tasks, err := eng.TaskStore.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
 		return fmt.Errorf("read tasks: %w", err)
 	}
 	found := false
@@ -657,11 +648,10 @@ func cmdVerify(ctx context.Context, args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 
-	tasks, err := runDir.ReadTasks()
-	if err != nil {
+	tasks, err := eng.TaskStore.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
 		return fmt.Errorf("read tasks: %w", err)
 	}
 
@@ -679,7 +669,7 @@ func cmdVerify(ctx context.Context, args []string) error {
 	// Read completion report: check task-level path (backward compat),
 	// then scan attempt subdirectories for the latest report.
 	var report state.CompletionReport
-	if !readLatestCompletionReport(runDir, taskID, &report) {
+	if !readLatestCompletionReport(eng.RunDir, taskID, &report) {
 		report = state.CompletionReport{
 			TaskID:    taskID,
 			AttemptID: "manual-verify",
@@ -719,8 +709,7 @@ func cmdRetry(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 	if err := eng.RetryTask(taskID); err != nil {
 		return err
 	}

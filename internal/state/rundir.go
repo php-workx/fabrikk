@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // RunDir manages the .attest/runs/<run-id>/ directory structure (spec section 3.1).
@@ -254,6 +255,91 @@ func (d *RunDir) ReadExecutionPlanApproval() (*ArtifactApproval, error) {
 		return nil, err
 	}
 	return &approval, nil
+}
+
+// --- TaskStore adapter (backward compat) ---
+
+// Compile-time interface guard.
+var _ TaskStore = (*RunDirTaskStore)(nil)
+
+// RunDirTaskStore adapts RunDir to the TaskStore interface.
+// NOT concurrent-safe. Use ticket.Store for concurrent access.
+type RunDirTaskStore struct {
+	RunDir *RunDir
+}
+
+// AsTaskStore returns a TaskStore adapter for this RunDir.
+func (d *RunDir) AsTaskStore() TaskStore {
+	return &RunDirTaskStore{RunDir: d}
+}
+
+// ReadTasks reads tasks (ignores runID — RunDir is already run-scoped). NOT concurrent-safe.
+func (a *RunDirTaskStore) ReadTasks(_ string) ([]Task, error) {
+	return a.RunDir.ReadTasks()
+}
+
+// WriteTasks writes tasks (ignores runID — RunDir is already run-scoped). NOT concurrent-safe.
+func (a *RunDirTaskStore) WriteTasks(_ string, tasks []Task) error {
+	return a.RunDir.WriteTasks(tasks)
+}
+
+// ReadTask reads a single task by ID. NOT concurrent-safe.
+func (a *RunDirTaskStore) ReadTask(taskID string) (*Task, error) {
+	tasks, err := a.RunDir.ReadTasks()
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			return &tasks[i], nil
+		}
+	}
+	return nil, fmt.Errorf("task %s not found", taskID)
+}
+
+// WriteTask updates a single task by ID. NOT concurrent-safe.
+func (a *RunDirTaskStore) WriteTask(task *Task) error {
+	tasks, err := a.RunDir.ReadTasks()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return a.RunDir.WriteTasks([]Task{*task})
+		}
+		return err
+	}
+	found := false
+	for i := range tasks {
+		if tasks[i].TaskID == task.TaskID {
+			tasks[i] = *task
+			found = true
+			break
+		}
+	}
+	if !found {
+		tasks = append(tasks, *task)
+	}
+	return a.RunDir.WriteTasks(tasks)
+}
+
+// UpdateStatus updates a task's status. NOT concurrent-safe.
+func (a *RunDirTaskStore) UpdateStatus(taskID string, status TaskStatus, reason string) error {
+	tasks, err := a.RunDir.ReadTasks()
+	if err != nil {
+		return err
+	}
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			tasks[i].Status = status
+			tasks[i].StatusReason = reason
+			tasks[i].UpdatedAt = time.Now()
+			return a.RunDir.WriteTasks(tasks)
+		}
+	}
+	return fmt.Errorf("task %s not found", taskID)
+}
+
+// CreateRun is a no-op for RunDir (runs are already directories).
+func (a *RunDirTaskStore) CreateRun(_ string) error {
+	return nil
 }
 
 // AppendEvent appends an event to the event log.

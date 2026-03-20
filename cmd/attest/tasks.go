@@ -4,14 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/runger/attest/internal/state"
+	"github.com/runger/attest/internal/ticket"
 )
 
 const errReadTasks = "read tasks: %w"
+
+// taskStoreForRun returns the TaskStore for a given run.
+// This is the single backend-selection rule — newEngine delegates here too.
+var taskStoreForRun = func(wd, _ string) state.TaskStore {
+	return ticket.NewStore(filepath.Join(wd, ".tickets"))
+}
 
 // taskFilter holds parsed filter flags for task queries (spec section 5.2).
 type taskFilter struct {
@@ -167,8 +175,8 @@ func cmdTasks(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
+	store := taskStoreForRun(wd, runID)
+	tasks, err := store.ReadTasks(runID)
 	if err != nil {
 		return fmt.Errorf(errReadTasks, err)
 	}
@@ -197,8 +205,8 @@ func cmdReady(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
+	store := taskStoreForRun(wd, runID)
+	tasks, err := store.ReadTasks(runID)
 	if err != nil {
 		return fmt.Errorf(errReadTasks, err)
 	}
@@ -239,8 +247,8 @@ func cmdBlocked(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
+	store := taskStoreForRun(wd, runID)
+	tasks, err := store.ReadTasks(runID)
 	if err != nil {
 		return fmt.Errorf(errReadTasks, err)
 	}
@@ -285,8 +293,8 @@ func cmdNext(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
+	store := taskStoreForRun(wd, runID)
+	tasks, err := store.ReadTasks(runID)
 	if err != nil {
 		return fmt.Errorf(errReadTasks, err)
 	}
@@ -354,8 +362,8 @@ func cmdProgress(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	tasks, err := runDir.ReadTasks()
+	store := taskStoreForRun(wd, runID)
+	tasks, err := store.ReadTasks(runID)
 	if err != nil {
 		return fmt.Errorf(errReadTasks, err)
 	}
@@ -368,6 +376,7 @@ func cmdProgress(args []string) error {
 
 	// Requirement coverage.
 	var covCounts map[string]int
+	runDir := state.NewRunDir(wd, runID)
 	coverage, err := runDir.ReadCoverage()
 	if err == nil {
 		covCounts = make(map[string]int)

@@ -1,7 +1,41 @@
 // Package state implements file-based run state with atomic writes.
 package state
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrPartialRead indicates some task files could not be read but partial
+// results are available. Callers should use the returned tasks and handle
+// the error as a warning, not a fatal failure.
+var ErrPartialRead = errors.New("partial read: some task files were skipped")
+
+// TaskStore abstracts task persistence. Implementations include
+// RunDir (JSON, backward compat) and ticket.Store (Ticket format).
+// Nothing in this package or internal/engine/ imports a specific backend.
+type TaskStore interface {
+	// Run-scoped operations (filter by parent epic).
+	ReadTasks(runID string) ([]Task, error)
+	WriteTasks(runID string, tasks []Task) error
+
+	// Single-task operations.
+	ReadTask(taskID string) (*Task, error)
+	WriteTask(task *Task) error
+	UpdateStatus(taskID string, status TaskStatus, reason string) error
+
+	// Run lifecycle.
+	CreateRun(runID string) error
+}
+
+// ClaimableStore extends TaskStore with exclusive claim operations for
+// multi-agent dispatch. Implementations must provide crash-safe leases.
+type ClaimableStore interface {
+	TaskStore
+	ClaimTask(taskID, ownerID, backend string, lease time.Duration) error
+	ReleaseClaim(taskID, ownerID string, newStatus TaskStatus, reason string) error
+	RenewClaim(taskID, ownerID string, lease time.Duration) error
+}
 
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).
 type RunArtifact struct {
