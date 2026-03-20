@@ -1204,7 +1204,7 @@ func TestCompileRejectsStaleExecutionPlan(t *testing.T) {
 	}
 }
 
-func TestCompileDualWrite(t *testing.T) {
+func TestCompileWritesToTicketStore(t *testing.T) {
 	dir := t.TempDir()
 	specPath := writeTestSpec(t, dir)
 	ctx := context.Background()
@@ -1224,42 +1224,33 @@ func TestCompileDualWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wire a ticket store for dual-write.
+	// Wire ticket store as sole task backend.
 	ticketDir := filepath.Join(dir, ".tickets")
 	ticketStore := ticket.NewStore(ticketDir)
 	eng.TaskStore = ticketStore
 
 	result, err := eng.Compile(ctx)
 	if err != nil {
-		t.Fatalf("Compile with dual-write: %v", err)
+		t.Fatalf("Compile: %v", err)
 	}
 
-	// Verify tasks exist in both stores.
-	jsonStore := eng.RunDir.AsTaskStore()
-	jsonTasks, err := jsonStore.ReadTasks(artifact.RunID)
-	if err != nil {
-		t.Fatalf("read tasks.json: %v", err)
-	}
+	// Verify tasks exist in ticket store.
 	ticketTasks, err := ticketStore.ReadTasks(artifact.RunID)
 	if err != nil {
 		t.Fatalf("read .tickets/: %v", err)
-	}
-
-	if len(jsonTasks) != len(result.Tasks) {
-		t.Errorf("tasks.json has %d tasks, want %d", len(jsonTasks), len(result.Tasks))
 	}
 	if len(ticketTasks) != len(result.Tasks) {
 		t.Errorf(".tickets/ has %d tasks, want %d", len(ticketTasks), len(result.Tasks))
 	}
 
-	// Verify same task IDs in both stores.
-	jsonIDs := make(map[string]bool, len(jsonTasks))
-	for i := range jsonTasks {
-		jsonIDs[jsonTasks[i].TaskID] = true
+	// Verify task IDs match.
+	taskIDs := make(map[string]bool, len(result.Tasks))
+	for i := range result.Tasks {
+		taskIDs[result.Tasks[i].TaskID] = true
 	}
 	for i := range ticketTasks {
-		if !jsonIDs[ticketTasks[i].TaskID] {
-			t.Errorf("task %s in .tickets/ but not in tasks.json", ticketTasks[i].TaskID)
+		if !taskIDs[ticketTasks[i].TaskID] {
+			t.Errorf("unexpected task %s in .tickets/", ticketTasks[i].TaskID)
 		}
 	}
 }

@@ -81,6 +81,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 
 // usage is defined in help.go — renders grouped command help with lipgloss.
 
+// newEngine creates an engine with ticket.Store wired as the TaskStore.
+// This is the standard engine constructor — ticket.Store is the sole task backend.
+func newEngine(wd, runID string) *engine.Engine {
+	runDir := state.NewRunDir(wd, runID)
+	eng := engine.New(runDir, wd)
+	eng.TaskStore = ticket.NewStore(filepath.Join(wd, ".tickets"))
+	return eng
+}
+
 func workDir() (string, error) {
 	return os.Getwd()
 }
@@ -480,12 +489,7 @@ func cmdApprove(ctx context.Context, args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
-
-	// Wire ticket store for dual-write: tasks go to both tasks.json and .tickets/.
-	ticketStore := ticket.NewStore(filepath.Join(wd, ".tickets"))
-	eng.TaskStore = ticketStore
+	eng := newEngine(wd, runID)
 
 	if err := eng.Approve(ctx); err != nil {
 		return err
@@ -530,8 +534,7 @@ func cmdStatus(_ context.Context, args []string) error {
 			if !e.IsDir() {
 				continue
 			}
-			runDir := state.NewRunDir(wd, e.Name())
-			eng := engine.New(runDir, wd)
+			eng := newEngine(wd, e.Name())
 			status, err := eng.ReconcileRunStatus()
 			if err != nil {
 				fmt.Printf("  %s (status unreadable)\n", e.Name())
@@ -543,8 +546,7 @@ func cmdStatus(_ context.Context, args []string) error {
 	}
 
 	runID := args[0]
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 	status, err := eng.ReconcileRunStatus()
 	if err != nil {
 		return fmt.Errorf("read status: %w", err)
@@ -587,7 +589,7 @@ func cmdReport(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
+	runDir := state.NewRunDir(wd, runID) // needed for ReportDir + AppendEvent (not task ops)
 	store := taskStoreForRun(wd, runID)
 	tasks, err := store.ReadTasks(runID)
 	if err != nil {
@@ -646,8 +648,7 @@ func cmdVerify(ctx context.Context, args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 
 	store := taskStoreForRun(wd, runID)
 	tasks, err := store.ReadTasks(runID)
@@ -669,7 +670,7 @@ func cmdVerify(ctx context.Context, args []string) error {
 	// Read completion report: check task-level path (backward compat),
 	// then scan attempt subdirectories for the latest report.
 	var report state.CompletionReport
-	if !readLatestCompletionReport(runDir, taskID, &report) {
+	if !readLatestCompletionReport(eng.RunDir, taskID, &report) {
 		report = state.CompletionReport{
 			TaskID:    taskID,
 			AttemptID: "manual-verify",
@@ -709,8 +710,7 @@ func cmdRetry(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID)
-	eng := engine.New(runDir, wd)
+	eng := newEngine(wd, runID)
 	if err := eng.RetryTask(taskID); err != nil {
 		return err
 	}

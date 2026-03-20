@@ -4,19 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/runger/attest/internal/state"
+	"github.com/runger/attest/internal/ticket"
 )
 
 const errReadTasks = "read tasks: %w"
 
 // taskStoreForRun returns the TaskStore for a given run.
-// Default uses RunDir (JSON). Stage 3 overrides with ticket.Store.
-var taskStoreForRun = func(wd, runID string) state.TaskStore {
-	return state.NewRunDir(wd, runID).AsTaskStore()
+// Uses ticket.Store as the sole task backend.
+var taskStoreForRun = func(wd, _ string) state.TaskStore {
+	return ticket.NewStore(filepath.Join(wd, ".tickets"))
 }
 
 // taskFilter holds parsed filter flags for task queries (spec section 5.2).

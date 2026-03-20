@@ -194,18 +194,9 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 		return nil, fmt.Errorf("unassigned requirements after compilation (spec 7.2): %v", unassigned)
 	}
 
-	// Write compiled tasks and coverage.
+	// Write compiled tasks — ticket.Store is the sole task backend.
 	if err := e.taskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
 		return nil, fmt.Errorf(errWriteTasks, err)
-	}
-
-	// Dual-write: when TaskStore is set (e.g. ticket.Store), also persist tasks.json
-	// for backward compatibility. RunDir always reads tasks.json.
-	if e.TaskStore != nil {
-		if err := e.RunDir.AsTaskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
-			return nil, fmt.Errorf("dual-write tasks.json: %w", err)
-		}
-		e.validateDualWrite(artifact.RunID, result.Tasks)
 	}
 
 	if err := e.RunDir.WriteCoverage(result.Coverage); err != nil {
@@ -545,65 +536,6 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	existing.StatusReason = reason
 	existing.UpdatedAt = time.Now()
 	return e.taskStore().WriteTask(existing)
-}
-
-// validateDualWrite reads back tasks from both TaskStore and RunDir,
-// compares counts and IDs, and logs warnings on divergence.
-func (e *Engine) validateDualWrite(runID string, expected []state.Task) {
-	// Build expected ID set.
-	expectedIDs := make(map[string]struct{}, len(expected))
-	for i := range expected {
-		expectedIDs[expected[i].TaskID] = struct{}{}
-	}
-
-	// Read back from ticket store.
-	ticketTasks, ticketErr := e.TaskStore.ReadTasks(runID)
-	if ticketErr != nil {
-		e.logDualWriteWarning(runID, fmt.Sprintf("ticket store read-back failed: %v", ticketErr))
-		return
-	}
-
-	// Read back from RunDir.
-	jsonTasks, jsonErr := e.RunDir.AsTaskStore().ReadTasks(runID)
-	if jsonErr != nil {
-		e.logDualWriteWarning(runID, fmt.Sprintf("tasks.json read-back failed: %v", jsonErr))
-		return
-	}
-
-	// Compare counts.
-	if len(ticketTasks) != len(jsonTasks) {
-		e.logDualWriteWarning(runID, fmt.Sprintf(
-			"task count mismatch: .tickets/ has %d, tasks.json has %d",
-			len(ticketTasks), len(jsonTasks)))
-	}
-
-	// Compare IDs.
-	ticketIDs := make(map[string]struct{}, len(ticketTasks))
-	for i := range ticketTasks {
-		ticketIDs[ticketTasks[i].TaskID] = struct{}{}
-	}
-	jsonIDs := make(map[string]struct{}, len(jsonTasks))
-	for i := range jsonTasks {
-		jsonIDs[jsonTasks[i].TaskID] = struct{}{}
-	}
-
-	for id := range expectedIDs {
-		if _, ok := ticketIDs[id]; !ok {
-			e.logDualWriteWarning(runID, fmt.Sprintf("task %s missing from .tickets/", id))
-		}
-		if _, ok := jsonIDs[id]; !ok {
-			e.logDualWriteWarning(runID, fmt.Sprintf("task %s missing from tasks.json", id))
-		}
-	}
-}
-
-func (e *Engine) logDualWriteWarning(runID, detail string) {
-	_ = e.RunDir.AppendEvent(state.Event{
-		Timestamp: time.Now(),
-		Type:      "dual_write_warning",
-		RunID:     runID,
-		Detail:    detail,
-	})
 }
 
 func summarizeFindings(findings []state.Finding) string {
