@@ -47,6 +47,12 @@ type Frontmatter struct {
 	CreatedFrom      string   `yaml:"created_from,omitempty"`
 	UpdatedAt        string   `yaml:"updated_at,omitempty"`
 
+	// Learning context — injected by engine post-compilation.
+	Intent      string   `yaml:"intent,omitempty"`
+	Constraints []string `yaml:"constraints,omitempty"`
+	Warnings    []string `yaml:"warnings,omitempty"`
+	LearningIDs []string `yaml:"learning_ids,omitempty"`
+
 	// Claim fields — managed by Store claim methods, not by state.Task.
 	ClaimedBy      string `yaml:"claimed_by,omitempty"`
 	ClaimBackend   string `yaml:"claim_backend,omitempty"`
@@ -167,6 +173,10 @@ func TaskToFrontmatter(task *state.Task) *Frontmatter {
 		RequiredEvidence: task.RequiredEvidence,
 		CreatedFrom:      task.CreatedFrom,
 		UpdatedAt:        formatTime(task.UpdatedAt),
+		Intent:           task.Intent,
+		Constraints:      task.Constraints,
+		Warnings:         task.Warnings,
+		LearningIDs:      task.LearningIDs,
 	}
 }
 
@@ -199,6 +209,10 @@ func FrontmatterToTask(fm *Frontmatter) *state.Task {
 		RequiredEvidence: fm.RequiredEvidence,
 		ParentTaskID:     fm.Parent,
 		CreatedFrom:      fm.CreatedFrom,
+		Intent:           fm.Intent,
+		Constraints:      fm.Constraints,
+		Warnings:         fm.Warnings,
+		LearningIDs:      fm.LearningIDs,
 	}
 }
 
@@ -237,6 +251,13 @@ func MarshalTicket(task *state.Task) ([]byte, error) {
 			buf.WriteString("- ")
 			buf.WriteString(e)
 			buf.WriteString("\n")
+		}
+	}
+
+	if len(task.LearningContext) > 0 {
+		buf.WriteString("\n## Context from Learnings\n\n")
+		for _, lr := range task.LearningContext {
+			fmt.Fprintf(&buf, "- **%s** (%s, utility=%.2f): %s\n", lr.ID, lr.Category, lr.Utility, lr.Summary)
 		}
 	}
 

@@ -136,6 +136,21 @@ type Task struct {
 	RequiredEvidence []string   `json:"required_evidence"`
 	ParentTaskID     string     `json:"parent_task_id,omitempty"`
 	CreatedFrom      string     `json:"created_from,omitempty"`
+
+	// Learning context — injected by engine post-compilation.
+	Intent          string        `json:"intent,omitempty"`
+	Constraints     []string      `json:"constraints,omitempty"`
+	Warnings        []string      `json:"warnings,omitempty"`
+	LearningIDs     []string      `json:"learning_ids,omitempty"`
+	LearningContext []LearningRef `json:"learning_context,omitempty"`
+}
+
+// LearningRef is a lightweight reference to a learning for ticket body rendering.
+type LearningRef struct {
+	ID       string  `json:"id"`
+	Category string  `json:"category"`
+	Utility  float64 `json:"utility"`
+	Summary  string  `json:"summary"`
 }
 
 // TaskScope defines the file-level boundaries for a task (spec section 3.4).

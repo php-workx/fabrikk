@@ -65,6 +65,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		err = cmdNext(args[1:])
 	case "progress":
 		err = cmdProgress(args[1:])
+	case "learn":
+		err = cmdLearn(args[1:])
+	case "context":
+		err = cmdContext(args[1:])
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		usage(stderr)
