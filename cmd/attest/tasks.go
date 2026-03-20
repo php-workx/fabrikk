@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -16,9 +15,9 @@ import (
 const errReadTasks = "read tasks: %w"
 
 // taskStoreForRun returns the TaskStore for a given run.
-// Uses ticket.Store as the sole task backend.
+// Uses the same ticket.Store path as newEngine (single backend-selection rule).
 var taskStoreForRun = func(wd, _ string) state.TaskStore {
-	return ticket.NewStore(filepath.Join(wd, ".tickets"))
+	return ticket.NewStore(ticketStoreDir(wd))
 }
 
 // taskFilter holds parsed filter flags for task queries (spec section 5.2).

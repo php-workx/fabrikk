@@ -81,12 +81,17 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 
 // usage is defined in help.go — renders grouped command help with lipgloss.
 
+// ticketStoreDir returns the canonical .tickets/ path for the given working directory.
+func ticketStoreDir(wd string) string {
+	return filepath.Join(wd, ".tickets")
+}
+
 // newEngine creates an engine with ticket.Store wired as the TaskStore.
 // This is the standard engine constructor — ticket.Store is the sole task backend.
 func newEngine(wd, runID string) *engine.Engine {
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
-	eng.TaskStore = ticket.NewStore(filepath.Join(wd, ".tickets"))
+	eng.TaskStore = ticket.NewStore(ticketStoreDir(wd))
 	return eng
 }
 

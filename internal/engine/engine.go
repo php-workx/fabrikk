@@ -417,6 +417,9 @@ func (e *Engine) ReleaseTask(taskID, ownerID string, newStatus state.TaskStatus,
 	if err := cs.ReleaseClaim(taskID, ownerID, newStatus, reason); err != nil {
 		return fmt.Errorf("release task %s: %w", taskID, err)
 	}
+	if err := e.syncCoverageFromTasks(); err != nil {
+		return fmt.Errorf(errSyncCoverage, err)
+	}
 	_ = e.RunDir.AppendEvent(state.Event{
 		Timestamp: time.Now(),
 		Type:      "task_released",
@@ -524,6 +527,11 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	// Try per-ticket read first; if not found, write the full task as new.
 	existing, err := e.taskStore().ReadTask(task.TaskID)
 	if err != nil {
+		// Only insert on genuine not-found. Other errors (parse, permission,
+		// ambiguous ID) should not silently overwrite the existing file.
+		if !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("read task for verification: %w", err)
+		}
 		// Task doesn't exist yet — write it as new with the verified status.
 		newTask := *task
 		newTask.Status = status

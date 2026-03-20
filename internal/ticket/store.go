@@ -64,11 +64,21 @@ func (s *Store) ReadTasks(runID string) ([]state.Task, error) {
 
 // WriteTasks creates an epic for the run and writes all tasks as children.
 // For existing tickets, preserves the markdown body (notes, descriptions).
+// Removes orphaned tasks from previous compilations (tasks with this runID
+// as parent that are not in the new task set).
 // Does not mutate the input slice — works on copies.
 func (s *Store) WriteTasks(runID string, tasks []state.Task) error {
 	if err := s.CreateRun(runID); err != nil {
 		return fmt.Errorf("create run epic: %w", err)
 	}
+
+	// Build set of new task IDs for orphan detection.
+	newIDs := make(map[string]struct{}, len(tasks))
+	for i := range tasks {
+		newIDs[tasks[i].TaskID] = struct{}{}
+	}
+
+	// Write new/updated tasks.
 	for i := range tasks {
 		task := tasks[i] // copy — do not mutate caller's slice
 		task.ParentTaskID = runID
@@ -94,6 +104,16 @@ func (s *Store) WriteTasks(runID string, tasks []state.Task) error {
 			return fmt.Errorf("write task %s: %w", task.TaskID, err)
 		}
 	}
+
+	// Remove orphaned tasks from previous compilations.
+	existing, _ := s.ReadTasks(runID)
+	for i := range existing {
+		if _, ok := newIDs[existing[i].TaskID]; !ok {
+			orphanPath := filepath.Join(s.Dir, existing[i].TaskID+".md")
+			_ = os.Remove(orphanPath) // best-effort cleanup
+		}
+	}
+
 	return nil
 }
 
@@ -204,8 +224,9 @@ func (s *Store) AddDep(id, depID string) error {
 	if err != nil {
 		return err
 	}
-	// Validate that the dependency target exists.
-	if _, depErr := ResolveID(s.Dir, depID); depErr != nil {
+	// Validate and canonicalize the dependency target.
+	resolvedDepID, depErr := ResolveID(s.Dir, depID)
+	if depErr != nil {
 		return fmt.Errorf("dep target %s: %w", depID, depErr)
 	}
 	path := filepath.Join(s.Dir, resolvedID+".md")
@@ -220,11 +241,11 @@ func (s *Store) AddDep(id, depID string) error {
 			return parseErr
 		}
 		for _, d := range task.DependsOn {
-			if d == depID {
+			if d == resolvedDepID {
 				return nil // already exists
 			}
 		}
-		task.DependsOn = append(task.DependsOn, depID)
+		task.DependsOn = append(task.DependsOn, resolvedDepID)
 		task.UpdatedAt = time.Now()
 
 		updated, fmErr := UpdateFrontmatter(data, task)
@@ -242,6 +263,11 @@ func (s *Store) RemoveDep(id, depID string) error {
 	if err != nil {
 		return err
 	}
+	// Canonicalize depID so it matches what AddDep stored.
+	resolvedDepID, depErr := ResolveID(s.Dir, depID)
+	if depErr != nil {
+		resolvedDepID = depID // fall back to raw input if target doesn't exist
+	}
 	path := filepath.Join(s.Dir, resolvedID+".md")
 
 	return s.withLock(path, func() error {
@@ -255,7 +281,7 @@ func (s *Store) RemoveDep(id, depID string) error {
 		}
 		filtered := make([]string, 0, len(task.DependsOn))
 		for _, d := range task.DependsOn {
-			if d != depID {
+			if d != resolvedDepID {
 				filtered = append(filtered, d)
 			}
 		}
