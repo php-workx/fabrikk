@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/engine"
 	"github.com/runger/attest/internal/state"
-	"github.com/runger/attest/internal/ticket"
 )
 
 const (
@@ -81,17 +81,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 
 // usage is defined in help.go — renders grouped command help with lipgloss.
 
-// ticketStoreDir returns the canonical .tickets/ path for the given working directory.
-func ticketStoreDir(wd string) string {
-	return filepath.Join(wd, ".tickets")
-}
-
-// newEngine creates an engine with ticket.Store wired as the TaskStore.
-// This is the standard engine constructor — ticket.Store is the sole task backend.
+// newEngine creates an engine with the TaskStore from taskStoreForRun.
+// Single backend-selection rule — both engine and CLI commands use the same store.
 func newEngine(wd, runID string) *engine.Engine {
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
-	eng.TaskStore = ticket.NewStore(ticketStoreDir(wd))
+	eng.TaskStore = taskStoreForRun(wd, runID)
 	return eng
 }
 
@@ -595,9 +590,9 @@ func cmdReport(args []string) error {
 	}
 
 	runDir := state.NewRunDir(wd, runID) // needed for ReportDir + AppendEvent (not task ops)
-	store := taskStoreForRun(wd, runID)
-	tasks, err := store.ReadTasks(runID)
-	if err != nil {
+	eng := newEngine(wd, runID)
+	tasks, err := eng.TaskStore.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
 		return fmt.Errorf("read tasks: %w", err)
 	}
 	found := false
@@ -655,9 +650,8 @@ func cmdVerify(ctx context.Context, args []string) error {
 
 	eng := newEngine(wd, runID)
 
-	store := taskStoreForRun(wd, runID)
-	tasks, err := store.ReadTasks(runID)
-	if err != nil {
+	tasks, err := eng.TaskStore.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
 		return fmt.Errorf("read tasks: %w", err)
 	}
 
