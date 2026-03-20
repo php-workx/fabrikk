@@ -83,20 +83,19 @@ type Learning struct {
     Category     Category  `json:"category"`
     Content      string    `json:"content"`        // the actual learning
     Summary      string    `json:"summary"`        // one-line for display
-    SourceTask       string   `json:"source_task,omitempty"`
-    SourceRun        string   `json:"source_run,omitempty"`
-    SourceOwnedPaths []string `json:"source_owned_paths,omitempty"` // Scope at creation time
-    Confidence   float64   `json:"confidence"`     // 0-1, starts at 0.5
-    Utility      float64   `json:"utility"`        // 0-1, EMA-smoothed
-    CitedCount   int        `json:"cited_count"`               // times injected into context
-    LastCitedAt  *time.Time `json:"last_cited_at,omitempty"`   // set by RecordCitation
-    SupersededBy string    `json:"superseded_by,omitempty"`
-    OwnedPaths   []string  `json:"owned_paths,omitempty"` // paths this learning applies to
-    Expired      bool      `json:"expired"`        // soft-delete
+    SourceTask   string   `json:"source_task,omitempty"`
+    SourceRun    string   `json:"source_run,omitempty"`
+    SourcePaths  []string `json:"source_paths,omitempty"` // OwnedPaths at creation time
+    Confidence   float64  `json:"confidence"`             // 0-1, starts at 0.5
+    Utility      float64  `json:"utility"`                // 0-1, EMA-smoothed
+    CitedCount   int        `json:"cited_count"`           // times injected into context
+    LastCitedAt  *time.Time `json:"last_cited_at,omitempty"` // set by RecordCitation
+    SupersededBy string   `json:"superseded_by,omitempty"`
+    Expired      bool     `json:"expired"`                // soft-delete
 }
-
-**OwnedPaths population:** When a learning is created with a `SourceTask`, `OwnedPaths` is copied from that task's `Scope.OwnedPaths`. When created manually via CLI, `OwnedPaths` may be specified with `--path` flags. Path-based queries (`QueryOpts.Paths`) match when any query path equals any learning `OwnedPaths` entry (normalized exact path equality).
 ```
+
+**SourcePaths population:** When a learning is created with a `SourceTask`, `SourcePaths` is copied from that task's `Scope.OwnedPaths`. When created manually via CLI, `SourcePaths` may be specified with `--path` flags. Path-based queries (`QueryOpts.Paths`) match when any query path equals any learning `SourcePaths` entry (normalized exact path equality).
 
 #### Session handoff type
 
@@ -119,7 +118,7 @@ type SessionHandoff struct {
 type QueryOpts struct {
     Tags          []string  // match any tag
     Category      Category  // exact category match
-    Paths         []string  // match learnings with overlapping SourceOwnedPaths
+    Paths         []string  // match learnings with overlapping SourcePaths
     MinUtility    float64   // utility threshold (default 0.0)
     Limit         int       // max results (0 = unlimited)
     SortBy        string    // "utility" (default), "created_at"
@@ -130,7 +129,8 @@ type QueryOpts struct {
 
 ```go
 type Store struct {
-    Dir string // .attest/learnings/
+    Dir string         // .attest/learnings/
+    Now func() time.Time // clock injection for tests; defaults to time.Now
 }
 
 func NewStore(dir string) *Store
@@ -153,6 +153,29 @@ func (s *Store) LatestHandoff() (*SessionHandoff, error)
 // Maintenance
 func (s *Store) GarbageCollect(maxAge time.Duration) (int, error)
 ```
+
+#### Engine integration interface (`internal/state/types.go`)
+
+The engine must not import `internal/learning` (same constraint as engine→ticket). Define a `LearningEnricher` interface in the state package:
+
+```go
+// LearningEnricher enriches tasks with learnings from a learning store.
+// Implemented by learning.Store. The engine type-asserts to this interface.
+type LearningEnricher interface {
+    Query(opts LearningQueryOpts) ([]LearningRef, error)
+    RecordCitation(id string) error
+}
+
+// LearningQueryOpts is the subset of query options the engine needs.
+type LearningQueryOpts struct {
+    Tags       []string
+    Paths      []string
+    MinUtility float64
+    Limit      int
+}
+```
+
+The engine holds `LearningEnricher` (an interface), not `*learning.Store` (a concrete type). `learning.Store` satisfies the interface. Same pattern as `ClaimableStore`.
 
 #### Concurrency
 
@@ -215,7 +238,7 @@ The compiler remains pure — no learning store access. The engine enriches task
 
 ```go
 // In Engine.Compile, after compiler.CompileExecutionPlan:
-if e.LearningStore != nil {
+if e.LearningEnricher != nil {
     for i := range result.Tasks {
         e.enrichTaskWithLearnings(&result.Tasks[i])
     }
@@ -291,7 +314,7 @@ func (e *Engine) AssembleContext(task *state.Task) (*learning.ContextBundle, err
 Three query strategies, deduped and capped at token budget:
 
 1. **Tag match:** Learnings matching any of the task's tags
-2. **Path match:** Learnings whose `OwnedPaths` overlap with the task's `Scope.OwnedPaths` (normalized exact path equality; matches when any path overlaps)
+2. **Path match:** Learnings whose `SourcePaths` overlap with the task's `Scope.OwnedPaths` (normalized exact path equality; matches when any path overlaps)
 3. **Explicit IDs:** Learnings referenced in `LearningIDs` frontmatter field
 
 Token budget: 2000 tokens (~500 words). Max 8 learnings per task. Estimated as `len(content) / 4`.
@@ -336,7 +359,8 @@ attest context <run-id> <task-id>                     # Assemble + display
 | `internal/learning/index.go` | **NEW** — Tag inverted index build/query/keyword extraction | ~100 |
 | `internal/state/types.go` | Add Intent, Constraints, Warnings, LearningIDs to Task struct | +4 |
 | `internal/ticket/format.go` | Add 4 fields to Frontmatter, wire TaskToFrontmatter/FrontmatterToTask | +20 |
-| `internal/engine/engine.go` | Add LearningStore field, enrichTaskWithLearnings, AssembleContext | +60 |
+| `internal/state/types.go` | Add LearningEnricher + LearningQueryOpts interfaces | +12 |
+| `internal/engine/engine.go` | Add LearningEnricher field, enrichTaskWithLearnings, AssembleContext | +60 |
 | `cmd/attest/main.go` | Wire `learn` and `context` commands | +15 |
 | `cmd/attest/learn.go` | **NEW** — Learn sub-commands (add, query, handoff, list, gc) | ~200 |
 | `cmd/attest/help.go` | Add "Learning" help group | +5 |
@@ -398,3 +422,17 @@ New YAML fields use `omitempty` and live alongside the existing `Extra` catch-al
 8. Manual: `attest context <run-id> <task-id>` → shows assembled context bundle
 9. Manual: `attest next <run-id>` → shows latest handoff when present
 10. Manual: `attest status` → shows handoff summary when age < 24h and omits it otherwise
+
+---
+
+## Appendix: Pre-Mortem Findings (2026-03-20)
+
+5 findings from inline pre-mortem. All resolved in this plan revision.
+
+| ID | Severity | Finding | Resolution |
+|----|----------|---------|------------|
+| pm-001 | significant | `OwnedPaths` and `SourceOwnedPaths` duplicate fields on Learning struct — two council reviewers added overlapping fields | Consolidated into single `SourcePaths` field. Removed `OwnedPaths`. |
+| pm-002 | significant | `OwnedPaths population` paragraph trapped inside code fence — implementer would miss field semantics | Moved outside code fence as standalone paragraph. |
+| pm-003 | moderate | Engine→learning import violates architecture constraint (engine must not import concrete backends) | Added `LearningEnricher` interface to `state/types.go`. Engine holds the interface, not `*learning.Store`. Same pattern as `ClaimableStore`. |
+| pm-004 | moderate | No `UpdatedAt` on Learning — makes debugging stale data harder | Accepted risk. Flock provides real protection. Can add later if debugging needs arise. |
+| pm-005 | low | `Now func() time.Time` field missing from Store struct definition despite clock injection requirement | Added `Now` field to Store struct definition. |
