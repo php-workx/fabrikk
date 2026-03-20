@@ -84,6 +84,9 @@ func (s *Store) WriteTasks(runID string, tasks []state.Task) error {
 	// Write new/updated tasks.
 	for i := range tasks {
 		task := tasks[i] // copy — do not mutate caller's slice
+		if err := ValidateID(task.TaskID); err != nil {
+			return fmt.Errorf("invalid task ID %s: %w", task.TaskID, err)
+		}
 		task.ParentTaskID = runID
 		path := filepath.Join(s.Dir, task.TaskID+".md")
 

@@ -98,7 +98,10 @@ func idPrefix(dirName string) string {
 		if len(dirName) >= 3 {
 			return dirName[:3]
 		}
-		return dirName
+		if dirName != "" {
+			return dirName
+		}
+		return "att" // fallback for empty/separator-only input
 	}
 
 	var prefix strings.Builder
@@ -107,7 +110,11 @@ func idPrefix(dirName string) string {
 			prefix.WriteByte(part[0])
 		}
 	}
-	return prefix.String()
+	result := prefix.String()
+	if result == "" {
+		return "att" // fallback for edge cases like all-empty segments
+	}
+	return result
 }
 
 func randomSuffix(n int) (string, error) {
