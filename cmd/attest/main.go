@@ -426,8 +426,10 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 		}
 	}
 
-	// Extract learnings from council findings (Phase 2)
-	extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
+	// Extract learnings from council findings (Phase 2) — skip during dry-run.
+	if !dryRun {
+		extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
+	}
 
 	return nil
 }

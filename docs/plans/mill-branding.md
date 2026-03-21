@@ -106,7 +106,7 @@ Steel blue + amber = industrial but not cold. Feels like a workshop with good li
 
 ### CLI output identity
 
-```
+```text
 ⚙ mill v0.1.0
 ```
 

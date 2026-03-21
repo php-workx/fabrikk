@@ -79,7 +79,7 @@ Shows matching learnings, token usage, handoff if < 24h old.
 
 ### maintain
 
-Run `attest learn gc` + `attest learn list` to show store health. When `attest learn maintain` is implemented, use that instead.
+Run `attest learn maintain` for maintenance. Use `attest learn list` to inspect current store state.
 
 ### verify
 

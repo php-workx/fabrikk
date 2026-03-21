@@ -19,7 +19,7 @@ const (
 
 func cmdLearn(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: attest learn <content|query|handoff|list|gc|maintain> [args]")
+		return fmt.Errorf("usage: attest learn <content|query|handoff|list|gc|maintain|repair> [args]")
 	}
 
 	wd, err := workDir()

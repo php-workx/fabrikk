@@ -349,6 +349,10 @@ func cmdNext(args []string) error {
 		return nil
 	}
 
+	if f.jsonOutput {
+		outputTasks([]state.Task{}, true)
+		return nil
+	}
 	fmt.Println("No ready or blocked tasks.")
 
 	// Show handoff if recent.

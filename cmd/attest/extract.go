@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,7 +13,10 @@ import (
 
 // existingFindingTags loads all finding/rejection tags from the store for batch dedup.
 func existingFindingTags(store *learning.Store, prefixes ...string) map[string]bool {
-	allLearnings, _ := store.Query(learning.QueryOpts{})
+	allLearnings, err := store.Query(learning.QueryOpts{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: learning store query failed: %v\n", err)
+	}
 	ids := make(map[string]bool)
 	for i := range allLearnings {
 		for _, tag := range allLearnings[i].Tags {
@@ -68,7 +72,10 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 				Description: f.Description, Recommendation: f.Recommendation,
 				RunID: runID, Accepted: accepted[f.FindingID],
 			})
-			if err := store.Add(l); err == nil {
+			if err := store.Add(l); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to add learning for finding %s: %v\n", f.FindingID, err)
+			} else {
+				existing["finding:"+f.FindingID] = true
 				extracted++
 				fmt.Printf("  Extracted learning: %s (%s)\n", l.ID, l.Summary)
 			}
@@ -104,7 +111,10 @@ func extractRejections(store *learning.Store, result *councilflow.CouncilResult,
 			PersonaID: rej.PersonaID,
 		})
 		if l != nil {
-			if err := store.Add(l); err == nil {
+			if err := store.Add(l); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to add rejection learning for %s: %v\n", rej.FindingID, err)
+			} else {
+				existing["rejected:"+rej.FindingID] = true
 				extracted++
 				fmt.Printf("  Extracted rejection learning: %s\n", l.ID)
 			}
@@ -148,7 +158,10 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 			f.FindingID, f.Severity, f.Category, f.Summary,
 			taskID, "", dedup, sourcePaths,
 		)
-		if err := store.Add(l); err == nil {
+		if err := store.Add(l); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to add verifier learning for %s: %v\n", f.FindingID, err)
+		} else {
+			existing["verifier:"+dedup] = true
 			extracted++
 			fmt.Printf("  Extracted verifier learning: %s (%s)\n", l.ID, l.Summary)
 		}

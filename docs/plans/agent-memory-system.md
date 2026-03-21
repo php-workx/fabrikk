@@ -430,7 +430,7 @@ New YAML fields use `omitempty` and live alongside the existing `Extra` catch-al
 
 ## 9. Phase 2: Learning Extraction & Injection
 
-**Status:** Planned
+**Status:** Implemented
 **Date:** 2026-03-21
 
 Phase 1 built the learning store, query engine, and task enrichment pipeline. Phase 2 closes the loop: learnings are automatically extracted from pipeline events and injected into future pipeline stages.
@@ -987,7 +987,7 @@ The Phase 1 store path is the shared store path — no move needed. The local st
 
 ## 11. Phase 3: The Flywheel — From Passive Store to Active Prevention
 
-**Status:** Planned (research complete)
+**Status:** Implemented
 **Date:** 2026-03-21
 
 Phase 2 wires extraction and injection. Phase 3 closes the full feedback loop: learnings are cited, citations drive utility scoring, utility drives maturity progression, and mature learnings are compiled into prevention checks that run automatically.

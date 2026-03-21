@@ -610,7 +610,17 @@ func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 		MinUtility: 0.3,
 		Limit:      5,
 	})
-	if err != nil || len(refs) == 0 {
+	if err != nil {
+		_ = e.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_query_failed",
+			RunID:     e.runID(),
+			TaskID:    task.TaskID,
+			Detail:    err.Error(),
+		})
+		return
+	}
+	if len(refs) == 0 {
 		return
 	}
 
