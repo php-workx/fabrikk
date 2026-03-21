@@ -142,6 +142,9 @@ format:
 setup: install-dev
     git config core.hooksPath .githooks
     @echo "Git hooks configured (.githooks/)"
+    mkdir -p .claude/skills
+    ln -sfn ../../skills/attest .claude/skills/attest
+    @echo "Claude Code skill symlinked (skills/attest → .claude/skills/attest)"
 
 # Install required development tools (pinned versions)
 install-dev:
