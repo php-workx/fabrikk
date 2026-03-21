@@ -18,6 +18,7 @@ func fixedClock(t time.Time) func() time.Time {
 func TestAddAndGet(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:     []string{"compiler", "grouping"},
@@ -47,6 +48,7 @@ func TestAddAndGet(t *testing.T) {
 func TestQueryByTag(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"compiler"}, Category: CategoryPattern, Summary: "A"})
 	_ = store.Add(&Learning{Tags: []string{"ticket"}, Category: CategoryAntiPattern, Summary: "B"})
@@ -64,6 +66,7 @@ func TestQueryByTag(t *testing.T) {
 func TestQueryByCategory(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "pat"})
 	_ = store.Add(&Learning{Tags: []string{"b"}, Category: CategoryAntiPattern, Summary: "anti"})
@@ -80,6 +83,7 @@ func TestQueryByCategory(t *testing.T) {
 func TestQueryByPaths(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryCodebase, Summary: "engine", SourcePaths: []string{"internal/engine"}})
 	_ = store.Add(&Learning{Tags: []string{"b"}, Category: CategoryCodebase, Summary: "ticket", SourcePaths: []string{"internal/ticket"}})
@@ -96,6 +100,7 @@ func TestQueryByPaths(t *testing.T) {
 func TestQuerySortByUtility(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "low", Utility: 0.3})
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "high", Utility: 0.9})
@@ -116,6 +121,7 @@ func TestQuerySortByUtility(t *testing.T) {
 func TestQueryLimit(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	for i := 0; i < 10; i++ {
 		_ = store.Add(&Learning{Tags: []string{"bulk"}, Category: CategoryPattern, Summary: "item"})
@@ -133,6 +139,7 @@ func TestQueryLimit(t *testing.T) {
 func TestQueryMinUtility(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "low", Utility: 0.2})
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "high", Utility: 0.8})
@@ -149,6 +156,7 @@ func TestQueryMinUtility(t *testing.T) {
 func TestRecordCitation(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "test"}
 	_ = store.Add(l)
@@ -170,6 +178,7 @@ func TestUtilityDecay(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	// Add a learning created 60 days ago, never cited.
 	old := &Learning{
@@ -198,6 +207,7 @@ func TestUtilityDecayDoesNotAccumulate(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	_ = store.Add(&Learning{
 		Tags:      []string{"stale"},
@@ -222,6 +232,7 @@ func TestUtilityDecayDoesNotAccumulate(t *testing.T) {
 func TestExpiredAndSupersededExcluded(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "active"})
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "expired", Expired: true})
@@ -239,6 +250,7 @@ func TestExpiredAndSupersededExcluded(t *testing.T) {
 func TestHandoffWriteAndRead(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	h := &SessionHandoff{
 		RunID:     "run-1234",
@@ -268,6 +280,7 @@ func TestHandoffWriteAndRead(t *testing.T) {
 func TestMultipleHandoffWritesUpdatesLatest(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.WriteHandoff(&SessionHandoff{Summary: "first"})
 	_ = store.WriteHandoff(&SessionHandoff{Summary: "second"})
@@ -284,6 +297,7 @@ func TestMultipleHandoffWritesUpdatesLatest(t *testing.T) {
 func TestLatestHandoffNone(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	got, err := store.LatestHandoff()
 	if err != nil {
@@ -298,6 +312,7 @@ func TestGarbageCollect(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	// Active learning.
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "keep"})
@@ -330,6 +345,7 @@ func TestGarbageCollect(t *testing.T) {
 func TestTagIndexRebuilt(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"alpha", "beta"}, Category: CategoryPattern, Summary: "test"})
 
@@ -347,6 +363,7 @@ func TestTagIndexRebuilt(t *testing.T) {
 func TestAddRejectsUnknownCategory(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	err := store.Add(&Learning{Tags: []string{"a"}, Category: "bogus", Summary: "test"})
 	if err == nil {
@@ -357,6 +374,7 @@ func TestAddRejectsUnknownCategory(t *testing.T) {
 func TestAddDefaultsEmptyCategory(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{Tags: []string{"a"}, Summary: "test"}
 	if err := store.Add(l); err != nil {
@@ -370,6 +388,7 @@ func TestAddDefaultsEmptyCategory(t *testing.T) {
 func TestGetNotFound(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_, err := store.Get("nonexistent")
 	if err == nil {
@@ -380,6 +399,7 @@ func TestGetNotFound(t *testing.T) {
 func TestAddPreservesExplicitZeroConfidenceAndUtility(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:       []string{"test"},
@@ -433,6 +453,7 @@ func TestAddPreservesExplicitZeroConfidenceAndUtility(t *testing.T) {
 func TestTagNormalization(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{Tags: []string{"  UPPER  ", "Mixed"}, Category: CategoryPattern, Summary: "test"})
 
@@ -449,6 +470,7 @@ func TestTagNormalization(t *testing.T) {
 func TestReadAllSkipsCorruptLines(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	// Add a valid learning first so we know the format.
 	_ = store.Add(&Learning{
@@ -485,6 +507,7 @@ func TestReadAllSkipsCorruptLines(t *testing.T) {
 func TestQueryLearnings(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{
 		Tags:        []string{"compiler"},
@@ -531,6 +554,7 @@ func TestAssembleContext(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	// Add several learnings with ~100 char content (~25 tokens each).
 	for i := 0; i < 5; i++ {
@@ -564,6 +588,7 @@ func TestAssembleContext(t *testing.T) {
 func TestAssembleContextTokenBudget(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	// Add 20 learnings each with 500-char content (~125 tokens each).
 	// Total ~2500 tokens > 2000 budget.
@@ -592,6 +617,7 @@ func TestAssembleContextTokenBudget(t *testing.T) {
 func TestSourceAndMaturityPreserved(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:          []string{"test"},
@@ -623,6 +649,7 @@ func TestSourceAndMaturityPreserved(t *testing.T) {
 func TestAddDefaultsSourceAndMaturity(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{Tags: []string{"test"}, Category: CategoryPattern, Summary: "test"}
 	_ = store.Add(l)
@@ -639,6 +666,7 @@ func TestAddDefaultsSourceAndMaturity(t *testing.T) {
 func TestMaturityWeightedQuery(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	// Two learnings with same utility but different maturity
 	_ = store.Add(&Learning{
@@ -673,6 +701,7 @@ func TestMaintain_MaturityPromotion(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:       []string{"test"},
@@ -702,6 +731,7 @@ func TestMaintain_MaturityDemotion(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:     []string{"test"},
@@ -730,6 +760,7 @@ func TestMaintain_StalePenalty(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 	store := &Store{Dir: dir, Now: fixedClock(now)}
+	defer store.Wait()
 
 	l := &Learning{
 		Tags:      []string{"test"},
@@ -757,6 +788,7 @@ func TestMaintain_StalePenalty(t *testing.T) {
 func TestMaintain_CorruptionBlocks(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	// Add a valid learning
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "valid"})
@@ -779,6 +811,7 @@ func TestMaintain_CorruptionBlocks(t *testing.T) {
 func TestMaintain_ConcurrentSkips(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "test"})
 
 	// Simulate concurrent maintenance
@@ -796,6 +829,7 @@ func TestMaintain_ConcurrentSkips(t *testing.T) {
 func TestAddBlockedByCorruption(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	// Add a valid learning
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "valid"})
@@ -826,6 +860,7 @@ func TestAddBlockedByCorruption(t *testing.T) {
 func TestRecordCitationBlockedByCorruption(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	l := &Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "test"}
 	_ = store.Add(l)
@@ -839,6 +874,220 @@ func TestRecordCitationBlockedByCorruption(t *testing.T) {
 	err := store.RecordCitation(l.ID)
 	if !errors.Is(err, ErrCorruptLearningStore) {
 		t.Errorf("error = %v, want ErrCorruptLearningStore", err)
+	}
+}
+
+// --- Regression tests for code review issues ---
+
+// Issue 1: Tag+path lookup should be union, not intersection.
+func TestAssembleContextTagPathUnion(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	// Learning with only a matching tag.
+	_ = store.Add(&Learning{
+		Tags:     []string{"compiler"},
+		Category: CategoryPattern,
+		Content:  "tag-only learning",
+		Summary:  "tag-only",
+		Utility:  0.8,
+	})
+	// Learning with only a matching path.
+	_ = store.Add(&Learning{
+		Tags:        []string{"unrelated"},
+		Category:    CategoryCodebase,
+		Content:     "path-only learning",
+		Summary:     "path-only",
+		Utility:     0.8,
+		SourcePaths: []string{"internal/engine"},
+	})
+
+	bundle, err := store.AssembleContext("task-1", []string{"compiler"}, []string{"internal/engine"})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+	if len(bundle.Learnings) != 2 {
+		names := make([]string, len(bundle.Learnings))
+		for i := range bundle.Learnings {
+			names[i] = bundle.Learnings[i].Summary
+		}
+		t.Fatalf("got %d learnings %v, want 2 (union of tag + path matches)", len(bundle.Learnings), names)
+	}
+}
+
+// Issue 2: AssembleContext should record citations.
+func TestAssembleContextRecordsCitations(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	l := &Learning{
+		Tags:     []string{"test"},
+		Category: CategoryPattern,
+		Content:  "citeable learning",
+		Summary:  "citeable",
+		Utility:  0.8,
+	}
+	_ = store.Add(l)
+
+	_, err := store.AssembleContext("task-1", []string{"test"}, nil)
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	got, _ := store.Get(l.ID)
+	if got.CitedCount != 1 {
+		t.Errorf("CitedCount = %d after AssembleContext, want 1", got.CitedCount)
+	}
+	if got.LastCitedAt == nil {
+		t.Error("LastCitedAt should be set after AssembleContext")
+	}
+}
+
+// Issue 3: Oversized first learning must not exceed token budget.
+func TestAssembleContextRejectsOversizedFirstLearning(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	// 10KB content → ~2560 tokens, exceeds 2000 budget.
+	_ = store.Add(&Learning{
+		Tags:     []string{"big"},
+		Category: CategoryPattern,
+		Content:  strings.Repeat("x", 10240),
+		Summary:  "oversized",
+		Utility:  0.9,
+	})
+
+	bundle, err := store.AssembleContext("task-1", []string{"big"}, nil)
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+	if bundle.TokensUsed > 2000 {
+		t.Errorf("TokensUsed = %d, want <= 2000 (oversized first learning should be skipped)", bundle.TokensUsed)
+	}
+	if len(bundle.Learnings) != 0 {
+		t.Errorf("Learnings = %d, want 0 (oversized learning exceeds budget)", len(bundle.Learnings))
+	}
+}
+
+// Issue 4: AssembleContext MinUtility should be 0.3, not 0.1.
+func TestAssembleContextMinUtilityThreshold(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	_ = store.Add(&Learning{
+		Tags:     []string{"low-u"},
+		Category: CategoryPattern,
+		Content:  "low utility learning",
+		Summary:  "low utility",
+		Utility:  0.2,
+	})
+	_ = store.Add(&Learning{
+		Tags:     []string{"low-u"},
+		Category: CategoryPattern,
+		Content:  "high utility learning",
+		Summary:  "high utility",
+		Utility:  0.8,
+	})
+
+	bundle, err := store.AssembleContext("task-1", []string{"low-u"}, nil)
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+	if len(bundle.Learnings) != 1 {
+		t.Fatalf("got %d learnings, want 1 (utility 0.2 should be excluded)", len(bundle.Learnings))
+	}
+	if bundle.Learnings[0].Summary != "high utility" {
+		t.Errorf("included learning = %q, want 'high utility'", bundle.Learnings[0].Summary)
+	}
+}
+
+// Issue 5: Path matching should handle absolute/relative mismatch.
+func TestPathMatchingAbsoluteRelative(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	_ = store.Add(&Learning{
+		Tags:        []string{"a"},
+		Category:    CategoryCodebase,
+		Content:     "engine insight",
+		Summary:     "engine",
+		Utility:     0.8,
+		SourcePaths: []string{"internal/engine"},
+	})
+
+	// Query with absolute path that ends in the same relative path.
+	results, err := store.Query(QueryOpts{
+		Paths: []string{"/Users/someone/project/internal/engine"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Errorf("got %d results, want 1 (absolute path should match relative stored path)", len(results))
+	}
+}
+
+// Issue 6: MaintainIfStale should trigger on fresh store.
+func TestMaintainIfStaleTriggersOnFreshStore(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	// Add a stale learning that should be penalized by maintenance.
+	now := time.Now()
+	_ = store.Add(&Learning{
+		Tags:      []string{"stale"},
+		Category:  CategoryPattern,
+		Summary:   "stale learning",
+		Utility:   0.5,
+		CreatedAt: now.Add(-60 * 24 * time.Hour), // 60 days old, never cited
+	})
+
+	// MaintainIfStale should trigger on fresh store (lastMaintainedAt is zero).
+	store.MaintainIfStale()
+	store.Wait() // wait for background maintenance to complete
+
+	// After maintenance, the stale learning should have been penalized.
+	got, err := store.Query(QueryOpts{Tags: []string{"stale"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	// Utility should have been reduced by staleness penalty (0.1).
+	if got[0].Utility >= 0.5 {
+		t.Errorf("Utility = %f after maintenance on fresh store, want < 0.5 (maintenance should have triggered)", got[0].Utility)
+	}
+}
+
+// Issue 2 (batch): RecordCitations batches multiple updates in one write.
+func TestRecordCitationsBatch(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	defer store.Wait()
+
+	l1 := &Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "first"}
+	l2 := &Learning{Tags: []string{"b"}, Category: CategoryPattern, Summary: "second"}
+	_ = store.Add(l1)
+	_ = store.Add(l2)
+
+	if err := store.RecordCitations([]string{l1.ID, l2.ID}); err != nil {
+		t.Fatalf("RecordCitations: %v", err)
+	}
+
+	got1, _ := store.Get(l1.ID)
+	got2, _ := store.Get(l2.ID)
+	if got1.CitedCount != 1 {
+		t.Errorf("l1 CitedCount = %d, want 1", got1.CitedCount)
+	}
+	if got2.CitedCount != 1 {
+		t.Errorf("l2 CitedCount = %d, want 1", got2.CitedCount)
 	}
 }
 

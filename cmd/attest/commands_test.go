@@ -1118,6 +1118,7 @@ func TestCmdContext(t *testing.T) {
 
 	// Create a learning store and add a learning with matching tags and paths.
 	learnStore := learning.NewStore(filepath.Join(baseDir, ".attest", "learnings"))
+	defer learnStore.Wait()
 	_ = learnStore.Add(&learning.Learning{
 		Tags:        []string{"testctx"},
 		Category:    learning.CategoryPattern,

@@ -431,6 +431,7 @@ func cmdProgress(args []string) error {
 // showLatestHandoff displays the latest session handoff if less than 24h old.
 func showLatestHandoff(wd string) {
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	defer store.Wait()
 	h, err := store.LatestHandoff()
 	if err != nil || h == nil {
 		return

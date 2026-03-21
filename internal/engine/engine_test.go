@@ -1464,6 +1464,11 @@ func (m *mockLearningEnricher) RecordCitation(id string) error {
 	return nil
 }
 
+func (m *mockLearningEnricher) RecordCitations(ids []string) error {
+	m.citations = append(m.citations, ids...)
+	return nil
+}
+
 func TestCompileEnrichesTasksWithLearnings(t *testing.T) {
 	dir := t.TempDir()
 	specPath := writeTestSpec(t, dir)

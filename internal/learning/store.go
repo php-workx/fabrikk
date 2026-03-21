@@ -36,11 +36,12 @@ type Store struct {
 	mu               sync.Mutex
 	lastMaintainedAt time.Time
 	maintaining      atomic.Bool
+	bgWg             sync.WaitGroup // tracks background maintenance goroutines
 }
 
 // NewStore creates a learning store for the given directory.
 func NewStore(dir string) *Store {
-	return &Store{Dir: dir, Now: time.Now, lastMaintainedAt: time.Now()}
+	return &Store{Dir: dir, Now: time.Now}
 }
 
 // Add appends a learning to the store. Acquires exclusive lock.
@@ -121,6 +122,15 @@ func (s *Store) Add(l *Learning) error {
 
 // RecordCitation increments CitedCount and sets LastCitedAt. Acquires lock.
 func (s *Store) RecordCitation(id string) error {
+	return s.RecordCitations([]string{id})
+}
+
+// RecordCitations increments CitedCount and sets LastCitedAt for multiple learnings
+// in a single store write. Acquires lock once.
+func (s *Store) RecordCitations(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	return s.withLock(func() error {
 		learnings, skipped, err := s.readAllWithCount()
 		if err != nil {
@@ -130,15 +140,26 @@ func (s *Store) RecordCitation(id string) error {
 			return fmt.Errorf("%w: %d corrupt lines — run 'attest learn repair' to fix",
 				ErrCorruptLearningStore, skipped)
 		}
+		idSet := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			idSet[id] = true
+		}
 		now := s.now()
+		found := 0
 		for i := range learnings {
-			if learnings[i].ID == id {
+			if idSet[learnings[i].ID] {
 				learnings[i].CitedCount++
 				learnings[i].LastCitedAt = &now
-				return s.writeAll(learnings)
+				found++
+				if found == len(idSet) {
+					break
+				}
 			}
 		}
-		return fmt.Errorf("learning %s not found", id)
+		if found == 0 {
+			return fmt.Errorf("no learnings found for citation IDs")
+		}
+		return s.writeAll(learnings)
 	})
 }
 
@@ -332,7 +353,7 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBu
 	results, err := s.Query(QueryOpts{
 		Tags:       tags,
 		Paths:      paths,
-		MinUtility: 0.1,
+		MinUtility: 0.3,
 		SortBy:     "utility",
 	})
 	if err != nil {
@@ -344,7 +365,7 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBu
 	tokensUsed := 0
 	for i := range results {
 		tokens := len(results[i].Content) / 4
-		if tokensUsed+tokens > tokenBudget && len(selected) > 0 {
+		if tokensUsed+tokens > tokenBudget {
 			break
 		}
 		selected = append(selected, results[i])
@@ -352,6 +373,15 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBu
 		if len(selected) >= maxLearnings {
 			break
 		}
+	}
+
+	// Record citations for all selected learnings (best-effort, single write).
+	if len(selected) > 0 {
+		ids := make([]string, len(selected))
+		for i := range selected {
+			ids[i] = selected[i].ID
+		}
+		_ = s.RecordCitations(ids)
 	}
 
 	handoff, _ := s.LatestHandoff()
@@ -504,18 +534,19 @@ func (s *Store) Repair() (kept, dropped int, retErr error) {
 }
 
 // MaintainIfStale triggers background maintenance if more than 24 hours have passed
-// since the last maintenance run. Non-blocking — spawns a goroutine.
+// since the last maintenance run, or if maintenance has never run. Non-blocking — spawns a goroutine.
 func (s *Store) MaintainIfStale() {
 	s.mu.Lock()
-	if s.lastMaintainedAt.IsZero() {
+	stale := s.lastMaintainedAt.IsZero() || s.now().Sub(s.lastMaintainedAt) > 24*time.Hour
+	if stale {
+		// Mark as maintained now to prevent concurrent re-triggers.
 		s.lastMaintainedAt = s.now()
-		s.mu.Unlock()
-		return
 	}
-	stale := s.now().Sub(s.lastMaintainedAt) > 24*time.Hour
 	s.mu.Unlock()
 	if stale {
+		s.bgWg.Add(1)
 		go func() {
+			defer s.bgWg.Done()
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "warning: background maintenance panicked: %v\n", r)
@@ -527,6 +558,11 @@ func (s *Store) MaintainIfStale() {
 			}
 		}()
 	}
+}
+
+// Wait waits for any background maintenance goroutines to complete.
+func (s *Store) Wait() {
+	s.bgWg.Wait()
 }
 
 // checkMaturityTransition returns the new maturity level if a transition is warranted.
@@ -705,11 +741,14 @@ func (s *Store) matchesFilter(l *Learning, opts *QueryOpts) bool {
 	if opts.Category != "" && l.Category != opts.Category {
 		return false
 	}
-	if len(opts.Tags) > 0 && !matchesAnyTag(l.Tags, opts.Tags) && !matchesAnyKeyword(l.Content, opts.Tags) {
-		return false
-	}
-	if len(opts.Paths) > 0 && !matchesAnyPath(l.SourcePaths, opts.Paths) {
-		return false
+	hasTags := len(opts.Tags) > 0
+	hasPaths := len(opts.Paths) > 0
+	if hasTags || hasPaths {
+		tagMatch := hasTags && (matchesAnyTag(l.Tags, opts.Tags) || matchesAnyKeyword(l.Content, opts.Tags))
+		pathMatch := hasPaths && matchesAnyPath(l.SourcePaths, opts.Paths)
+		if !tagMatch && !pathMatch {
+			return false
+		}
 	}
 	return true
 }
@@ -729,7 +768,12 @@ func matchesAnyPath(sourcePaths, queryPaths []string) bool {
 	for _, qp := range queryPaths {
 		nqp := normalizePath(qp)
 		for _, lp := range sourcePaths {
-			if nqp == normalizePath(lp) {
+			nlp := normalizePath(lp)
+			if nqp == nlp {
+				return true
+			}
+			// Handle absolute/relative mismatch: check suffix containment.
+			if strings.HasSuffix(nqp, "/"+nlp) || strings.HasSuffix(nlp, "/"+nqp) {
 				return true
 			}
 		}

@@ -60,6 +60,7 @@ type LearningQueryOpts struct {
 type LearningEnricher interface {
 	QueryLearnings(opts LearningQueryOpts) ([]LearningRef, error)
 	RecordCitation(id string) error
+	RecordCitations(ids []string) error
 }
 
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).

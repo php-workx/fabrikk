@@ -624,15 +624,15 @@ func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 		case state.LearningCategoryCodebase, state.LearningCategoryTooling:
 			task.Constraints = append(task.Constraints, refs[i].Summary)
 		}
-		// Record citation for utility tracking (best-effort — log failures as events).
-		if citErr := e.LearningEnricher.RecordCitation(refs[i].ID); citErr != nil {
-			_ = e.RunDir.AppendEvent(state.Event{
-				Timestamp: time.Now(),
-				Type:      "learning_citation_failed",
-				RunID:     e.runID(),
-				Detail:    fmt.Sprintf("learning %s: %v", refs[i].ID, citErr),
-			})
-		}
+	}
+	// Batch-record citations for utility tracking (best-effort — single store write).
+	if citErr := e.LearningEnricher.RecordCitations(task.LearningIDs); citErr != nil {
+		_ = e.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_citation_failed",
+			RunID:     e.runID(),
+			Detail:    fmt.Sprintf("batch citation: %v", citErr),
+		})
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{

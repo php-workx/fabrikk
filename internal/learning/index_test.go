@@ -45,6 +45,7 @@ func TestExtractKeywordsShortWords(t *testing.T) {
 func TestKeywordsIndexedInTagIndex(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
+	defer store.Wait()
 
 	_ = store.Add(&Learning{
 		Tags:     []string{"compiler"},

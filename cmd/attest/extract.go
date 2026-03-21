@@ -45,6 +45,7 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 		return
 	}
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	defer store.Wait()
 	const maxExtract = 5
 	extracted := 0
 
@@ -118,6 +119,7 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 		return
 	}
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	defer store.Wait()
 	const maxExtract = 5
 	extracted := 0
 

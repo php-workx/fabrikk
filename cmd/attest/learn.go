@@ -27,6 +27,7 @@ func cmdLearn(args []string) error {
 		return err
 	}
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	defer store.Wait()
 
 	switch args[0] {
 	case "query":
@@ -47,75 +48,101 @@ func cmdLearn(args []string) error {
 	}
 }
 
-func cmdLearnAdd(store *learning.Store, args []string) error {
-	content := args[0]
-	var tags []string
-	var paths []string
-	var category learning.Category
-	var sourceTask, sourceRun string
+type learnAddOpts struct {
+	content    string
+	tags       []string
+	paths      []string
+	category   learning.Category
+	sourceTask string
+	sourceRun  string
+}
 
+func parseLearnAddArgs(args []string) learnAddOpts {
+	opts := learnAddOpts{content: args[0]}
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case flagTag:
 			if i+1 < len(args) {
-				tags = append(tags, strings.Split(args[i+1], ",")...)
+				opts.tags = append(opts.tags, strings.Split(args[i+1], ",")...)
 				i++
 			}
 		case "--category":
 			if i+1 < len(args) {
-				category = learning.Category(args[i+1])
+				opts.category = learning.Category(args[i+1])
 				i++
 			}
 		case "--path":
 			if i+1 < len(args) {
-				paths = append(paths, args[i+1])
+				opts.paths = append(opts.paths, args[i+1])
 				i++
 			}
 		case "--source-task":
 			if i+1 < len(args) {
-				sourceTask = args[i+1]
+				opts.sourceTask = args[i+1]
 				i++
 			}
 		case "--source-run":
 			if i+1 < len(args) {
-				sourceRun = args[i+1]
+				opts.sourceRun = args[i+1]
 				i++
 			}
 		}
 	}
-
-	if category == "" {
-		category = learning.CategoryCodebase
+	if opts.category == "" {
+		opts.category = learning.CategoryCodebase
 	}
+	return opts
+}
+
+// toRepoRelativePaths converts absolute paths to repo-relative form.
+func toRepoRelativePaths(paths []string) []string {
+	wd, wdErr := workDir()
+	if wdErr != nil {
+		return paths
+	}
+	for i, p := range paths {
+		if filepath.IsAbs(p) {
+			if rel, err := filepath.Rel(wd, p); err == nil && !strings.HasPrefix(rel, "..") {
+				paths[i] = rel
+			}
+		}
+	}
+	return paths
+}
+
+func cmdLearnAdd(store *learning.Store, args []string) error {
+	opts := parseLearnAddArgs(args)
 
 	// Auto-populate SourcePaths from task's OwnedPaths when --source-task is set.
-	if sourceTask != "" && len(paths) == 0 {
+	if opts.sourceTask != "" && len(opts.paths) == 0 {
 		wd, wdErr := workDir()
 		if wdErr == nil {
 			taskStore := taskStoreForRun(wd, "")
-			if task, taskErr := taskStore.ReadTask(sourceTask); taskErr == nil {
-				paths = task.Scope.OwnedPaths
+			if task, taskErr := taskStore.ReadTask(opts.sourceTask); taskErr == nil {
+				opts.paths = task.Scope.OwnedPaths
 			}
 		}
 	}
 
+	opts.paths = toRepoRelativePaths(opts.paths)
+
 	// Use first line as summary if content is multi-line.
-	summary := content
-	if idx := strings.IndexByte(content, '\n'); idx > 0 {
-		summary = content[:idx]
+	summary := opts.content
+	if idx := strings.IndexByte(opts.content, '\n'); idx > 0 {
+		summary = opts.content[:idx]
 	}
 	if len(summary) > 100 {
 		summary = summary[:100] + "..."
 	}
 
 	l := &learning.Learning{
-		Tags:        tags,
-		Category:    category,
-		Content:     content,
+		Tags:        opts.tags,
+		Category:    opts.category,
+		Content:     opts.content,
 		Summary:     summary,
-		SourceTask:  sourceTask,
-		SourceRun:   sourceRun,
-		SourcePaths: paths,
+		SourceTask:  opts.sourceTask,
+		SourceRun:   opts.sourceRun,
+		SourcePaths: opts.paths,
 	}
 	if err := store.Add(l); err != nil {
 		return err
@@ -384,6 +411,7 @@ func cmdContext(args []string) error {
 
 	// Assemble context bundle for this task.
 	learnStore := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	defer learnStore.Wait()
 	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)
