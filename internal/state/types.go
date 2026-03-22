@@ -3,6 +3,8 @@ package state
 
 import (
 	"errors"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -169,6 +171,41 @@ type Task struct {
 	Warnings        []string      `json:"warnings,omitempty"`
 	LearningIDs     []string      `json:"learning_ids,omitempty"`
 	LearningContext []LearningRef `json:"learning_context,omitempty"`
+}
+
+// DeriveTags produces query tags from task metadata for learning lookup.
+// Tags are derived from owned paths, requirement IDs, and task type.
+func (t *Task) DeriveTags() []string {
+	seen := make(map[string]struct{})
+	for _, p := range t.Scope.OwnedPaths {
+		for _, part := range strings.Split(p, "/") {
+			part = strings.ToLower(part)
+			if part != "" && part != "." && part != ".." {
+				seen[part] = struct{}{}
+			}
+		}
+	}
+	prefixMap := map[string]string{
+		"AT-FR": "functional", "AT-TS": "testing",
+		"AT-NFR": "non-functional", "AT-AS": "assumption",
+	}
+	for _, reqID := range t.RequirementIDs {
+		for prefix, tag := range prefixMap {
+			if strings.HasPrefix(reqID, prefix) {
+				seen[tag] = struct{}{}
+				break
+			}
+		}
+	}
+	if t.TaskType != "" {
+		seen[strings.ToLower(t.TaskType)] = struct{}{}
+	}
+	tags := make([]string, 0, len(seen))
+	for tag := range seen {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags
 }
 
 // LearningRef is a lightweight reference to a learning for ticket body rendering.

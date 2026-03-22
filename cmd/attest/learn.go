@@ -499,7 +499,7 @@ func cmdContext(args []string) error {
 
 	// Assemble context bundle for this task.
 	learnStore := newLearningStore(wd)
-	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths, task.Title)
+	bundle, err := learnStore.AssembleContext(task.TaskID, task.DeriveTags(), task.Scope.OwnedPaths, task.Title)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)
 	}

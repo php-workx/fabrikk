@@ -85,7 +85,8 @@ func FromRejection(r ExtractedRejection) *Learning {
 
 // FromVerifierFailure creates a Learning from a verifier blocking finding.
 // dedupeKey is used for the dedup tag; falls back to findingID if empty.
-func FromVerifierFailure(findingID, severity, category, summary, taskID, runID, dedupeKey string, sourcePaths []string) *Learning {
+// extraTags are additional tags (e.g., task-derived) for discoverability.
+func FromVerifierFailure(findingID, severity, category, summary, taskID, runID, dedupeKey string, sourcePaths, extraTags []string) *Learning {
 	cat := CategoryAntiPattern
 	switch category {
 	case "quality_gate":
@@ -99,8 +100,12 @@ func FromVerifierFailure(findingID, severity, category, summary, taskID, runID, 
 		dedupTag = dedupeKey
 	}
 
+	tags := make([]string, 0, 2+len(extraTags))
+	tags = append(tags, "verifier:"+dedupTag, category)
+	tags = append(tags, extraTags...)
+
 	return &Learning{
-		Tags:          []string{"verifier:" + dedupTag, category},
+		Tags:          tags,
 		Category:      cat,
 		Content:       summary,
 		Summary:       summary,

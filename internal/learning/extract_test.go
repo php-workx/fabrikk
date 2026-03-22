@@ -73,7 +73,7 @@ func TestFromRejection_NoRationale(t *testing.T) {
 }
 
 func TestFromVerifierFailure_QualityGate(t *testing.T) {
-	l := FromVerifierFailure("qg-001", "critical", "quality_gate", "gofumpt formatting errors", "task-1", "run-1", "", []string{"internal/engine"})
+	l := FromVerifierFailure("qg-001", "critical", "quality_gate", "gofumpt formatting errors", "task-1", "run-1", "", []string{"internal/engine"}, nil)
 	if l.Category != CategoryTooling {
 		t.Errorf("Category = %q, want tooling for quality_gate", l.Category)
 	}
@@ -86,7 +86,7 @@ func TestFromVerifierFailure_QualityGate(t *testing.T) {
 }
 
 func TestFromVerifierFailure_ScopeViolation(t *testing.T) {
-	l := FromVerifierFailure("sv-001", "high", "scope_violation", "Modified files outside owned paths", "task-2", "run-1", "scope-types", nil)
+	l := FromVerifierFailure("sv-001", "high", "scope_violation", "Modified files outside owned paths", "task-2", "run-1", "scope-types", nil, nil)
 	if l.Category != CategoryAntiPattern {
 		t.Errorf("Category = %q, want anti_pattern for scope_violation", l.Category)
 	}

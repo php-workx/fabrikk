@@ -15,7 +15,7 @@ func TestDeriveTags(t *testing.T) {
 		TaskType:       "implementation",
 	}
 
-	tags := deriveTags(task)
+	tags := task.DeriveTags()
 
 	has := func(needle string) bool {
 		for _, tag := range tags {
@@ -51,7 +51,7 @@ func TestDeriveTags(t *testing.T) {
 
 func TestDeriveTagsEmpty(t *testing.T) {
 	task := &state.Task{}
-	tags := deriveTags(task)
+	tags := task.DeriveTags()
 	if len(tags) != 0 {
 		t.Errorf("expected empty tags for empty task, got %v", tags)
 	}
@@ -66,7 +66,7 @@ func TestDeriveTagsSorted(t *testing.T) {
 		TaskType:       "repair",
 	}
 
-	tags := deriveTags(task)
+	tags := task.DeriveTags()
 	for i := 1; i < len(tags); i++ {
 		if tags[i] < tags[i-1] {
 			t.Errorf("tags not sorted: %v", tags)

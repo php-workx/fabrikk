@@ -161,15 +161,16 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 		if existing["verifier:"+dedup] {
 			continue
 		}
-		var sourcePaths []string
+		var sourcePaths, extraTags []string
 		var taskID string
 		if task != nil {
 			sourcePaths = task.Scope.OwnedPaths
 			taskID = task.TaskID
+			extraTags = task.DeriveTags()
 		}
 		l := learning.FromVerifierFailure(
 			f.FindingID, f.Severity, f.Category, f.Summary,
-			taskID, "", dedup, sourcePaths,
+			taskID, "", dedup, sourcePaths, extraTags,
 		)
 		if err := store.Add(l); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to add verifier learning for %s: %v\n", f.FindingID, err)

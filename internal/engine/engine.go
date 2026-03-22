@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -568,57 +567,12 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	return e.taskStore().WriteTask(existing)
 }
 
-// deriveTags produces query tags from task metadata for learning lookup.
-// Tags are derived from owned paths, requirement IDs, and task type — not persisted.
-func deriveTags(task *state.Task) []string {
-	seen := make(map[string]struct{})
-
-	// 1. Package names from OwnedPaths (e.g., "internal/compiler" -> "compiler", "internal")
-	for _, p := range task.Scope.OwnedPaths {
-		parts := strings.Split(p, "/")
-		for _, part := range parts {
-			part = strings.ToLower(part)
-			if part != "" && part != "." && part != ".." {
-				seen[part] = struct{}{}
-			}
-		}
-	}
-
-	// 2. Requirement ID prefixes (e.g., "AT-FR-001" -> "functional")
-	prefixMap := map[string]string{
-		"AT-FR":  "functional",
-		"AT-TS":  "testing",
-		"AT-NFR": "non-functional",
-		"AT-AS":  "assumption",
-	}
-	for _, reqID := range task.RequirementIDs {
-		for prefix, tag := range prefixMap {
-			if strings.HasPrefix(reqID, prefix) {
-				seen[tag] = struct{}{}
-				break
-			}
-		}
-	}
-
-	// 3. Task type
-	if task.TaskType != "" {
-		seen[strings.ToLower(task.TaskType)] = struct{}{}
-	}
-
-	tags := make([]string, 0, len(seen))
-	for tag := range seen {
-		tags = append(tags, tag)
-	}
-	sort.Strings(tags)
-	return tags
-}
-
 // enrichTaskWithLearnings queries the learning store and populates the task's
 // learning-related fields. Deterministic: Warnings from anti_pattern summaries,
 // Constraints from codebase/tooling summaries. LearningContext for body rendering.
 func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 	refs, err := e.LearningEnricher.QueryLearnings(state.LearningQueryOpts{
-		Tags:             deriveTags(task),
+		Tags:             task.DeriveTags(),
 		Paths:            task.Scope.OwnedPaths,
 		SearchText:       task.Title,
 		MinEffectiveness: 0.3,
