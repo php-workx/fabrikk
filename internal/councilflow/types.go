@@ -2,6 +2,7 @@ package councilflow
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -107,10 +108,13 @@ var ValidConfidences = map[string]bool{ConfidenceHigh: true, ConfidenceMedium: t
 var ValidSeverities = map[string]bool{"critical": true, "significant": true, "minor": true}
 
 // ValidateReviewOutput checks that enum fields contain valid values.
+// Normalizes verdict to lowercase for case-insensitive acceptance.
 func ValidateReviewOutput(r *ReviewOutput) error {
+	r.Verdict = Verdict(strings.ToLower(string(r.Verdict)))
 	if !ValidVerdicts[r.Verdict] {
-		return fmt.Errorf("%w: verdict %q not in {PASS, WARN, FAIL}", ErrInvalidReviewJSON, r.Verdict)
+		return fmt.Errorf("%w: verdict %q not in {pass, warn, fail}", ErrInvalidReviewJSON, r.Verdict)
 	}
+	r.Confidence = strings.ToUpper(r.Confidence)
 	if r.Confidence != "" && !ValidConfidences[r.Confidence] {
 		return fmt.Errorf("%w: confidence %q not in {HIGH, MEDIUM, LOW}", ErrInvalidReviewJSON, r.Confidence)
 	}
