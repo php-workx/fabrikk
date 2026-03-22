@@ -186,6 +186,7 @@ func (s *Store) QueryLearnings(opts state.LearningQueryOpts) ([]state.LearningRe
 	results, err := s.Query(QueryOpts{
 		Tags:             opts.Tags,
 		Paths:            opts.Paths,
+		SearchText:       opts.SearchText,
 		MinEffectiveness: opts.MinEffectiveness,
 		Limit:            opts.Limit,
 		SortBy:           "effectiveness",
@@ -282,14 +283,15 @@ func (s *Store) LatestHandoff() (*SessionHandoff, error) {
 }
 
 // AssembleContext builds a ContextBundle for a task by querying learnings
-// matching the task's tags and paths, deduped and capped at token budget.
-func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBundle, error) {
+// matching the task's tags, paths, and search text, capped at token budget.
+func (s *Store) AssembleContext(taskID string, tags, paths []string, searchText string) (*ContextBundle, error) {
 	const tokenBudget = 2000
 	const maxLearnings = 8
 
 	results, err := s.Query(QueryOpts{
 		Tags:             tags,
 		Paths:            paths,
+		SearchText:       searchText,
 		MinEffectiveness: 0.3,
 		SortBy:           "effectiveness",
 	})
@@ -597,15 +599,14 @@ func (s *Store) matchesFilter(l *Learning, opts *QueryOpts) bool {
 	if opts.Category != "" && l.Category != opts.Category {
 		return false
 	}
-	if opts.SearchText != "" && !matchesSearchText(l, opts.SearchText) {
-		return false
-	}
 	hasTags := len(opts.Tags) > 0
 	hasPaths := len(opts.Paths) > 0
-	if hasTags || hasPaths {
+	hasSearch := opts.SearchText != ""
+	if hasTags || hasPaths || hasSearch {
 		tagMatch := hasTags && (matchesAnyTag(l.Tags, opts.Tags) || matchesAnyKeyword(l.Content, opts.Tags))
 		pathMatch := hasPaths && matchesAnyPath(l.SourcePaths, opts.Paths)
-		if !tagMatch && !pathMatch {
+		searchMatch := hasSearch && matchesSearchText(l, opts.SearchText)
+		if !tagMatch && !pathMatch && !searchMatch {
 			return false
 		}
 	}

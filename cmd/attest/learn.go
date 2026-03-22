@@ -467,7 +467,7 @@ func cmdContext(args []string) error {
 
 	// Assemble context bundle for this task.
 	learnStore := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
-	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths)
+	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths, task.Title)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)
 	}

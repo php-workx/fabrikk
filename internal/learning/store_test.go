@@ -426,7 +426,7 @@ func TestAssembleContext(t *testing.T) {
 		})
 	}
 
-	bundle, err := store.AssembleContext("task-1", []string{"ctx-test"}, nil)
+	bundle, err := store.AssembleContext("task-1", []string{"ctx-test"}, nil, "")
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestAssembleContextTokenBudget(t *testing.T) {
 		})
 	}
 
-	bundle, err := store.AssembleContext("task-budget", []string{"budget-test"}, nil)
+	bundle, err := store.AssembleContext("task-budget", []string{"budget-test"}, nil, "")
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}
@@ -548,7 +548,7 @@ func TestAssembleContextTagPathUnion(t *testing.T) {
 		SourcePaths: []string{"internal/engine"},
 	})
 
-	bundle, err := store.AssembleContext("task-1", []string{"compiler"}, []string{"internal/engine"})
+	bundle, err := store.AssembleContext("task-1", []string{"compiler"}, []string{"internal/engine"}, "")
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestAssembleContextRejectsOversizedFirstLearning(t *testing.T) {
 		Content: strings.Repeat("x", 10240), Summary: "oversized", Confidence: 0.9,
 	})
 
-	bundle, err := store.AssembleContext("task-1", []string{"big"}, nil)
+	bundle, err := store.AssembleContext("task-1", []string{"big"}, nil, "")
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestAssembleContextMinEffectivenessThreshold(t *testing.T) {
 		Content: "high effectiveness learning", Summary: "high eff", Confidence: 0.8,
 	})
 
-	bundle, err := store.AssembleContext("task-1", []string{"low-e"}, nil)
+	bundle, err := store.AssembleContext("task-1", []string{"low-e"}, nil, "")
 	if err != nil {
 		t.Fatalf("AssembleContext: %v", err)
 	}

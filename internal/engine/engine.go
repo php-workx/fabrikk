@@ -620,6 +620,7 @@ func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 	refs, err := e.LearningEnricher.QueryLearnings(state.LearningQueryOpts{
 		Tags:             deriveTags(task),
 		Paths:            task.Scope.OwnedPaths,
+		SearchText:       task.Title,
 		MinEffectiveness: 0.3,
 		Limit:            5,
 	})

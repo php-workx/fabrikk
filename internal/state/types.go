@@ -51,6 +51,7 @@ const (
 type LearningQueryOpts struct {
 	Tags             []string
 	Paths            []string
+	SearchText       string
 	MinEffectiveness float64
 	Limit            int
 }
