@@ -390,6 +390,7 @@ func cmdLearnMaintain(store *learning.Store) error {
 	fmt.Printf("  Merged:       %d\n", report.Merged)
 	fmt.Printf("  Auto-expired: %d\n", report.AutoExpired)
 	fmt.Printf("  GC:           %d removed\n", report.GCRemoved)
+	fmt.Printf("  Prevention:   %d compiled\n", report.PreventionCompiled)
 	if report.IndexRebuilt {
 		fmt.Printf("  Index:        rebuilt\n")
 	}

@@ -382,12 +382,13 @@ type Contradiction struct {
 
 // MaintainReport summarizes maintenance actions taken.
 type MaintainReport struct {
-	Merged         int
-	Contradictions []Contradiction
-	AutoExpired    int
-	GCRemoved      int
-	IndexRebuilt   bool
-	Skipped        bool
+	Merged             int
+	Contradictions     []Contradiction
+	AutoExpired        int
+	GCRemoved          int
+	PreventionCompiled int
+	IndexRebuilt       bool
+	Skipped            bool
 }
 
 // readAllWithCount reads all learnings and returns the count of skipped corrupt lines.
@@ -459,7 +460,17 @@ func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 			return writeErr
 		}
 		report.IndexRebuilt = true
-		return s.rebuildIndex(kept)
+		if idxErr := s.rebuildIndex(kept); idxErr != nil {
+			return idxErr
+		}
+
+		// Compile prevention checks from high-effectiveness learnings.
+		compiled, compileErr := s.compilePreventionChecks(kept)
+		if compileErr != nil {
+			return compileErr
+		}
+		report.PreventionCompiled = compiled
+		return nil
 	})
 
 	return report, err
@@ -498,6 +509,133 @@ func (s *Store) Repair() (kept, dropped int, retErr error) {
 		return nil
 	})
 	return kept, dropped, retErr
+}
+
+// Prevention check thresholds.
+const (
+	preventionMinEffectiveness = 0.7
+	preventionMinAttachCount   = 3
+)
+
+// compilePreventionChecks writes high-effectiveness learnings as prevention
+// check markdown files. Returns the number of checks compiled.
+func (s *Store) compilePreventionChecks(learnings []Learning) (int, error) {
+	preventDir := filepath.Join(s.Dir, "prevention", "review")
+	if err := os.MkdirAll(preventDir, 0o755); err != nil {
+		return 0, fmt.Errorf("create prevention dir: %w", err)
+	}
+
+	// Track which learning IDs should have prevention checks.
+	wanted := make(map[string]bool)
+	compiled := 0
+	for i := range learnings {
+		l := &learnings[i]
+		if l.Expired || l.SupersededBy != "" {
+			continue
+		}
+		if l.AttachCount >= preventionMinAttachCount && l.Effectiveness() >= preventionMinEffectiveness {
+			wanted[l.ID] = true
+			path := filepath.Join(preventDir, l.ID+".md")
+			content := formatPreventionCheck(l, s.now())
+			if err := atomicWrite(path, []byte(content)); err != nil {
+				return compiled, fmt.Errorf("write prevention check %s: %w", l.ID, err)
+			}
+			compiled++
+		}
+	}
+
+	// Remove prevention checks for learnings that no longer qualify.
+	entries, _ := os.ReadDir(preventDir)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".md")
+		if !wanted[id] {
+			_ = os.Remove(filepath.Join(preventDir, name))
+		}
+	}
+
+	return compiled, nil
+}
+
+func formatPreventionCheck(l *Learning, now time.Time) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\nid: %s\nsource_learning: %s\ncompiled_at: %s\n",
+		l.ID, l.ID, now.UTC().Format(time.RFC3339))
+	if len(l.SourcePaths) > 0 {
+		b.WriteString("applicable_paths:\n")
+		for _, p := range l.SourcePaths {
+			fmt.Fprintf(&b, "  - %s\n", p)
+		}
+	}
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "# Prevention: %s\n\n", l.Summary)
+	fmt.Fprintf(&b, "- **Category:** %s\n", l.Category)
+	fmt.Fprintf(&b, "- **Effectiveness:** %.0f%% (%d/%d tasks passed)\n",
+		l.Effectiveness()*100, l.SuccessCount, l.AttachCount)
+	if l.Content != "" {
+		b.WriteString("\n")
+		b.WriteString(l.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// LoadPreventionContext reads prevention check files matching the given paths
+// and returns them as a formatted string for council reviewer context.
+func (s *Store) LoadPreventionContext(queryPaths []string) string {
+	preventDir := filepath.Join(s.Dir, "prevention", "review")
+	entries, err := os.ReadDir(preventDir)
+	if err != nil {
+		return ""
+	}
+
+	var checks []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(preventDir, e.Name()))
+		if readErr != nil {
+			continue
+		}
+		content := string(data)
+
+		// If query paths provided, only include checks with matching applicable_paths.
+		if len(queryPaths) > 0 && !preventionMatchesPaths(content, queryPaths) {
+			continue
+		}
+		checks = append(checks, content)
+	}
+
+	if len(checks) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Prior Findings (from learning store)\n\n")
+	b.WriteString("The following issues have been identified in previous reviews. ")
+	b.WriteString("Consider these when reviewing. Do not re-raise resolved issues ")
+	b.WriteString("unless you see evidence they have regressed.\n\n")
+	for _, check := range checks {
+		b.WriteString(check)
+		b.WriteString("\n---\n\n")
+	}
+	return b.String()
+}
+
+// preventionMatchesPaths checks if a prevention check file's applicable_paths
+// overlap with any of the query paths.
+func preventionMatchesPaths(content string, queryPaths []string) bool {
+	for _, qp := range queryPaths {
+		nqp := normalizePath(qp)
+		if strings.Contains(content, nqp) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyDedup merges learnings with ≥2 shared tags and similar summaries.

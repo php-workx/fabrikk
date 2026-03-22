@@ -412,6 +412,13 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	cfg.DryRun = dryRun
 	cfg.Force = force
 	cfg.SkipApproval = skipApproval
+
+	// Inject prevention checks from high-effectiveness learnings.
+	learnStore := learning.NewStore(filepath.Join(eng.WorkDir, ".attest", "learnings"))
+	if prevention := learnStore.LoadPreventionContext(nil); prevention != "" {
+		cfg.CodebaseContext += prevention
+	}
+
 	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)
 	if err != nil {
 		return err
