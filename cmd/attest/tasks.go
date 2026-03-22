@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/learning"
 	"github.com/runger/attest/internal/state"
 	"github.com/runger/attest/internal/ticket"
 )
@@ -435,7 +434,7 @@ func cmdProgress(args []string) error {
 // showLatestHandoff displays the latest session handoff if less than 24h old.
 // If runID is non-empty, only shows the handoff if it matches that run.
 func showLatestHandoff(wd, runID string) {
-	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	store := newLearningStore(wd)
 
 	h, err := store.LatestHandoff()
 	if err != nil || h == nil {
@@ -457,7 +456,7 @@ func showLatestHandoff(wd, runID string) {
 
 // showLearningHealth displays a summary of the learning store.
 func showLearningHealth(wd string) {
-	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	store := newLearningStore(wd)
 	h, err := store.Health()
 	if err != nil || h.Total == 0 {
 		return

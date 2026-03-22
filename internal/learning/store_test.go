@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -229,7 +230,7 @@ func TestLatestHandoffNone(t *testing.T) {
 func TestGarbageCollect(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
-	store := &Store{Dir: dir, Now: fixedClock(now)}
+	store := &Store{SharedDir: dir, Now: fixedClock(now)}
 
 	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "keep"})
 
@@ -414,7 +415,7 @@ func TestQueryLearnings(t *testing.T) {
 func TestAssembleContext(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
-	store := &Store{Dir: dir, Now: fixedClock(now)}
+	store := &Store{SharedDir: dir, Now: fixedClock(now)}
 
 	for i := 0; i < 5; i++ {
 		_ = store.Add(&Learning{
@@ -697,7 +698,7 @@ func TestEffectivenessScoring(t *testing.T) {
 func TestMaintain_AutoExpiry(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
-	store := &Store{Dir: dir, Now: fixedClock(now)}
+	store := &Store{SharedDir: dir, Now: fixedClock(now)}
 
 	// Learning created 100 days ago, never attached.
 	_ = store.Add(&Learning{
@@ -813,7 +814,7 @@ func TestSearchText(t *testing.T) {
 func TestCompilePreventionChecks(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
-	store := &Store{Dir: dir, Now: fixedClock(now)}
+	store := &Store{SharedDir: dir, Now: fixedClock(now)}
 
 	// Qualifying learning: effectiveness 0.8 (4/5), AttachCount 5.
 	_ = store.Add(&Learning{
@@ -871,7 +872,7 @@ func TestCompilePreventionChecks(t *testing.T) {
 func TestCompilePreventionChecksCleanupStale(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
-	store := &Store{Dir: dir, Now: fixedClock(now)}
+	store := &Store{SharedDir: dir, Now: fixedClock(now)}
 
 	// Create a qualifying learning.
 	l := &Learning{
@@ -1021,6 +1022,197 @@ func TestRecordOutcomeMissingIDs(t *testing.T) {
 	// RecordOutcome with non-existent IDs should not error — it just doesn't match.
 	if err := store.RecordOutcome([]string{"lrn-nonexistent"}, true); err != nil {
 		t.Errorf("RecordOutcome with missing ID = %v, want nil", err)
+	}
+}
+
+// --- Split store + scanning integration tests ---
+
+func TestAddWithScanner_RedactsContent(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	_ = store.Add(&Learning{
+		Tags:     []string{"test"},
+		Category: CategoryPattern,
+		Content:  "api_key=sk-secret123 caused auth failure",
+		Summary:  "API key leak at /Users/jane/project/main.go",
+	})
+
+	// LocalDir should have unredacted content.
+	localData, _ := os.ReadFile(filepath.Join(localDir, "index.jsonl"))
+	if !strings.Contains(string(localData), "sk-secret123") {
+		t.Error("LocalDir should have unredacted content")
+	}
+
+	// SharedDir should have redacted content.
+	sharedData, _ := os.ReadFile(filepath.Join(sharedDir, "index.jsonl"))
+	if strings.Contains(string(sharedData), "sk-secret123") {
+		t.Error("SharedDir should NOT have unredacted API key")
+	}
+	if !strings.Contains(string(sharedData), "[REDACTED]") {
+		t.Error("SharedDir should have [REDACTED] placeholder")
+	}
+}
+
+func TestAddWithScanner_PreservesCleanContent(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	_ = store.Add(&Learning{
+		Tags:     []string{"test"},
+		Category: CategoryPattern,
+		Content:  "Use flock for concurrent file access",
+		Summary:  "flock pattern",
+	})
+
+	// Both stores should have identical content (nothing to redact).
+	localData, _ := os.ReadFile(filepath.Join(localDir, "index.jsonl"))
+	sharedData, _ := os.ReadFile(filepath.Join(sharedDir, "index.jsonl"))
+	if !bytes.Equal(localData, sharedData) {
+		t.Error("clean content should be identical in both stores")
+	}
+}
+
+func TestSplitStore_LocalTakesPrecedence(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	// Add a learning (writes to both with redaction).
+	_ = store.Add(&Learning{
+		Tags:     []string{"test"},
+		Category: CategoryPattern,
+		Content:  "password=hunter2 in config",
+		Summary:  "password leak",
+	})
+
+	// Read back — should get unredacted (local) version.
+	learnings, err := store.Query(QueryOpts{Tags: []string{"test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(learnings) != 1 {
+		t.Fatalf("got %d learnings, want 1", len(learnings))
+	}
+	if !strings.Contains(learnings[0].Content, "hunter2") {
+		t.Error("query should return unredacted content from LocalDir")
+	}
+}
+
+func TestSplitStore_SharedOnlyFallback(t *testing.T) {
+	sharedDir := t.TempDir()
+	store := NewStore(sharedDir) // no LocalDir
+
+	_ = store.Add(&Learning{
+		Tags: []string{"test"}, Category: CategoryPattern,
+		Content: "shared only content", Summary: "shared",
+	})
+
+	learnings, err := store.Query(QueryOpts{Tags: []string{"test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(learnings) != 1 || learnings[0].Content != "shared only content" {
+		t.Fatalf("got %v, want shared only content", learnings)
+	}
+}
+
+func TestSplitStore_CoworkerLearning(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+
+	// Simulate a coworker's learning that only exists in SharedDir (via git pull).
+	coworkerLearning := `{"id":"lrn-coworker","created_at":"2026-03-22T10:00:00Z","tags":["auth"],"category":"pattern","content":"coworker insight","summary":"from coworker","confidence":0.5,"source":"manual"}` + "\n"
+	_ = os.WriteFile(filepath.Join(sharedDir, "index.jsonl"), []byte(coworkerLearning), 0o644)
+
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	learnings, err := store.Query(QueryOpts{Tags: []string{"auth"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(learnings) != 1 || learnings[0].ID != "lrn-coworker" {
+		t.Fatalf("coworker learning should be visible, got %v", learnings)
+	}
+}
+
+func TestSplitStore_MergeDedup(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+
+	// Same learning in both stores (different content — local has unredacted).
+	shared := `{"id":"lrn-both","created_at":"2026-03-22T10:00:00Z","tags":["test"],"category":"pattern","content":"[REDACTED] content","summary":"redacted","confidence":0.5,"source":"manual"}` + "\n"
+	local := `{"id":"lrn-both","created_at":"2026-03-22T10:00:00Z","tags":["test"],"category":"pattern","content":"secret content","summary":"unredacted","confidence":0.5,"source":"manual"}` + "\n"
+	_ = os.WriteFile(filepath.Join(sharedDir, "index.jsonl"), []byte(shared), 0o644)
+	_ = os.MkdirAll(localDir, 0o755)
+	_ = os.WriteFile(filepath.Join(localDir, "index.jsonl"), []byte(local), 0o644)
+
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	learnings, err := store.Query(QueryOpts{Tags: []string{"test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(learnings) != 1 {
+		t.Fatalf("got %d learnings, want 1 (deduped by ID)", len(learnings))
+	}
+	if learnings[0].Content != "secret content" {
+		t.Error("local (unredacted) version should take precedence")
+	}
+}
+
+func TestSplitStore_MaintainSyncsBothStores(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
+	store := &Store{SharedDir: sharedDir, LocalDir: localDir, Scanner: NewContentScanner(""), Now: fixedClock(now)}
+
+	// Add a learning that will be auto-expired.
+	_ = store.Add(&Learning{
+		Tags: []string{"old"}, Category: CategoryPattern,
+		Content: "old content", Summary: "old",
+		CreatedAt: now.Add(-100 * 24 * time.Hour),
+	})
+
+	report, err := store.Maintain(365 * 24 * time.Hour) // large maxAge
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AutoExpired != 1 {
+		t.Errorf("AutoExpired = %d, want 1", report.AutoExpired)
+	}
+
+	// Both stores should reflect the expired state.
+	localData, _ := os.ReadFile(filepath.Join(localDir, "index.jsonl"))
+	sharedData, _ := os.ReadFile(filepath.Join(sharedDir, "index.jsonl"))
+	if !strings.Contains(string(localData), `"expired":true`) {
+		t.Error("LocalDir should have expired learning")
+	}
+	if !strings.Contains(string(sharedData), `"expired":true`) {
+		t.Error("SharedDir should have expired learning")
+	}
+}
+
+func TestSplitStore_RecordOutcomeSyncsBoth(t *testing.T) {
+	sharedDir := t.TempDir()
+	localDir := t.TempDir()
+	store := NewStoreWithLocalDir(sharedDir, localDir)
+
+	l := &Learning{Tags: []string{"test"}, Category: CategoryPattern, Content: "clean content", Summary: "clean"}
+	_ = store.Add(l)
+
+	_ = store.RecordOutcome([]string{l.ID}, true)
+
+	// Both stores should have AttachCount=1.
+	localData, _ := os.ReadFile(filepath.Join(localDir, "index.jsonl"))
+	sharedData, _ := os.ReadFile(filepath.Join(sharedDir, "index.jsonl"))
+	if !strings.Contains(string(localData), `"attach_count":1`) {
+		t.Error("LocalDir should have attach_count=1")
+	}
+	if !strings.Contains(string(sharedData), `"attach_count":1`) {
+		t.Error("SharedDir should have attach_count=1")
 	}
 }
 

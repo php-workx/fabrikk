@@ -30,7 +30,7 @@ func (s *Store) rebuildIndex(learnings []Learning) error {
 	if err != nil {
 		return fmt.Errorf("marshal index: %w", err)
 	}
-	return atomicWrite(filepath.Join(s.Dir, "tags.json"), data)
+	return atomicWrite(filepath.Join(s.SharedDir, "tags.json"), data)
 }
 
 // stopWords are common words excluded from keyword extraction.

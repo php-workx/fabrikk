@@ -27,7 +27,7 @@ func cmdLearn(args []string) error {
 	if err != nil {
 		return err
 	}
-	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	store := newLearningStore(wd)
 
 	switch args[0] {
 	case "search":
@@ -467,7 +467,7 @@ func cmdContext(args []string) error {
 	}
 
 	// Assemble context bundle for this task.
-	learnStore := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	learnStore := newLearningStore(wd)
 	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths, task.Title)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)

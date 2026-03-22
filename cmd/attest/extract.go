@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/runger/attest/internal/councilflow"
@@ -61,7 +60,7 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 	if len(result.Rounds) == 0 {
 		return
 	}
-	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	store := newLearningStore(wd)
 
 	const maxExtract = 5
 	extracted := 0
@@ -142,7 +141,7 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 	if result.Pass || len(result.BlockingFindings) == 0 {
 		return
 	}
-	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	store := newLearningStore(wd)
 
 	const maxExtract = 5
 	extracted := 0

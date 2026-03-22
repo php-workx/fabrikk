@@ -26,16 +26,30 @@ var ErrCorruptLearningStore = errors.New("corrupt learning store")
 
 // Store manages the learning JSONL file and tag index.
 type Store struct {
-	Dir        string               // .attest/learnings/
+	SharedDir  string               // committed path: .attest/learnings/
+	LocalDir   string               // local-only path: .git/attest/learnings/ (optional)
+	Scanner    *ContentScanner      // content scanner (nil = no scanning)
 	Now        func() time.Time     // clock injection for tests; defaults to time.Now
 	OnMaintain func(MaintainReport) // optional callback for logging
 
 	maintaining atomic.Bool
 }
 
-// NewStore creates a learning store for the given directory.
+// NewStore creates a learning store with a single directory (backward-compatible).
 func NewStore(dir string) *Store {
-	return &Store{Dir: dir, Now: time.Now}
+	return &Store{SharedDir: dir, Now: time.Now}
+}
+
+// NewStoreWithLocalDir creates a split store with local (unredacted) and shared (redacted) directories.
+// Content scanning is enabled automatically using custom terms from {sharedDir}/../scan-terms.txt.
+func NewStoreWithLocalDir(sharedDir, localDir string) *Store {
+	scanTermsPath := filepath.Join(filepath.Dir(sharedDir), "scan-terms.txt")
+	return &Store{
+		SharedDir: sharedDir,
+		LocalDir:  localDir,
+		Scanner:   NewContentScanner(scanTermsPath),
+		Now:       time.Now,
+	}
 }
 
 // Add appends a learning to the store. Acquires exclusive lock.
@@ -287,7 +301,7 @@ func (s *Store) WriteHandoff(h *SessionHandoff) error {
 		h.CreatedAt = s.now()
 	}
 
-	handoffsDir := filepath.Join(s.Dir, "handoffs")
+	handoffsDir := filepath.Join(s.SharedDir, "handoffs")
 	if err := os.MkdirAll(handoffsDir, 0o755); err != nil {
 		return fmt.Errorf("create handoffs dir: %w", err)
 	}
@@ -305,13 +319,13 @@ func (s *Store) WriteHandoff(h *SessionHandoff) error {
 	}
 
 	// Copy to latest.
-	latestPath := filepath.Join(s.Dir, "latest-handoff.json")
+	latestPath := filepath.Join(s.SharedDir, "latest-handoff.json")
 	return atomicWrite(latestPath, data)
 }
 
 // LatestHandoff returns the most recent handoff, or nil if none exists.
 func (s *Store) LatestHandoff() (*SessionHandoff, error) {
-	path := filepath.Join(s.Dir, "latest-handoff.json")
+	path := filepath.Join(s.SharedDir, "latest-handoff.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -392,11 +406,30 @@ type MaintainReport struct {
 }
 
 // readAllWithCount reads all learnings and returns the count of skipped corrupt lines.
+// When LocalDir is set, merges both stores (LocalDir wins by ID for content).
 func (s *Store) readAllWithCount() ([]Learning, int, error) {
-	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
+	shared, sharedSkipped, err := readJSONLWithCount(s.SharedDir)
+	if err != nil {
+		return nil, 0, err
+	}
+	if s.LocalDir == "" {
+		return shared, sharedSkipped, nil
+	}
+	local, localSkipped, localErr := readJSONLWithCount(s.LocalDir)
+	if localErr != nil {
+		//nolint:nilerr // LocalDir read failure is non-fatal — fall back to shared only
+		return shared, sharedSkipped, nil
+	}
+	merged := mergeLearnings(local, shared)
+	return merged, sharedSkipped + localSkipped, nil
+}
+
+// readJSONLWithCount reads learnings from a single directory's index.jsonl.
+func readJSONLWithCount(dir string) ([]Learning, int, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create learnings dir: %w", err)
 	}
-	path := filepath.Join(s.Dir, "index.jsonl")
+	path := filepath.Join(dir, "index.jsonl")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -412,13 +445,30 @@ func (s *Store) readAllWithCount() ([]Learning, int, error) {
 			continue
 		}
 		var l Learning
-		if err := json.Unmarshal([]byte(line), &l); err != nil {
+		if jsonErr := json.Unmarshal([]byte(line), &l); jsonErr != nil {
 			skipped++
 			continue
 		}
 		learnings = append(learnings, l)
 	}
 	return learnings, skipped, nil
+}
+
+// mergeLearnings merges two learning slices by ID. Primary (local) entries
+// take precedence over secondary (shared) entries for the same ID.
+func mergeLearnings(primary, secondary []Learning) []Learning {
+	seen := make(map[string]bool, len(primary))
+	merged := make([]Learning, 0, len(primary)+len(secondary))
+	for i := range primary {
+		seen[primary[i].ID] = true
+		merged = append(merged, primary[i])
+	}
+	for i := range secondary {
+		if !seen[secondary[i].ID] {
+			merged = append(merged, secondary[i])
+		}
+	}
+	return merged
 }
 
 // GarbageCollect removes expired and superseded learnings older than maxAge.
@@ -490,7 +540,7 @@ func (s *Store) Repair() (kept, dropped int, retErr error) {
 		}
 
 		// Back up corrupt file.
-		src := filepath.Join(s.Dir, "index.jsonl")
+		src := filepath.Join(s.SharedDir, "index.jsonl")
 		backup := src + ".corrupt." + s.now().Format("20060102T150405")
 		data, err := os.ReadFile(src)
 		if err == nil {
@@ -520,7 +570,7 @@ const (
 // compilePreventionChecks writes high-effectiveness learnings as prevention
 // check markdown files. Returns the number of checks compiled.
 func (s *Store) compilePreventionChecks(learnings []Learning) (int, error) {
-	preventDir := filepath.Join(s.Dir, "prevention", "review")
+	preventDir := filepath.Join(s.SharedDir, "prevention", "review")
 	if err := os.MkdirAll(preventDir, 0o755); err != nil {
 		return 0, fmt.Errorf("create prevention dir: %w", err)
 	}
@@ -586,7 +636,7 @@ func formatPreventionCheck(l *Learning, now time.Time) string {
 // LoadPreventionContext reads prevention check files matching the given paths
 // and returns them as a formatted string for council reviewer context.
 func (s *Store) LoadPreventionContext(queryPaths []string) string {
-	preventDir := filepath.Join(s.Dir, "prevention", "review")
+	preventDir := filepath.Join(s.SharedDir, "prevention", "review")
 	entries, err := os.ReadDir(preventDir)
 	if err != nil {
 		return ""
@@ -850,54 +900,66 @@ func normalizePath(p string) string {
 }
 
 func (s *Store) readAll() ([]Learning, error) {
-	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create learnings dir: %w", err)
-	}
-	path := filepath.Join(s.Dir, "index.jsonl")
-	data, err := os.ReadFile(path)
+	learnings, skipped, err := s.readAllWithCount()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read index: %w", err)
-	}
-
-	var learnings []Learning
-	var skipped int
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		var l Learning
-		if err := json.Unmarshal([]byte(line), &l); err != nil {
-			skipped++
-			continue
-		}
-		learnings = append(learnings, l)
+		return nil, err
 	}
 	if skipped > 0 {
-		fmt.Fprintf(os.Stderr, "warning: skipped %d corrupt lines in %s\n", skipped, path)
+		fmt.Fprintf(os.Stderr, "warning: skipped %d corrupt lines in learning store\n", skipped)
 	}
 	return learnings, nil
 }
 
 func (s *Store) writeAll(learnings []Learning) error {
+	data, err := marshalJSONL(learnings)
+	if err != nil {
+		return err
+	}
+
+	// Write unredacted to LocalDir (if set).
+	if s.LocalDir != "" {
+		if mkErr := os.MkdirAll(s.LocalDir, 0o755); mkErr == nil {
+			localPath := filepath.Join(s.LocalDir, "index.jsonl")
+			if wErr := atomicWrite(localPath, data); wErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to write local learning store: %v\n", wErr)
+			}
+		}
+	}
+
+	// Write to SharedDir — redacted if scanner is set.
+	if s.Scanner != nil {
+		redacted := make([]Learning, len(learnings))
+		copy(redacted, learnings)
+		for i := range redacted {
+			redacted[i].Content, _ = s.Scanner.Scan(redacted[i].Content)
+			redacted[i].Summary, _ = s.Scanner.Scan(redacted[i].Summary)
+		}
+		data, err = marshalJSONL(redacted)
+		if err != nil {
+			return err
+		}
+	}
+
+	sharedPath := filepath.Join(s.SharedDir, "index.jsonl")
+	return atomicWrite(sharedPath, data)
+}
+
+func marshalJSONL(learnings []Learning) ([]byte, error) {
 	var buf strings.Builder
 	for i := range learnings {
 		data, err := json.Marshal(&learnings[i])
 		if err != nil {
-			return fmt.Errorf("marshal learning %s: %w", learnings[i].ID, err)
+			return nil, fmt.Errorf("marshal learning %s: %w", learnings[i].ID, err)
 		}
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
-	path := filepath.Join(s.Dir, "index.jsonl")
-	return atomicWrite(path, []byte(buf.String()))
+	return []byte(buf.String()), nil
 }
 
 func (s *Store) withLock(fn func() error) error {
-	lockPath := filepath.Join(s.Dir, ".lock")
-	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
+	lockPath := filepath.Join(s.SharedDir, ".lock")
+	if err := os.MkdirAll(s.SharedDir, 0o755); err != nil {
 		return fmt.Errorf("create learnings dir: %w", err)
 	}
 	fl := flock.New(lockPath)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -92,8 +93,39 @@ func newEngine(wd, runID string) *engine.Engine {
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
 	eng.TaskStore = taskStoreForRun(wd, runID)
-	eng.LearningEnricher = learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+	eng.LearningEnricher = newLearningStore(wd)
 	return eng
+}
+
+func newLearningStore(wd string) *learning.Store {
+	sharedDir := filepath.Join(wd, ".attest", "learnings")
+	localDir := resolveLocalLearningDir(wd)
+	if localDir != "" {
+		return learning.NewStoreWithLocalDir(sharedDir, localDir)
+	}
+	return learning.NewStore(sharedDir)
+}
+
+var (
+	cachedLocalDir   string
+	localDirResolved bool
+)
+
+func resolveLocalLearningDir(wd string) string {
+	if localDirResolved {
+		return cachedLocalDir
+	}
+	localDirResolved = true
+	out, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	gitCommonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(wd, gitCommonDir)
+	}
+	cachedLocalDir = filepath.Join(gitCommonDir, "attest", "learnings")
+	return cachedLocalDir
 }
 
 func workDir() (string, error) {
@@ -414,7 +446,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	cfg.SkipApproval = skipApproval
 
 	// Inject prevention checks from high-effectiveness learnings.
-	learnStore := learning.NewStore(filepath.Join(eng.WorkDir, ".attest", "learnings"))
+	learnStore := newLearningStore(eng.WorkDir)
 	if prevention := learnStore.LoadPreventionContext(nil); prevention != "" {
 		cfg.CodebaseContext += prevention
 	}
@@ -437,7 +469,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	if !dryRun {
 		extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
 		// Trigger learning maintenance after extraction.
-		learnStore := learning.NewStore(filepath.Join(eng.WorkDir, ".attest", "learnings"))
+		learnStore := newLearningStore(eng.WorkDir)
 		_, _ = learnStore.Maintain(90 * 24 * time.Hour)
 	}
 
@@ -712,7 +744,7 @@ func cmdVerify(ctx context.Context, args []string) error {
 	if result.Pass {
 		fmt.Println("\nVerification: PASS")
 		// Trigger learning maintenance after successful verification.
-		learnStore := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
+		learnStore := newLearningStore(wd)
 		if report, mErr := learnStore.Maintain(90 * 24 * time.Hour); mErr == nil && !report.Skipped {
 			if report.Merged > 0 || report.AutoExpired > 0 || report.GCRemoved > 0 {
 				fmt.Printf("Learning maintenance: %d merged, %d expired, %d removed\n",
