@@ -808,6 +808,222 @@ func TestSearchText(t *testing.T) {
 	}
 }
 
+// --- Prevention check tests ---
+
+func TestCompilePreventionChecks(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
+	store := &Store{Dir: dir, Now: fixedClock(now)}
+
+	// Qualifying learning: effectiveness 0.8 (4/5), AttachCount 5.
+	_ = store.Add(&Learning{
+		Tags: []string{"compiler"}, Category: CategoryAntiPattern,
+		Content:    "Concurrent access without flock causes data loss",
+		Summary:    "Use flock for concurrent writes",
+		Confidence: 0.9, AttachCount: 5, SuccessCount: 4,
+		SourcePaths: []string{"internal/ticket"},
+	})
+	// Non-qualifying: too few attachments.
+	_ = store.Add(&Learning{
+		Tags: []string{"engine"}, Category: CategoryPattern,
+		Content:    "Low attach learning",
+		Summary:    "Not enough data",
+		Confidence: 0.9, AttachCount: 1, SuccessCount: 1,
+	})
+	// Non-qualifying: low effectiveness (1/5 = 0.2).
+	_ = store.Add(&Learning{
+		Tags: []string{"state"}, Category: CategoryAntiPattern,
+		Content:    "Low effectiveness learning",
+		Summary:    "Mostly fails",
+		Confidence: 0.5, AttachCount: 5, SuccessCount: 1,
+	})
+
+	report, err := store.Maintain(365 * 24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.PreventionCompiled != 1 {
+		t.Errorf("PreventionCompiled = %d, want 1", report.PreventionCompiled)
+	}
+
+	// Verify the prevention file was written.
+	preventDir := filepath.Join(dir, "prevention", "review")
+	entries, err := os.ReadDir(preventDir)
+	if err != nil {
+		t.Fatalf("read prevention dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("prevention files = %d, want 1", len(entries))
+	}
+	data, _ := os.ReadFile(filepath.Join(preventDir, entries[0].Name()))
+	content := string(data)
+	if !strings.Contains(content, "Use flock") {
+		t.Error("prevention check missing summary")
+	}
+	if !strings.Contains(content, "internal/ticket") {
+		t.Error("prevention check missing applicable_paths")
+	}
+	if !strings.Contains(content, "80%") {
+		t.Error("prevention check missing effectiveness percentage")
+	}
+}
+
+func TestCompilePreventionChecksCleanupStale(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
+	store := &Store{Dir: dir, Now: fixedClock(now)}
+
+	// Create a qualifying learning.
+	l := &Learning{
+		Tags: []string{"test"}, Category: CategoryPattern,
+		Content: "Qualifying", Summary: "Qualifying",
+		Confidence: 0.9, AttachCount: 5, SuccessCount: 5,
+	}
+	_ = store.Add(l)
+
+	// First maintain: should compile.
+	_, _ = store.Maintain(365 * 24 * time.Hour)
+	preventDir := filepath.Join(dir, "prevention", "review")
+	entries, _ := os.ReadDir(preventDir)
+	if len(entries) != 1 {
+		t.Fatalf("after first maintain: %d prevention files, want 1", len(entries))
+	}
+
+	// Now expire the learning and re-maintain — prevention check should be removed.
+	l2, _ := store.Get(l.ID)
+	l2.Expired = true
+	// Rewrite directly to simulate state change.
+	_ = store.withLock(func() error {
+		learnings, _, _ := store.readAllWithCount()
+		for i := range learnings {
+			if learnings[i].ID == l.ID {
+				learnings[i].Expired = true
+			}
+		}
+		return store.writeAll(learnings)
+	})
+
+	_, _ = store.Maintain(365 * 24 * time.Hour)
+	entries, _ = os.ReadDir(preventDir)
+	if len(entries) != 0 {
+		t.Errorf("after expiry: %d prevention files, want 0 (stale check should be cleaned up)", len(entries))
+	}
+}
+
+func TestLoadPreventionContext(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	// No prevention dir — should return empty.
+	ctx := store.LoadPreventionContext(nil)
+	if ctx != "" {
+		t.Errorf("expected empty context with no prevention dir, got %d bytes", len(ctx))
+	}
+
+	// Create a prevention check manually.
+	preventDir := filepath.Join(dir, "prevention", "review")
+	if err := os.MkdirAll(preventDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	check := "---\nid: lrn-test\napplicable_paths:\n  - internal/engine\n---\n# Prevention: Test check\n"
+	if err := os.WriteFile(filepath.Join(preventDir, "lrn-test.md"), []byte(check), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load without path filter — should include all.
+	ctx = store.LoadPreventionContext(nil)
+	if !strings.Contains(ctx, "Prior Findings") {
+		t.Error("missing header in prevention context")
+	}
+	if !strings.Contains(ctx, "Test check") {
+		t.Error("missing check content in prevention context")
+	}
+
+	// Load with matching path.
+	ctx = store.LoadPreventionContext([]string{"internal/engine"})
+	if !strings.Contains(ctx, "Test check") {
+		t.Error("matching path should include check")
+	}
+
+	// Load with non-matching path.
+	ctx = store.LoadPreventionContext([]string{"internal/ticket"})
+	if strings.Contains(ctx, "Test check") {
+		t.Error("non-matching path should exclude check")
+	}
+}
+
+// --- Health tests ---
+
+func TestHealth(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "active1"})
+	_ = store.Add(&Learning{
+		Tags: []string{"b"}, Category: CategoryAntiPattern, Summary: "active2",
+		AttachCount: 10, SuccessCount: 8,
+	})
+	_ = store.Add(&Learning{Tags: []string{"c"}, Category: CategoryPattern, Summary: "expired", Expired: true})
+	_ = store.Add(&Learning{Tags: []string{"d"}, Category: CategoryTooling, Summary: "superseded", SupersededBy: "lrn-other"})
+
+	h, err := store.Health()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Total != 4 {
+		t.Errorf("Total = %d, want 4", h.Total)
+	}
+	if h.Active != 2 {
+		t.Errorf("Active = %d, want 2", h.Active)
+	}
+	if h.Expired != 1 {
+		t.Errorf("Expired = %d, want 1", h.Expired)
+	}
+	if h.Superseded != 1 {
+		t.Errorf("Superseded = %d, want 1", h.Superseded)
+	}
+	if h.ByCategory[CategoryPattern] != 1 {
+		t.Errorf("ByCategory[pattern] = %d, want 1 (only active counted)", h.ByCategory[CategoryPattern])
+	}
+	if h.ByCategory[CategoryAntiPattern] != 1 {
+		t.Errorf("ByCategory[anti_pattern] = %d, want 1", h.ByCategory[CategoryAntiPattern])
+	}
+	if h.WithOutcome != 1 {
+		t.Errorf("WithOutcome = %d, want 1", h.WithOutcome)
+	}
+	// AvgEff should be 0.8 (8/10 for the one learning with outcomes).
+	if h.AvgEff < 0.79 || h.AvgEff > 0.81 {
+		t.Errorf("AvgEff = %f, want ~0.8", h.AvgEff)
+	}
+}
+
+// --- RecordOutcome edge cases ---
+
+func TestRecordOutcomeEmptyIDs(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	// Should return nil without error.
+	if err := store.RecordOutcome(nil, true); err != nil {
+		t.Errorf("RecordOutcome(nil) = %v, want nil", err)
+	}
+	if err := store.RecordOutcome([]string{}, false); err != nil {
+		t.Errorf("RecordOutcome([]) = %v, want nil", err)
+	}
+}
+
+func TestRecordOutcomeMissingIDs(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	_ = store.Add(&Learning{Tags: []string{"a"}, Category: CategoryPattern, Summary: "exists"})
+
+	// RecordOutcome with non-existent IDs should not error — it just doesn't match.
+	if err := store.RecordOutcome([]string{"lrn-nonexistent"}, true); err != nil {
+		t.Errorf("RecordOutcome with missing ID = %v, want nil", err)
+	}
+}
+
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
