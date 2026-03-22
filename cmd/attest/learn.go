@@ -13,13 +13,14 @@ import (
 )
 
 const (
-	flagTag  = "--tag"
-	flagJSON = "--json"
+	flagTag   = "--tag"
+	flagJSON  = "--json"
+	flagLimit = "--limit"
 )
 
 func cmdLearn(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: attest learn <content|query|handoff|list|gc|maintain|repair> [args]")
+		return fmt.Errorf("usage: attest learn <content|query|search|handoff|list|gc|maintain|repair> [args]")
 	}
 
 	wd, err := workDir()
@@ -29,6 +30,8 @@ func cmdLearn(args []string) error {
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
 
 	switch args[0] {
+	case "search":
+		return cmdLearnSearch(store, args[1:])
 	case "query":
 		return cmdLearnQuery(store, args[1:])
 	case "handoff":
@@ -153,9 +156,57 @@ func cmdLearnAdd(store *learning.Store, args []string) error {
 	return nil
 }
 
-func cmdLearnQuery(store *learning.Store, args []string) error {
-	opts := learning.QueryOpts{SortBy: "utility"}
+func cmdLearnSearch(store *learning.Store, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: attest learn search <text> [--limit N] [--json]")
+	}
+	searchText := args[0]
+	opts := learning.QueryOpts{
+		SearchText: searchText,
+		SortBy:     "effectiveness",
+	}
+	jsonOutput := false
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case flagLimit:
+			if i+1 < len(args) {
+				_, _ = fmt.Sscanf(args[i+1], "%d", &opts.Limit)
+				i++
+			}
+		case flagJSON:
+			jsonOutput = true
+		}
+	}
 
+	results, err := store.Query(opts)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(results)
+	}
+
+	if len(results) == 0 {
+		fmt.Printf("No learnings matching %q.\n", searchText)
+		return nil
+	}
+
+	fmt.Printf("Search %q (%d results):\n", searchText, len(results))
+	for i := range results {
+		l := &results[i]
+		fmt.Printf("  [%s] (%s, eff=%.2f) %s\n", l.ID, l.Category, l.Effectiveness(), l.Summary)
+		if len(l.Tags) > 0 {
+			fmt.Printf("         tags: %s\n", strings.Join(l.Tags, ", "))
+		}
+	}
+	return nil
+}
+
+func parseQueryArgs(args []string) learning.QueryOpts {
+	opts := learning.QueryOpts{SortBy: "effectiveness"}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case flagTag:
@@ -173,12 +224,17 @@ func cmdLearnQuery(store *learning.Store, args []string) error {
 				opts.Paths = append(opts.Paths, args[i+1])
 				i++
 			}
+		case "--search":
+			if i+1 < len(args) {
+				opts.SearchText = args[i+1]
+				i++
+			}
 		case "--min-effectiveness":
 			if i+1 < len(args) {
 				_, _ = fmt.Sscanf(args[i+1], "%f", &opts.MinEffectiveness)
 				i++
 			}
-		case "--limit":
+		case flagLimit:
 			if i+1 < len(args) {
 				_, _ = fmt.Sscanf(args[i+1], "%d", &opts.Limit)
 				i++
@@ -188,11 +244,13 @@ func cmdLearnQuery(store *learning.Store, args []string) error {
 				opts.SortBy = args[i+1]
 				i++
 			}
-		case flagJSON:
-			// Handled after query.
 		}
 	}
+	return opts
+}
 
+func cmdLearnQuery(store *learning.Store, args []string) error {
+	opts := parseQueryArgs(args)
 	results, err := store.Query(opts)
 	if err != nil {
 		return err

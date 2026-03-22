@@ -64,6 +64,7 @@ type QueryOpts struct {
 	Tags             []string // match any tag (union with Paths)
 	Category         Category // exact category match (empty = any)
 	Paths            []string // match learnings with overlapping SourcePaths (union with Tags)
+	SearchText       string   // full-text search across Content + Summary (case-insensitive)
 	MinEffectiveness float64  // effectiveness threshold (default 0.0)
 	Limit            int      // max results (0 = unlimited)
 	SortBy           string   // "effectiveness" (default), "created_at"

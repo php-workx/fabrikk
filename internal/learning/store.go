@@ -597,6 +597,9 @@ func (s *Store) matchesFilter(l *Learning, opts *QueryOpts) bool {
 	if opts.Category != "" && l.Category != opts.Category {
 		return false
 	}
+	if opts.SearchText != "" && !matchesSearchText(l, opts.SearchText) {
+		return false
+	}
 	hasTags := len(opts.Tags) > 0
 	hasPaths := len(opts.Paths) > 0
 	if hasTags || hasPaths {
@@ -607,6 +610,23 @@ func (s *Store) matchesFilter(l *Learning, opts *QueryOpts) bool {
 		}
 	}
 	return true
+}
+
+// matchesSearchText returns true if the search text appears in Content, Summary, or Tags.
+func matchesSearchText(l *Learning, text string) bool {
+	lower := strings.ToLower(text)
+	if strings.Contains(strings.ToLower(l.Content), lower) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(l.Summary), lower) {
+		return true
+	}
+	for _, tag := range l.Tags {
+		if strings.Contains(strings.ToLower(tag), lower) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesAnyTag(learningTags, queryTags []string) bool {

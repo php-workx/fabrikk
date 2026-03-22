@@ -754,6 +754,60 @@ func TestRecordOutcomeBatch(t *testing.T) {
 	}
 }
 
+func TestSearchText(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	_ = store.Add(&Learning{Tags: []string{"compiler"}, Category: CategoryPattern, Content: "Use flock for concurrent file access", Summary: "flock concurrency"})
+	_ = store.Add(&Learning{Tags: []string{"ticket"}, Category: CategoryCodebase, Content: "YAML frontmatter format for tickets", Summary: "ticket format"})
+	_ = store.Add(&Learning{Tags: []string{"engine"}, Category: CategoryTooling, Content: "Run gofumpt before committing", Summary: "formatting"})
+
+	// Search by content keyword.
+	results, err := store.Query(QueryOpts{SearchText: "flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Summary != "flock concurrency" {
+		t.Fatalf("search 'flock': got %v, want [flock concurrency]", results)
+	}
+
+	// Search by summary keyword.
+	results, err = store.Query(QueryOpts{SearchText: "formatting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Summary != "formatting" {
+		t.Fatalf("search 'formatting': got %v, want [formatting]", results)
+	}
+
+	// Case-insensitive.
+	results, err = store.Query(QueryOpts{SearchText: "YAML"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("search 'YAML': got %d, want 1", len(results))
+	}
+
+	// No match.
+	results, err = store.Query(QueryOpts{SearchText: "nonexistent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("search 'nonexistent': got %d, want 0", len(results))
+	}
+
+	// Search combined with tag filter.
+	results, err = store.Query(QueryOpts{Tags: []string{"compiler"}, SearchText: "concurrent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("search 'concurrent' + tag 'compiler': got %d, want 1", len(results))
+	}
+}
+
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }

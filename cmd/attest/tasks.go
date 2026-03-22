@@ -65,7 +65,7 @@ func parseTaskFilter(args []string) (runID string, f taskFilter) {
 				f.wave = args[i+1]
 				i++
 			}
-		case "--limit":
+		case flagLimit:
 			if i+1 < len(args) {
 				_, _ = fmt.Sscanf(args[i+1], "%d", &f.limit)
 				i++
