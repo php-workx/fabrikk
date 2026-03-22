@@ -102,8 +102,8 @@ type Learning struct {
 **Removed fields (from prior design):** `Utility`, `CitedCount`, `LastCitedAt`, `Maturity`. See §11 for rationale.
 
 **Effectiveness score** (computed, not stored):
-```
-effectiveness = SuccessCount / AttachCount  (default 0.5 when AttachCount == 0)
+```go
+effectiveness = SuccessCount / AttachCount  (falls back to Confidence when AttachCount == 0)
 ```
 
 This is the primary quality signal: a learning attached to tasks that pass verification is more valuable than one attached to tasks that fail.
@@ -145,7 +145,7 @@ type QueryOpts struct {
     Category         Category // exact category match
     Paths            []string // match learnings with overlapping SourcePaths (union with Tags)
     SearchText       string   // full-text search across Content, Summary, Tags (union with Tags/Paths)
-    MinEffectiveness float64  // effectiveness threshold (default 0.0)
+    MinEffectiveness float64  // effectiveness threshold (0.0 = no filter; pipeline uses 0.3)
     Limit            int      // max results (0 = unlimited)
     SortBy           string   // "effectiveness" (default), "created_at"
 }

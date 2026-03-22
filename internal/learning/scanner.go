@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -29,9 +30,9 @@ var defaultPatterns = []*regexp.Regexp{
 	// URLs with embedded credentials.
 	regexp.MustCompile(`https?://[^:]+:[^@]+@`),
 	// Local filesystem paths.
-	regexp.MustCompile(`/Users/\S+|/home/\S+|C:\\\\Users\\\\\S+`),
-	// Private IP addresses.
-	regexp.MustCompile(`\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d+\.\d+\b`),
+	regexp.MustCompile(`/Users/\S+|/home/\S+|C:\\Users\\\S+`),
+	// Private IP addresses (10/8, 172.16-31/12, 192.168/16).
+	regexp.MustCompile(`\b(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)\b`),
 }
 
 // NewContentScanner creates a scanner with built-in patterns.
@@ -50,7 +51,10 @@ func NewContentScanner(customTermsPath string) *ContentScanner {
 func (cs *ContentScanner) loadCustomTerms(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return // missing file is silently ignored
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: failed to read custom scan terms %s: %v\n", path, err)
+		}
+		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		term := strings.TrimSpace(line)

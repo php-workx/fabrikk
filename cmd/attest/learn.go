@@ -96,20 +96,25 @@ func parseLearnAddArgs(args []string) learnAddOpts {
 	return opts
 }
 
-// toRepoRelativePaths converts absolute paths to repo-relative form.
-func toRepoRelativePaths(paths []string) []string {
+// toRepoRelativePaths converts paths to repo-relative form.
+// Returns error if any path resolves outside the repository.
+func toRepoRelativePaths(paths []string) ([]string, error) {
 	wd, wdErr := workDir()
 	if wdErr != nil {
-		return paths
+		return paths, nil //nolint:nilerr // can't resolve without working dir, pass through
 	}
 	for i, p := range paths {
-		if filepath.IsAbs(p) {
-			if rel, err := filepath.Rel(wd, p); err == nil && !strings.HasPrefix(rel, "..") {
-				paths[i] = rel
-			}
+		if !filepath.IsAbs(p) {
+			paths[i] = filepath.ToSlash(filepath.Clean(p))
+			continue
 		}
+		rel, err := filepath.Rel(wd, p)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("--path %q is outside the repository", p)
+		}
+		paths[i] = filepath.ToSlash(rel)
 	}
-	return paths
+	return paths, nil
 }
 
 func cmdLearnAdd(store *learning.Store, args []string) error {
@@ -126,7 +131,11 @@ func cmdLearnAdd(store *learning.Store, args []string) error {
 		}
 	}
 
-	opts.paths = toRepoRelativePaths(opts.paths)
+	var pathErr error
+	opts.paths, pathErr = toRepoRelativePaths(opts.paths)
+	if pathErr != nil {
+		return pathErr
+	}
 
 	// Use first line as summary if content is multi-line.
 	summary := opts.content
@@ -451,11 +460,20 @@ func printContextBundle(bundle *learning.ContextBundle) {
 }
 
 func cmdContext(args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: attest context <run-id> <task-id>")
+	jsonOutput := false
+	var positional []string
+	for _, a := range args {
+		if a == flagJSON {
+			jsonOutput = true
+			continue
+		}
+		positional = append(positional, a)
 	}
-	runID := args[0]
-	taskID := args[1]
+	if len(positional) < 2 {
+		return fmt.Errorf("usage: attest context <run-id> <task-id> [--json]")
+	}
+	runID := positional[0]
+	taskID := positional[1]
 
 	wd, err := workDir()
 	if err != nil {
@@ -484,14 +502,6 @@ func cmdContext(args []string) error {
 	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths, task.Title)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)
-	}
-
-	// Output.
-	jsonOutput := false
-	for _, a := range args {
-		if a == flagJSON {
-			jsonOutput = true
-		}
 	}
 
 	if jsonOutput {
