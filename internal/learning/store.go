@@ -372,37 +372,25 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string, searchText 
 		}
 	}
 
-	// Load prevention checks matching the query paths.
-	var preventionChecks []string
+	// Load prevention checks matching the query paths, counting against token budget.
 	queryPaths := paths
 	if len(queryPaths) == 0 {
-		queryPaths = tags // fall back to tags for path matching
+		queryPaths = tags
 	}
-	for _, subdir := range []string{"review", "planning"} {
-		preventDir := filepath.Join(s.SharedDir, "prevention", subdir)
-		entries, dirErr := os.ReadDir(preventDir)
-		if dirErr != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			data, readErr := os.ReadFile(filepath.Join(preventDir, e.Name()))
-			if readErr != nil {
-				continue
-			}
-			content := string(data)
-			if len(queryPaths) == 0 || preventionMatchesPaths(content, queryPaths) {
-				preventionChecks = append(preventionChecks, content)
-			}
-		}
-	}
+	preventionChecks, tokensUsed := s.loadPreventionForContext(queryPaths, tokensUsed, tokenBudget)
 
 	handoff, _ := s.LatestHandoff()
-	// Only include handoff if < 24h old.
+	// Only include handoff if < 24h old and fits in budget.
 	if handoff != nil && s.now().Sub(handoff.CreatedAt) >= 24*time.Hour {
 		handoff = nil
+	}
+	if handoff != nil {
+		handoffTokens := len(handoff.Summary) / 4
+		if tokensUsed+handoffTokens > tokenBudget {
+			handoff = nil
+		} else {
+			tokensUsed += handoffTokens
+		}
 	}
 
 	return &ContextBundle{
@@ -711,6 +699,38 @@ func (s *Store) LoadPreventionContext(queryPaths []string) string {
 		b.WriteString("\n---\n\n")
 	}
 	return b.String()
+}
+
+// loadPreventionForContext loads prevention checks matching paths, respecting token budget.
+func (s *Store) loadPreventionForContext(queryPaths []string, tokensUsed, tokenBudget int) (checks []string, totalTokens int) {
+	totalTokens = tokensUsed
+	for _, subdir := range []string{"review", "planning"} {
+		preventDir := filepath.Join(s.SharedDir, "prevention", subdir)
+		entries, dirErr := os.ReadDir(preventDir)
+		if dirErr != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			data, readErr := os.ReadFile(filepath.Join(preventDir, e.Name()))
+			if readErr != nil {
+				continue
+			}
+			content := string(data)
+			if len(queryPaths) > 0 && !preventionMatchesPaths(content, queryPaths) {
+				continue
+			}
+			contentTokens := len(content) / 4
+			if totalTokens+contentTokens > tokenBudget {
+				return checks, totalTokens
+			}
+			checks = append(checks, content)
+			totalTokens += contentTokens
+		}
+	}
+	return checks, totalTokens
 }
 
 // preventionMatchesPaths checks if a prevention check file's applicable_paths

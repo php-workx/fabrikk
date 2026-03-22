@@ -10,6 +10,8 @@ import (
 
 // rebuildIndex builds the tag inverted index from learnings and writes tags.json.
 // Tags from each learning and keywords extracted from content are both indexed.
+// When a scanner is set, keywords are extracted from redacted content to prevent
+// sensitive terms from leaking into the committed tag index.
 func (s *Store) rebuildIndex(learnings []Learning) error {
 	idx := TagIndex{Tags: make(map[string][]string)}
 	for i := range learnings {
@@ -20,7 +22,13 @@ func (s *Store) rebuildIndex(learnings []Learning) error {
 			idx.Tags[tag] = append(idx.Tags[tag], learnings[i].ID)
 		}
 		// Extract keywords from content (top 10 significant words).
-		for _, kw := range extractKeywords(learnings[i].Content, 10) {
+		// Use redacted content when scanner is set to prevent sensitive terms
+		// from leaking into the committed tags.json.
+		content := learnings[i].Content
+		if s.Scanner != nil {
+			content, _ = s.Scanner.Scan(content)
+		}
+		for _, kw := range extractKeywords(content, 10) {
 			idx.Tags[kw] = append(idx.Tags[kw], learnings[i].ID)
 		}
 	}
