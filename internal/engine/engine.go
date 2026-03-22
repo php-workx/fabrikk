@@ -269,6 +269,19 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		Detail:    fmt.Sprintf("pass=%v findings=%d", result.Pass, len(result.BlockingFindings)),
 	})
 
+	// Record verification outcome for learning effectiveness tracking.
+	if e.LearningEnricher != nil && len(task.LearningIDs) > 0 {
+		if outErr := e.LearningEnricher.RecordOutcome(task.LearningIDs, result.Pass); outErr != nil {
+			_ = e.RunDir.AppendEvent(state.Event{
+				Timestamp: time.Now(),
+				Type:      "learning_outcome_failed",
+				RunID:     artifact.RunID,
+				TaskID:    task.TaskID,
+				Detail:    outErr.Error(),
+			})
+		}
+	}
+
 	nextState := state.RunRunning
 	var blockers []string
 	if !result.Pass {
@@ -605,10 +618,10 @@ func deriveTags(task *state.Task) []string {
 // Constraints from codebase/tooling summaries. LearningContext for body rendering.
 func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 	refs, err := e.LearningEnricher.QueryLearnings(state.LearningQueryOpts{
-		Tags:       deriveTags(task),
-		Paths:      task.Scope.OwnedPaths,
-		MinUtility: 0.3,
-		Limit:      5,
+		Tags:             deriveTags(task),
+		Paths:            task.Scope.OwnedPaths,
+		MinEffectiveness: 0.3,
+		Limit:            5,
 	})
 	if err != nil {
 		_ = e.RunDir.AppendEvent(state.Event{
@@ -635,16 +648,6 @@ func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
 			task.Constraints = append(task.Constraints, refs[i].Summary)
 		}
 	}
-	// Batch-record citations for utility tracking (best-effort — single store write).
-	if citErr := e.LearningEnricher.RecordCitations(task.LearningIDs); citErr != nil {
-		_ = e.RunDir.AppendEvent(state.Event{
-			Timestamp: time.Now(),
-			Type:      "learning_citation_failed",
-			RunID:     e.runID(),
-			Detail:    fmt.Sprintf("batch citation: %v", citErr),
-		})
-	}
-
 	_ = e.RunDir.AppendEvent(state.Event{
 		Timestamp: time.Now(),
 		Type:      "learning_enrichment",

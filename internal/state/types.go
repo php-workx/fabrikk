@@ -49,18 +49,17 @@ const (
 
 // LearningQueryOpts is the subset of query options the engine needs.
 type LearningQueryOpts struct {
-	Tags       []string
-	Paths      []string
-	MinUtility float64
-	Limit      int
+	Tags             []string
+	Paths            []string
+	MinEffectiveness float64
+	Limit            int
 }
 
 // LearningEnricher enriches tasks with learnings from a learning store.
 // The engine type-asserts to this interface. Implemented by learning.Store.
 type LearningEnricher interface {
 	QueryLearnings(opts LearningQueryOpts) ([]LearningRef, error)
-	RecordCitation(id string) error
-	RecordCitations(ids []string) error
+	RecordOutcome(ids []string, passed bool) error
 }
 
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).
@@ -173,11 +172,9 @@ type Task struct {
 
 // LearningRef is a lightweight reference to a learning for ticket body rendering.
 type LearningRef struct {
-	ID       string  `json:"id"`
-	Category string  `json:"category"`
-	Utility  float64 `json:"utility"`
-	Summary  string  `json:"summary"`
-	Maturity string  `json:"maturity,omitempty"`
+	ID       string `json:"id"`
+	Category string `json:"category"`
+	Summary  string `json:"summary"`
 }
 
 // TaskScope defines the file-level boundaries for a task (spec section 3.4).

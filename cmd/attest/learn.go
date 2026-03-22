@@ -27,7 +27,6 @@ func cmdLearn(args []string) error {
 		return err
 	}
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
-	defer store.Wait()
 
 	switch args[0] {
 	case "query":
@@ -174,9 +173,9 @@ func cmdLearnQuery(store *learning.Store, args []string) error {
 				opts.Paths = append(opts.Paths, args[i+1])
 				i++
 			}
-		case "--min-utility":
+		case "--min-effectiveness":
 			if i+1 < len(args) {
-				_, _ = fmt.Sscanf(args[i+1], "%f", &opts.MinUtility)
+				_, _ = fmt.Sscanf(args[i+1], "%f", &opts.MinEffectiveness)
 				i++
 			}
 		case "--limit":
@@ -221,8 +220,8 @@ func cmdLearnQuery(store *learning.Store, args []string) error {
 	fmt.Printf("Learnings (%d):\n", len(results))
 	for i := range results {
 		l := &results[i]
-		fmt.Printf("  [%s] (%s, utility=%.2f, cited=%d) %s\n",
-			l.ID, l.Category, l.Utility, l.CitedCount, l.Summary)
+		fmt.Printf("  [%s] (%s, eff=%.2f, attach=%d/%d) %s\n",
+			l.ID, l.Category, l.Effectiveness(), l.AttachCount, l.SuccessCount, l.Summary)
 		if len(l.Tags) > 0 {
 			fmt.Printf("         tags: %s\n", strings.Join(l.Tags, ", "))
 		}
@@ -295,8 +294,8 @@ func cmdLearnList(store *learning.Store) error {
 	fmt.Printf("All learnings (%d):\n", len(results))
 	for i := range results {
 		l := &results[i]
-		fmt.Printf("  %s  [%s] utility=%.2f  %s\n",
-			l.CreatedAt.Format("2006-01-02"), l.ID, l.Utility, l.Summary)
+		fmt.Printf("  %s  [%s] eff=%.2f  %s\n",
+			l.CreatedAt.Format("2006-01-02"), l.ID, l.Effectiveness(), l.Summary)
 	}
 
 	// Show latest handoff if exists.
@@ -330,9 +329,8 @@ func cmdLearnMaintain(store *learning.Store) error {
 		return nil
 	}
 	fmt.Println("Learning store maintenance:")
-	fmt.Printf("  Promoted:     %d\n", report.Promoted)
-	fmt.Printf("  Demoted:      %d\n", report.Demoted)
-	fmt.Printf("  Stale:        %d learnings penalized\n", report.Stale)
+	fmt.Printf("  Merged:       %d\n", report.Merged)
+	fmt.Printf("  Auto-expired: %d\n", report.AutoExpired)
 	fmt.Printf("  GC:           %d removed\n", report.GCRemoved)
 	if report.IndexRebuilt {
 		fmt.Printf("  Index:        rebuilt\n")
@@ -355,7 +353,7 @@ func printContextBundle(bundle *learning.ContextBundle) {
 		fmt.Printf("Learnings (%d):\n", len(bundle.Learnings))
 		for i := range bundle.Learnings {
 			l := &bundle.Learnings[i]
-			fmt.Printf("  [%s] (%s, utility=%.2f): %s\n", l.ID, l.Category, l.Utility, l.Summary)
+			fmt.Printf("  [%s] (%s, eff=%.2f): %s\n", l.ID, l.Category, l.Effectiveness(), l.Summary)
 			if l.Source != "" && l.Source != "manual" {
 				fmt.Printf("         source: %s", l.Source)
 				if l.SourceFinding != "" {
@@ -411,7 +409,6 @@ func cmdContext(args []string) error {
 
 	// Assemble context bundle for this task.
 	learnStore := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
-	defer learnStore.Wait()
 	bundle, err := learnStore.AssembleContext(task.TaskID, task.Tags, task.Scope.OwnedPaths)
 	if err != nil {
 		return fmt.Errorf("assemble context: %w", err)

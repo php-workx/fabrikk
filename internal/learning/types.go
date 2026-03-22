@@ -1,6 +1,6 @@
 // Package learning provides a project-scoped learning store for cross-session
 // knowledge persistence. Learnings are tagged entries stored in JSONL format
-// with utility scoring and lazy decay.
+// with outcome-based effectiveness scoring.
 package learning
 
 import "time"
@@ -17,36 +17,34 @@ const (
 	CategoryProcess     Category = "process"      // Workflow/dispatch insight
 )
 
-// Maturity tracks how well-established a learning is.
-type Maturity string
-
-// Maturity levels for learning lifecycle.
-const (
-	MaturityProvisional Maturity = "provisional"
-	MaturityCandidate   Maturity = "candidate"
-	MaturityEstablished Maturity = "established"
-)
-
 // Learning is a single entry in the learning store.
 type Learning struct {
-	ID            string     `json:"id"`
-	CreatedAt     time.Time  `json:"created_at"`
-	Tags          []string   `json:"tags"`
-	Category      Category   `json:"category"`
-	Content       string     `json:"content"`
-	Summary       string     `json:"summary"`
-	SourceTask    string     `json:"source_task,omitempty"`
-	SourceRun     string     `json:"source_run,omitempty"`
-	SourcePaths   []string   `json:"source_paths,omitempty"`
-	Confidence    float64    `json:"confidence"`
-	Utility       float64    `json:"utility"`
-	CitedCount    int        `json:"cited_count"`
-	LastCitedAt   *time.Time `json:"last_cited_at,omitempty"`
-	SupersededBy  string     `json:"superseded_by,omitempty"`
-	Expired       bool       `json:"expired"`
-	Source        string     `json:"source,omitempty"`         // "manual", "council", "verifier", "rejection"
-	SourceFinding string     `json:"source_finding,omitempty"` // finding ID if extracted
-	Maturity      Maturity   `json:"maturity,omitempty"`       // provisional (default), candidate, established
+	ID             string     `json:"id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Tags           []string   `json:"tags"`
+	Category       Category   `json:"category"`
+	Content        string     `json:"content"`
+	Summary        string     `json:"summary"`
+	SourceTask     string     `json:"source_task,omitempty"`
+	SourceRun      string     `json:"source_run,omitempty"`
+	SourcePaths    []string   `json:"source_paths,omitempty"`
+	Confidence     float64    `json:"confidence"`
+	SupersededBy   string     `json:"superseded_by,omitempty"`
+	Expired        bool       `json:"expired"`
+	Source         string     `json:"source,omitempty"`         // "manual", "council", "verifier", "rejection"
+	SourceFinding  string     `json:"source_finding,omitempty"` // finding ID if extracted
+	AttachCount    int        `json:"attach_count"`             // times attached to a task
+	SuccessCount   int        `json:"success_count"`            // times the attached task passed verification
+	LastAttachedAt *time.Time `json:"last_attached_at,omitempty"`
+}
+
+// Effectiveness returns the outcome-based quality score.
+// When no outcome data exists (AttachCount == 0), falls back to Confidence.
+func (l *Learning) Effectiveness() float64 {
+	if l.AttachCount == 0 {
+		return l.Confidence
+	}
+	return float64(l.SuccessCount) / float64(l.AttachCount)
 }
 
 // SessionHandoff captures session continuity state.
@@ -63,12 +61,12 @@ type SessionHandoff struct {
 
 // QueryOpts controls learning retrieval filtering.
 type QueryOpts struct {
-	Tags       []string // match any tag
-	Category   Category // exact category match (empty = any)
-	Paths      []string // match learnings with overlapping SourcePaths
-	MinUtility float64  // utility threshold (default 0.0)
-	Limit      int      // max results (0 = unlimited)
-	SortBy     string   // "utility" (default), "created_at"
+	Tags             []string // match any tag (union with Paths)
+	Category         Category // exact category match (empty = any)
+	Paths            []string // match learnings with overlapping SourcePaths (union with Tags)
+	MinEffectiveness float64  // effectiveness threshold (default 0.0)
+	Limit            int      // max results (0 = unlimited)
+	SortBy           string   // "effectiveness" (default), "created_at"
 }
 
 // TagIndex is the inverted tag index for fast lookups.

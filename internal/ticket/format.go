@@ -257,11 +257,7 @@ func MarshalTicket(task *state.Task) ([]byte, error) {
 	if len(task.LearningContext) > 0 {
 		buf.WriteString("\n## Context from Learnings\n\n")
 		for _, lr := range task.LearningContext {
-			if lr.Maturity != "" {
-				fmt.Fprintf(&buf, "- **%s** (%s/%s, utility=%.2f): %s\n", lr.ID, lr.Category, lr.Maturity, lr.Utility, lr.Summary)
-			} else {
-				fmt.Fprintf(&buf, "- **%s** (%s, utility=%.2f): %s\n", lr.ID, lr.Category, lr.Utility, lr.Summary)
-			}
+			fmt.Fprintf(&buf, "- **%s** (%s): %s\n", lr.ID, lr.Category, lr.Summary)
 		}
 	}
 

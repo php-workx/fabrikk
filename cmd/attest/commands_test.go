@@ -1118,13 +1118,12 @@ func TestCmdContext(t *testing.T) {
 
 	// Create a learning store and add a learning with matching tags and paths.
 	learnStore := learning.NewStore(filepath.Join(baseDir, ".attest", "learnings"))
-	defer learnStore.Wait()
 	_ = learnStore.Add(&learning.Learning{
 		Tags:        []string{"testctx"},
 		Category:    learning.CategoryPattern,
 		Content:     "Context assembly test content",
 		Summary:     "Context test learning summary",
-		Utility:     0.8,
+		Confidence:  0.8,
 		SourcePaths: []string{"internal/test"},
 	})
 
@@ -1148,7 +1147,7 @@ func TestCmdLearnMaintain(t *testing.T) {
 		}
 	})
 	assertContains(t, output, "Learning store maintenance:")
-	assertContains(t, output, "Promoted:")
+	assertContains(t, output, "Auto-expired:")
 }
 
 func TestCmdLearnGC(t *testing.T) {

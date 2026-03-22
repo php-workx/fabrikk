@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,24 +18,19 @@ import (
 	"github.com/runger/attest/internal/state"
 )
 
-// DefaultLeaseDuration is unused here but exported for consistency.
-const (
-	decayThreshold = 30 * 24 * time.Hour // 30 days
-	decayAmount    = 0.05
-)
+// autoExpiryThreshold is the duration after which a learning with no query match is expired.
+const autoExpiryThreshold = 90 * 24 * time.Hour
 
 // ErrCorruptLearningStore indicates the JSONL store has corrupt lines.
 var ErrCorruptLearningStore = errors.New("corrupt learning store")
 
 // Store manages the learning JSONL file and tag index.
 type Store struct {
-	Dir              string               // .attest/learnings/
-	Now              func() time.Time     // clock injection for tests; defaults to time.Now
-	OnMaintain       func(MaintainReport) // optional callback for logging
-	mu               sync.Mutex
-	lastMaintainedAt time.Time
-	maintaining      atomic.Bool
-	bgWg             sync.WaitGroup // tracks background maintenance goroutines
+	Dir        string               // .attest/learnings/
+	Now        func() time.Time     // clock injection for tests; defaults to time.Now
+	OnMaintain func(MaintainReport) // optional callback for logging
+
+	maintaining atomic.Bool
 }
 
 // NewStore creates a learning store for the given directory.
@@ -60,9 +54,6 @@ func (s *Store) Add(l *Learning) error {
 	if isNew && l.Confidence == 0 {
 		l.Confidence = 0.5
 	}
-	if isNew && l.Utility == 0 {
-		l.Utility = 0.5
-	}
 	// Validate category.
 	switch l.Category {
 	case CategoryPattern, CategoryAntiPattern, CategoryTooling, CategoryCodebase, CategoryProcess:
@@ -81,16 +72,6 @@ func (s *Store) Add(l *Learning) error {
 
 	if l.Source == "" {
 		l.Source = "manual"
-	}
-	if l.Maturity == "" {
-		l.Maturity = MaturityProvisional
-	} else {
-		switch l.Maturity {
-		case MaturityProvisional, MaturityCandidate, MaturityEstablished:
-			// valid
-		default:
-			return fmt.Errorf("unknown maturity %q (valid: provisional, candidate, established)", l.Maturity)
-		}
 	}
 
 	// Normalize tags.
@@ -120,14 +101,9 @@ func (s *Store) Add(l *Learning) error {
 	})
 }
 
-// RecordCitation increments CitedCount and sets LastCitedAt. Acquires lock.
-func (s *Store) RecordCitation(id string) error {
-	return s.RecordCitations([]string{id})
-}
-
-// RecordCitations increments CitedCount and sets LastCitedAt for multiple learnings
-// in a single store write. Acquires lock once.
-func (s *Store) RecordCitations(ids []string) error {
+// RecordOutcome records verification outcomes for learnings attached to a task.
+// Increments AttachCount for all IDs, and SuccessCount when passed is true.
+func (s *Store) RecordOutcome(ids []string, passed bool) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -145,64 +121,31 @@ func (s *Store) RecordCitations(ids []string) error {
 			idSet[id] = true
 		}
 		now := s.now()
-		found := 0
 		for i := range learnings {
 			if idSet[learnings[i].ID] {
-				learnings[i].CitedCount++
-				learnings[i].LastCitedAt = &now
-				found++
-				if found == len(idSet) {
-					break
+				learnings[i].AttachCount++
+				if passed {
+					learnings[i].SuccessCount++
 				}
+				learnings[i].LastAttachedAt = &now
 			}
-		}
-		if found == 0 {
-			return fmt.Errorf("no learnings found for citation IDs")
 		}
 		return s.writeAll(learnings)
 	})
 }
 
-func maturityWeight(m Maturity) float64 {
-	switch m {
-	case MaturityEstablished:
-		return 1.5
-	case MaturityCandidate:
-		return 1.2
-	case MaturityProvisional, "":
-		return 1.0
-	default:
-		return 1.0
-	}
-}
-
 // Query returns learnings matching the filter options.
-// Applies lazy utility decay at query time.
 func (s *Store) Query(opts QueryOpts) ([]Learning, error) {
-	s.MaintainIfStale()
 	learnings, err := s.readAll()
 	if err != nil {
 		return nil, err
 	}
 
-	now := s.now()
 	var results []Learning
 	for i := range learnings {
 		l := &learnings[i]
 		if l.Expired || l.SupersededBy != "" {
 			continue
-		}
-
-		// Apply lazy decay.
-		refTime := l.CreatedAt
-		if l.LastCitedAt != nil {
-			refTime = *l.LastCitedAt
-		}
-		if now.Sub(refTime) > decayThreshold {
-			l.Utility -= decayAmount
-			if l.Utility < 0 {
-				l.Utility = 0
-			}
 		}
 
 		if !s.matchesFilter(l, &opts) {
@@ -217,16 +160,12 @@ func (s *Store) Query(opts QueryOpts) ([]Learning, error) {
 		sort.Slice(results, func(i, j int) bool {
 			return results[i].CreatedAt.After(results[j].CreatedAt)
 		})
-	default: // "utility" — weighted by maturity
+	default: // "effectiveness"
 		sort.Slice(results, func(i, j int) bool {
-			scoreI := results[i].Utility * maturityWeight(results[i].Maturity)
-			scoreJ := results[j].Utility * maturityWeight(results[j].Maturity)
-			if scoreI != scoreJ {
-				return scoreI > scoreJ
-			}
-			// Tie-break: higher raw utility first, then newer, then ID
-			if results[i].Utility != results[j].Utility {
-				return results[i].Utility > results[j].Utility
+			effI := results[i].Effectiveness()
+			effJ := results[j].Effectiveness()
+			if effI != effJ {
+				return effI > effJ
 			}
 			if !results[i].CreatedAt.Equal(results[j].CreatedAt) {
 				return results[i].CreatedAt.After(results[j].CreatedAt)
@@ -242,14 +181,14 @@ func (s *Store) Query(opts QueryOpts) ([]Learning, error) {
 }
 
 // QueryLearnings satisfies state.LearningEnricher. Returns top learnings
-// matching the given tags or paths, sorted by utility.
+// matching the given tags or paths, sorted by effectiveness.
 func (s *Store) QueryLearnings(opts state.LearningQueryOpts) ([]state.LearningRef, error) {
 	results, err := s.Query(QueryOpts{
-		Tags:       opts.Tags,
-		Paths:      opts.Paths,
-		MinUtility: opts.MinUtility,
-		Limit:      opts.Limit,
-		SortBy:     "utility",
+		Tags:             opts.Tags,
+		Paths:            opts.Paths,
+		MinEffectiveness: opts.MinEffectiveness,
+		Limit:            opts.Limit,
+		SortBy:           "effectiveness",
 	})
 	if err != nil {
 		return nil, err
@@ -259,9 +198,7 @@ func (s *Store) QueryLearnings(opts state.LearningQueryOpts) ([]state.LearningRe
 		refs[i] = state.LearningRef{
 			ID:       results[i].ID,
 			Category: string(results[i].Category),
-			Utility:  results[i].Utility,
 			Summary:  results[i].Summary,
-			Maturity: string(results[i].Maturity),
 		}
 	}
 	return refs, nil
@@ -351,10 +288,10 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBu
 	const maxLearnings = 8
 
 	results, err := s.Query(QueryOpts{
-		Tags:       tags,
-		Paths:      paths,
-		MinUtility: 0.3,
-		SortBy:     "utility",
+		Tags:             tags,
+		Paths:            paths,
+		MinEffectiveness: 0.3,
+		SortBy:           "effectiveness",
 	})
 	if err != nil {
 		return nil, err
@@ -373,15 +310,6 @@ func (s *Store) AssembleContext(taskID string, tags, paths []string) (*ContextBu
 		if len(selected) >= maxLearnings {
 			break
 		}
-	}
-
-	// Record citations for all selected learnings (best-effort, single write).
-	if len(selected) > 0 {
-		ids := make([]string, len(selected))
-		for i := range selected {
-			ids[i] = selected[i].ID
-		}
-		_ = s.RecordCitations(ids)
 	}
 
 	handoff, _ := s.LatestHandoff()
@@ -410,9 +338,7 @@ type Contradiction struct {
 type MaintainReport struct {
 	Merged         int
 	Contradictions []Contradiction
-	Promoted       int
-	Demoted        int
-	Stale          int
+	AutoExpired    int
 	GCRemoved      int
 	IndexRebuilt   bool
 	Skipped        bool
@@ -458,8 +384,8 @@ func (s *Store) GarbageCollect(maxAge time.Duration) (int, error) {
 	return report.GCRemoved, nil
 }
 
-// Maintain runs knowledge store maintenance: maturity transitions,
-// staleness scan, index rebuild, and garbage collection.
+// Maintain runs knowledge store maintenance: dedup, contradiction scan,
+// auto-expiry, index rebuild, and garbage collection.
 // Returns ErrCorruptLearningStore if index.jsonl has corrupt lines.
 func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 	if !s.maintaining.CompareAndSwap(false, true) {
@@ -480,11 +406,9 @@ func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 
 		applyDedup(learnings, report)
 		report.Contradictions = findContradictions(learnings)
-		applyMaturityTransitions(learnings, report)
-		applyStalenessDecay(learnings, s.now(), report)
+		applyAutoExpiry(learnings, s.now(), report)
 		kept := applyGC(learnings, s.now(), maxAge, report)
 
-		// 4. Write + rebuild index
 		if writeErr := s.writeAll(kept); writeErr != nil {
 			return writeErr
 		}
@@ -492,9 +416,6 @@ func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 		return s.rebuildIndex(kept)
 	})
 
-	s.mu.Lock()
-	s.lastMaintainedAt = s.now()
-	s.mu.Unlock()
 	return report, err
 }
 
@@ -533,39 +454,6 @@ func (s *Store) Repair() (kept, dropped int, retErr error) {
 	return kept, dropped, retErr
 }
 
-// MaintainIfStale triggers background maintenance if more than 24 hours have passed
-// since the last maintenance run, or if maintenance has never run. Non-blocking — spawns a goroutine.
-func (s *Store) MaintainIfStale() {
-	s.mu.Lock()
-	stale := s.lastMaintainedAt.IsZero() || s.now().Sub(s.lastMaintainedAt) > 24*time.Hour
-	if stale {
-		// Mark as maintained now to prevent concurrent re-triggers.
-		s.lastMaintainedAt = s.now()
-	}
-	s.mu.Unlock()
-	if stale {
-		s.bgWg.Add(1)
-		go func() {
-			defer s.bgWg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "warning: background maintenance panicked: %v\n", r)
-				}
-			}()
-			report, _ := s.Maintain(90 * 24 * time.Hour)
-			if report != nil && !report.Skipped && s.OnMaintain != nil {
-				s.OnMaintain(*report)
-			}
-		}()
-	}
-}
-
-// Wait waits for any background maintenance goroutines to complete.
-func (s *Store) Wait() {
-	s.bgWg.Wait()
-}
-
-// checkMaturityTransition returns the new maturity level if a transition is warranted.
 // applyDedup merges learnings with ≥2 shared tags and similar summaries.
 func applyDedup(learnings []Learning, report *MaintainReport) {
 	for i := range learnings {
@@ -578,8 +466,8 @@ func applyDedup(learnings []Learning, report *MaintainReport) {
 			}
 			shared := sharedTagCount(learnings[i].Tags, learnings[j].Tags)
 			if shared >= 2 && similarSummary(learnings[i].Summary, learnings[j].Summary) {
-				// Keep the one with higher utility.
-				if learnings[i].Utility >= learnings[j].Utility {
+				// Keep the one with higher effectiveness.
+				if learnings[i].Effectiveness() >= learnings[j].Effectiveness() {
 					learnings[j].SupersededBy = learnings[i].ID
 				} else {
 					learnings[i].SupersededBy = learnings[j].ID
@@ -605,7 +493,6 @@ func sharedTagCount(a, b []string) int {
 }
 
 func similarSummary(a, b string) bool {
-	// Simple: check if shorter is a substring of longer, or they share >80% words.
 	if a == b {
 		return true
 	}
@@ -630,7 +517,6 @@ func findContradictions(learnings []Learning) []Contradiction {
 			if learnings[j].Expired || learnings[j].SupersededBy != "" {
 				continue
 			}
-			// One must be anti_pattern, other must be pattern.
 			isConflict := (learnings[i].Category == CategoryAntiPattern && learnings[j].Category == CategoryPattern) ||
 				(learnings[i].Category == CategoryPattern && learnings[j].Category == CategoryAntiPattern)
 			if !isConflict {
@@ -663,51 +549,21 @@ func sharedTags(a, b []string) []string {
 	return shared
 }
 
-func checkMaturityTransition(l *Learning) Maturity {
-	switch l.Maturity {
-	case MaturityProvisional, "":
-		if l.CitedCount >= 3 && l.Utility >= 0.55 {
-			return MaturityCandidate
-		}
-	case MaturityCandidate:
-		if l.CitedCount >= 5 && l.Utility >= 0.55 {
-			return MaturityEstablished
-		}
-		if l.Utility < 0.3 {
-			return MaturityProvisional
-		}
-	}
-	return ""
-}
-
-func applyMaturityTransitions(learnings []Learning, report *MaintainReport) {
+// applyAutoExpiry marks learnings as expired if they haven't been attached to
+// a task in 90 days. Uses CreatedAt as fallback when never attached.
+func applyAutoExpiry(learnings []Learning, now time.Time, report *MaintainReport) {
 	for i := range learnings {
 		l := &learnings[i]
 		if l.Expired || l.SupersededBy != "" {
 			continue
 		}
-		newMaturity := checkMaturityTransition(l)
-		if newMaturity == "" || newMaturity == l.Maturity {
-			continue
+		refTime := l.CreatedAt
+		if l.LastAttachedAt != nil {
+			refTime = *l.LastAttachedAt
 		}
-		if newMaturity == MaturityCandidate || newMaturity == MaturityEstablished {
-			report.Promoted++
-		} else {
-			report.Demoted++
-		}
-		l.Maturity = newMaturity
-	}
-}
-
-func applyStalenessDecay(learnings []Learning, now time.Time, report *MaintainReport) {
-	for i := range learnings {
-		l := &learnings[i]
-		if l.Expired || l.SupersededBy != "" {
-			continue
-		}
-		if l.CitedCount == 0 && now.Sub(l.CreatedAt) > 30*24*time.Hour {
-			l.Utility = max(l.Utility-0.1, 0)
-			report.Stale++
+		if now.Sub(refTime) > autoExpiryThreshold {
+			l.Expired = true
+			report.AutoExpired++
 		}
 	}
 }
@@ -735,7 +591,7 @@ func (s *Store) now() time.Time {
 }
 
 func (s *Store) matchesFilter(l *Learning, opts *QueryOpts) bool {
-	if opts.MinUtility > 0 && l.Utility < opts.MinUtility {
+	if opts.MinEffectiveness > 0 && l.Effectiveness() < opts.MinEffectiveness {
 		return false
 	}
 	if opts.Category != "" && l.Category != opts.Category {

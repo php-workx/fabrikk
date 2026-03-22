@@ -54,7 +54,6 @@ func FromFinding(f ExtractedFinding) *Learning {
 		Source:        "council",
 		SourceFinding: f.FindingID,
 		Confidence:    confidence,
-		Maturity:      MaturityProvisional,
 	}
 }
 
@@ -81,7 +80,6 @@ func FromRejection(r ExtractedRejection) *Learning {
 		Source:        "rejection",
 		SourceFinding: r.FindingID,
 		Confidence:    0.7,
-		Maturity:      MaturityProvisional,
 	}
 }
 
@@ -112,6 +110,5 @@ func FromVerifierFailure(findingID, severity, category, summary, taskID, runID, 
 		Source:        "verifier",
 		SourceFinding: findingID,
 		Confidence:    0.9,
-		Maturity:      MaturityProvisional,
 	}
 }

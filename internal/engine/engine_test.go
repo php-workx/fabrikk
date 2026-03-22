@@ -1451,21 +1451,22 @@ func TestSweepExpiredClaimsWithTicketStore(t *testing.T) {
 
 // mockLearningEnricher implements state.LearningEnricher for testing.
 type mockLearningEnricher struct {
-	refs      []state.LearningRef
-	citations []string
+	refs     []state.LearningRef
+	outcomes []struct {
+		ids    []string
+		passed bool
+	}
 }
 
 func (m *mockLearningEnricher) QueryLearnings(_ state.LearningQueryOpts) ([]state.LearningRef, error) {
 	return m.refs, nil
 }
 
-func (m *mockLearningEnricher) RecordCitation(id string) error {
-	m.citations = append(m.citations, id)
-	return nil
-}
-
-func (m *mockLearningEnricher) RecordCitations(ids []string) error {
-	m.citations = append(m.citations, ids...)
+func (m *mockLearningEnricher) RecordOutcome(ids []string, passed bool) error {
+	m.outcomes = append(m.outcomes, struct {
+		ids    []string
+		passed bool
+	}{ids: ids, passed: passed})
 	return nil
 }
 
@@ -1495,8 +1496,8 @@ func TestCompileEnrichesTasksWithLearnings(t *testing.T) {
 
 	mock := &mockLearningEnricher{
 		refs: []state.LearningRef{
-			{ID: "lrn-test1", Category: "anti_pattern", Utility: 0.8, Summary: "Avoid X", Maturity: "provisional"},
-			{ID: "lrn-test2", Category: "codebase", Utility: 0.7, Summary: "Use Y", Maturity: "provisional"},
+			{ID: "lrn-test1", Category: "anti_pattern", Summary: "Avoid X"},
+			{ID: "lrn-test2", Category: "codebase", Summary: "Use Y"},
 		},
 	}
 	eng.LearningEnricher = mock
@@ -1523,9 +1524,10 @@ func TestCompileEnrichesTasksWithLearnings(t *testing.T) {
 		}
 	}
 
-	// Verify citations were recorded.
-	if len(mock.citations) == 0 {
-		t.Error("expected citations to be recorded")
+	// Outcome recording happens at verify time, not compile time.
+	// Verify no outcomes recorded yet (compile doesn't call RecordOutcome).
+	if len(mock.outcomes) != 0 {
+		t.Errorf("expected no outcomes at compile time, got %d", len(mock.outcomes))
 	}
 }
 

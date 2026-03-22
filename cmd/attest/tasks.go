@@ -436,7 +436,7 @@ func cmdProgress(args []string) error {
 // If runID is non-empty, only shows the handoff if it matches that run.
 func showLatestHandoff(wd, runID string) {
 	store := learning.NewStore(filepath.Join(wd, ".attest", "learnings"))
-	defer store.Wait()
+
 	h, err := store.LatestHandoff()
 	if err != nil || h == nil {
 		return
