@@ -30,6 +30,7 @@ coverage.html
 # SonarQube working directory
 .sonarqube/
 .scannerwork/
+.sonarqube-review
 
 # attest runtime state
 .attest/

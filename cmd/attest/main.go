@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/runger/attest/internal/councilflow"
 	"github.com/runger/attest/internal/engine"
+	"github.com/runger/attest/internal/learning"
 	"github.com/runger/attest/internal/state"
 )
 
@@ -65,6 +68,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		err = cmdNext(args[1:])
 	case "progress":
 		err = cmdProgress(args[1:])
+	case "learn":
+		err = cmdLearn(args[1:])
+	case "context":
+		err = cmdContext(args[1:])
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		usage(stderr)
@@ -87,7 +94,37 @@ func newEngine(wd, runID string) *engine.Engine {
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
 	eng.TaskStore = taskStoreForRun(wd, runID)
+	eng.LearningEnricher = newLearningStore(wd)
 	return eng
+}
+
+func newLearningStore(wd string) *learning.Store {
+	sharedDir := filepath.Join(wd, ".attest", "learnings")
+	localDir := resolveLocalLearningDir(wd)
+	if localDir != "" {
+		return learning.NewStoreWithLocalDir(sharedDir, localDir)
+	}
+	return learning.NewStore(sharedDir)
+}
+
+var (
+	localDirOnce   sync.Once
+	cachedLocalDir string
+)
+
+func resolveLocalLearningDir(wd string) string {
+	localDirOnce.Do(func() {
+		out, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
+		if err != nil {
+			return
+		}
+		gitCommonDir := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(gitCommonDir) {
+			gitCommonDir = filepath.Join(wd, gitCommonDir)
+		}
+		cachedLocalDir = filepath.Join(gitCommonDir, "attest", "learnings")
+	})
+	return cachedLocalDir
 }
 
 func workDir() (string, error) {
@@ -406,6 +443,13 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	cfg.DryRun = dryRun
 	cfg.Force = force
 	cfg.SkipApproval = skipApproval
+
+	// Inject prevention checks from high-effectiveness learnings.
+	learnStore := newLearningStore(eng.WorkDir)
+	if prevention := learnStore.LoadPreventionContext(nil); prevention != "" {
+		cfg.CodebaseContext += prevention
+	}
+
 	result, err := eng.CouncilReviewTechnicalSpec(ctx, cfg)
 	if err != nil {
 		return err
@@ -419,6 +463,21 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 			fmt.Printf("  [round %d] %s: %s (%d findings)\n", round.Round, r.PersonaID, r.Verdict, len(r.Findings))
 		}
 	}
+
+	// Extract learnings from council findings (Phase 2) — skip during dry-run.
+	if !dryRun {
+		extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
+		_ = eng.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_extraction",
+			RunID:     filepath.Base(eng.RunDir.Root),
+			Detail:    fmt.Sprintf("source=council rounds=%d", len(result.Rounds)),
+		})
+		// Trigger learning maintenance after extraction.
+		learnStore := newLearningStore(eng.WorkDir)
+		_, _ = learnStore.Maintain(90 * 24 * time.Hour)
+	}
+
 	return nil
 }
 
@@ -542,6 +601,8 @@ func cmdStatus(_ context.Context, args []string) error {
 			}
 			fmt.Printf("  %s  state=%s\n", status.RunID, status.State)
 		}
+		showLatestHandoff(wd, "")
+		showLearningHealth(wd)
 		return nil
 	}
 
@@ -563,6 +624,7 @@ func cmdStatus(_ context.Context, args []string) error {
 		}
 	}
 
+	showLatestHandoff(wd, runID)
 	return nil
 }
 
@@ -686,11 +748,28 @@ func cmdVerify(ctx context.Context, args []string) error {
 
 	if result.Pass {
 		fmt.Println("\nVerification: PASS")
+		// Trigger learning maintenance after successful verification.
+		learnStore := newLearningStore(wd)
+		if report, mErr := learnStore.Maintain(90 * 24 * time.Hour); mErr == nil && !report.Skipped {
+			if report.Merged > 0 || report.AutoExpired > 0 || report.GCRemoved > 0 {
+				fmt.Printf("Learning maintenance: %d merged, %d expired, %d removed\n",
+					report.Merged, report.AutoExpired, report.GCRemoved)
+			}
+		}
 	} else {
 		fmt.Println("\nVerification: FAIL")
 		for _, f := range result.BlockingFindings {
 			fmt.Printf("  [%s] %s: %s\n", f.Severity, f.Category, f.Summary)
 		}
+		// Extract learnings from verification failures (Phase 2)
+		extractLearningsFromVerifier(wd, result, task)
+		_ = eng.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_extraction",
+			RunID:     filepath.Base(eng.RunDir.Root),
+			TaskID:    task.TaskID,
+			Detail:    fmt.Sprintf("source=verifier findings=%d", len(result.BlockingFindings)),
+		})
 	}
 
 	return nil

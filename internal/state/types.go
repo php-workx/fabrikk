@@ -3,6 +3,8 @@ package state
 
 import (
 	"errors"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -35,6 +37,32 @@ type ClaimableStore interface {
 	ClaimTask(taskID, ownerID, backend string, lease time.Duration) error
 	ReleaseClaim(taskID, ownerID string, newStatus TaskStatus, reason string) error
 	RenewClaim(taskID, ownerID string, lease time.Duration) error
+}
+
+// LearningCategory classifies learnings for enrichment mapping.
+type LearningCategory string
+
+// Learning categories used by enrichTaskWithLearnings.
+const (
+	LearningCategoryAntiPattern LearningCategory = "anti_pattern"
+	LearningCategoryCodebase    LearningCategory = "codebase"
+	LearningCategoryTooling     LearningCategory = "tooling"
+)
+
+// LearningQueryOpts is the subset of query options the engine needs.
+type LearningQueryOpts struct {
+	Tags             []string
+	Paths            []string
+	SearchText       string
+	MinEffectiveness float64
+	Limit            int
+}
+
+// LearningEnricher enriches tasks with learnings from a learning store.
+// The engine type-asserts to this interface. Implemented by learning.Store.
+type LearningEnricher interface {
+	QueryLearnings(opts LearningQueryOpts) ([]LearningRef, error)
+	RecordOutcome(ids []string, passed bool) error
 }
 
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).
@@ -136,6 +164,55 @@ type Task struct {
 	RequiredEvidence []string   `json:"required_evidence"`
 	ParentTaskID     string     `json:"parent_task_id,omitempty"`
 	CreatedFrom      string     `json:"created_from,omitempty"`
+
+	// Learning context — injected by engine post-compilation.
+	Intent          string        `json:"intent,omitempty"`
+	Constraints     []string      `json:"constraints,omitempty"`
+	Warnings        []string      `json:"warnings,omitempty"`
+	LearningIDs     []string      `json:"learning_ids,omitempty"`
+	LearningContext []LearningRef `json:"learning_context,omitempty"`
+}
+
+// DeriveTags produces query tags from task metadata for learning lookup.
+// Tags are derived from owned paths, requirement IDs, and task type.
+func (t *Task) DeriveTags() []string {
+	seen := make(map[string]struct{})
+	for _, p := range t.Scope.OwnedPaths {
+		for _, part := range strings.Split(p, "/") {
+			part = strings.ToLower(part)
+			if part != "" && part != "." && part != ".." {
+				seen[part] = struct{}{}
+			}
+		}
+	}
+	prefixMap := map[string]string{
+		"AT-FR": "functional", "AT-TS": "testing",
+		"AT-NFR": "non-functional", "AT-AS": "assumption",
+	}
+	for _, reqID := range t.RequirementIDs {
+		for prefix, tag := range prefixMap {
+			if strings.HasPrefix(reqID, prefix) {
+				seen[tag] = struct{}{}
+				break
+			}
+		}
+	}
+	if t.TaskType != "" {
+		seen[strings.ToLower(t.TaskType)] = struct{}{}
+	}
+	tags := make([]string, 0, len(seen))
+	for tag := range seen {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+// LearningRef is a lightweight reference to a learning for ticket body rendering.
+type LearningRef struct {
+	ID       string `json:"id"`
+	Category string `json:"category"`
+	Summary  string `json:"summary"`
 }
 
 // TaskScope defines the file-level boundaries for a task (spec section 3.4).

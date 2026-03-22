@@ -12,6 +12,7 @@ import (
 
 	"github.com/runger/attest/internal/compiler"
 	"github.com/runger/attest/internal/engine"
+	"github.com/runger/attest/internal/learning"
 	"github.com/runger/attest/internal/state"
 	"github.com/runger/attest/internal/ticket"
 )
@@ -1042,4 +1043,121 @@ func extractRunID(t *testing.T, output string) string {
 
 	t.Fatalf("output %q did not contain run ID", output)
 	return ""
+}
+
+func TestCmdLearnAddAndQuery(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	// Add a learning.
+	output := captureStdout(t, func() {
+		if err := cmdLearn([]string{
+			"Use withLock for atomic read-check-write",
+			"--tag", "concurrency,flock",
+			"--category", "pattern",
+			"--path", "internal/ticket",
+		}); err != nil {
+			t.Fatalf("cmdLearn add: %v", err)
+		}
+	})
+	assertContains(t, output, "Learning added:")
+	assertContains(t, output, "pattern")
+
+	// Query by tag.
+	output = captureStdout(t, func() {
+		if err := cmdLearn([]string{"query", "--tag", "concurrency"}); err != nil {
+			t.Fatalf("cmdLearn query: %v", err)
+		}
+	})
+	assertContains(t, output, "withLock")
+
+	// List all.
+	output = captureStdout(t, func() {
+		if err := cmdLearn([]string{"list"}); err != nil {
+			t.Fatalf("cmdLearn list: %v", err)
+		}
+	})
+	assertContains(t, output, "All learnings (1)")
+}
+
+func TestCmdLearnHandoff(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	output := captureStdout(t, func() {
+		if err := cmdLearn([]string{
+			"handoff",
+			"--summary", "Implemented learning store, tests passing",
+			"--next", "Wire into engine",
+			"--run", "run-1234",
+		}); err != nil {
+			t.Fatalf("cmdLearn handoff: %v", err)
+		}
+	})
+	assertContains(t, output, "Handoff saved:")
+	assertContains(t, output, "Wire into engine")
+}
+
+func TestCmdContext(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	runID := "run-ctx-test"
+
+	// Create a task via the ticket store.
+	ticketStore := ticket.NewStore(filepath.Join(baseDir, ".tickets"))
+	task := state.Task{
+		TaskID:       "task-test-ctx",
+		Title:        "Test context task",
+		Tags:         []string{"testctx"},
+		Status:       state.TaskPending,
+		Scope:        state.TaskScope{OwnedPaths: []string{"internal/test"}},
+		ParentTaskID: runID,
+	}
+	_ = ticketStore.WriteTasks(runID, []state.Task{task})
+
+	// Create a learning store and add a learning with matching tags and paths.
+	learnStore := learning.NewStore(filepath.Join(baseDir, ".attest", "learnings"))
+	_ = learnStore.Add(&learning.Learning{
+		Tags:        []string{"testctx"},
+		Category:    learning.CategoryPattern,
+		Content:     "Context assembly test content",
+		Summary:     "Context test learning summary",
+		Confidence:  0.8,
+		SourcePaths: []string{"internal/test"},
+	})
+
+	output := captureStdout(t, func() {
+		if err := cmdContext([]string{runID, "task-test-ctx"}); err != nil {
+			t.Fatalf("cmdContext: %v", err)
+		}
+	})
+
+	assertContains(t, output, "Context for")
+	assertContains(t, output, "Context test learning summary")
+}
+
+func TestCmdLearnMaintain(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	output := captureStdout(t, func() {
+		if err := cmdLearn([]string{"maintain"}); err != nil {
+			t.Fatalf("cmdLearn maintain: %v", err)
+		}
+	})
+	assertContains(t, output, "Learning store maintenance:")
+	assertContains(t, output, "Auto-expired:")
+}
+
+func TestCmdLearnGC(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	output := captureStdout(t, func() {
+		if err := cmdLearn([]string{"gc"}); err != nil {
+			t.Fatalf("cmdLearn gc: %v", err)
+		}
+	})
+	assertContains(t, output, "Garbage collected: 0")
 }

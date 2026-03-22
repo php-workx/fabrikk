@@ -58,6 +58,7 @@ func assertHelpOutput(t *testing.T, output string) {
 		"prepare", "review", "tech-spec", "plan", "approve",
 		"status", "verify", "retry", "report",
 		"tasks", "ready", "blocked", "next", "progress",
+		"learn", "context",
 	} {
 		if !strings.Contains(output, cmd) {
 			t.Errorf("help output missing command %q", cmd)

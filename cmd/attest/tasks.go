@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/runger/attest/internal/state"
 	"github.com/runger/attest/internal/ticket"
@@ -63,7 +64,7 @@ func parseTaskFilter(args []string) (runID string, f taskFilter) {
 				f.wave = args[i+1]
 				i++
 			}
-		case "--limit":
+		case flagLimit:
 			if i+1 < len(args) {
 				_, _ = fmt.Sscanf(args[i+1], "%d", &f.limit)
 				i++
@@ -321,6 +322,7 @@ func cmdNext(args []string) error {
 		} else {
 			fmt.Println("Next task:")
 			outputTasks(ready[:1], false)
+			showLatestHandoff(wd, runID)
 		}
 		return nil
 	}
@@ -346,7 +348,14 @@ func cmdNext(args []string) error {
 		return nil
 	}
 
+	if f.jsonOutput {
+		outputTasks([]state.Task{}, true)
+		return nil
+	}
 	fmt.Println("No ready or blocked tasks.")
+
+	// Show handoff if recent.
+	showLatestHandoff(wd, runID)
 	return nil
 }
 
@@ -420,4 +429,47 @@ func cmdProgress(args []string) error {
 		}
 	}
 	return nil
+}
+
+// showLatestHandoff displays the latest session handoff if less than 24h old.
+// If runID is non-empty, only shows the handoff if it matches that run.
+func showLatestHandoff(wd, runID string) {
+	store := newLearningStore(wd)
+
+	h, err := store.LatestHandoff()
+	if err != nil || h == nil {
+		return
+	}
+	if runID != "" && h.RunID != "" && h.RunID != runID {
+		return
+	}
+	age := time.Since(h.CreatedAt)
+	if age > 24*time.Hour {
+		return
+	}
+	fmt.Printf("\nSession continuity (%s ago):\n  %s\n",
+		age.Truncate(time.Minute), h.Summary)
+	for _, s := range h.NextSteps {
+		fmt.Printf("  Next: %s\n", s)
+	}
+}
+
+// showLearningHealth displays a summary of the learning store.
+func showLearningHealth(wd string) {
+	store := newLearningStore(wd)
+	h, err := store.Health()
+	if err != nil || h.Total == 0 {
+		return
+	}
+	fmt.Printf("\nLearnings: %d active", h.Active)
+	if h.Expired > 0 {
+		fmt.Printf(", %d expired", h.Expired)
+	}
+	if h.Superseded > 0 {
+		fmt.Printf(", %d superseded", h.Superseded)
+	}
+	if h.WithOutcome > 0 {
+		fmt.Printf(" (avg effectiveness: %.0f%%)", h.AvgEff*100)
+	}
+	fmt.Println()
 }

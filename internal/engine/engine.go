@@ -27,9 +27,10 @@ const (
 // Engine is the Phase 1 run engine (spec section 18.3).
 // Serial execution, foreground, no council, no detached mode.
 type Engine struct {
-	RunDir    *state.RunDir
-	WorkDir   string          // repository root
-	TaskStore state.TaskStore // nil = fall back to RunDir
+	RunDir           *state.RunDir
+	WorkDir          string                 // repository root
+	TaskStore        state.TaskStore        // nil = fall back to RunDir
+	LearningEnricher state.LearningEnricher // nil = skip learning enrichment
 }
 
 // taskStore returns the configured TaskStore or falls back to RunDir.
@@ -194,6 +195,13 @@ func (e *Engine) Compile(ctx context.Context) (*compiler.CompileResult, error) {
 		return nil, fmt.Errorf("unassigned requirements after compilation (spec 7.2): %v", unassigned)
 	}
 
+	// Enrich tasks with learnings (post-compilation, before write).
+	if e.LearningEnricher != nil {
+		for i := range result.Tasks {
+			e.enrichTaskWithLearnings(&result.Tasks[i])
+		}
+	}
+
 	// Write compiled tasks — ticket.Store is the sole task backend.
 	if err := e.taskStore().WriteTasks(e.runID(), result.Tasks); err != nil {
 		return nil, fmt.Errorf(errWriteTasks, err)
@@ -259,6 +267,19 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		TaskID:    task.TaskID,
 		Detail:    fmt.Sprintf("pass=%v findings=%d", result.Pass, len(result.BlockingFindings)),
 	})
+
+	// Record verification outcome for learning effectiveness tracking.
+	if e.LearningEnricher != nil && len(task.LearningIDs) > 0 {
+		if outErr := e.LearningEnricher.RecordOutcome(task.LearningIDs, result.Pass); outErr != nil {
+			_ = e.RunDir.AppendEvent(state.Event{
+				Timestamp: time.Now(),
+				Type:      "learning_outcome_failed",
+				RunID:     artifact.RunID,
+				TaskID:    task.TaskID,
+				Detail:    outErr.Error(),
+			})
+		}
+	}
 
 	nextState := state.RunRunning
 	var blockers []string
@@ -544,6 +565,51 @@ func (e *Engine) persistVerifiedTask(task *state.Task, status state.TaskStatus, 
 	existing.StatusReason = reason
 	existing.UpdatedAt = time.Now()
 	return e.taskStore().WriteTask(existing)
+}
+
+// enrichTaskWithLearnings queries the learning store and populates the task's
+// learning-related fields. Deterministic: Warnings from anti_pattern summaries,
+// Constraints from codebase/tooling summaries. LearningContext for body rendering.
+func (e *Engine) enrichTaskWithLearnings(task *state.Task) {
+	refs, err := e.LearningEnricher.QueryLearnings(state.LearningQueryOpts{
+		Tags:             task.DeriveTags(),
+		Paths:            task.Scope.OwnedPaths,
+		SearchText:       task.Title,
+		MinEffectiveness: 0.3,
+		Limit:            5,
+	})
+	if err != nil {
+		_ = e.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_query_failed",
+			RunID:     e.runID(),
+			TaskID:    task.TaskID,
+			Detail:    err.Error(),
+		})
+		return
+	}
+	if len(refs) == 0 {
+		return
+	}
+
+	task.LearningIDs = make([]string, len(refs))
+	task.LearningContext = refs
+	for i := range refs {
+		task.LearningIDs[i] = refs[i].ID
+		switch state.LearningCategory(refs[i].Category) {
+		case state.LearningCategoryAntiPattern:
+			task.Warnings = append(task.Warnings, refs[i].Summary)
+		case state.LearningCategoryCodebase, state.LearningCategoryTooling:
+			task.Constraints = append(task.Constraints, refs[i].Summary)
+		}
+	}
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "learning_enrichment",
+		RunID:     e.runID(),
+		TaskID:    task.TaskID,
+		Detail:    fmt.Sprintf("attached %d learnings", len(refs)),
+	})
 }
 
 func summarizeFindings(findings []state.Finding) string {

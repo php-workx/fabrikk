@@ -136,7 +136,7 @@ func TestBuildReviewPromptIncludesPriorFindingsInRound2(t *testing.T) {
 		"test-001",
 		"Missing edge case coverage",
 		"Do not repeat issues",
-		"WARN",
+		"warn",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("round 2 prompt missing %q", want)
@@ -233,7 +233,7 @@ func TestParseReviewOutputValidJSON(t *testing.T) {
 	raw := `{
   "persona_id": "security-perf-engineer",
   "round": 1,
-  "verdict": "WARN",
+  "verdict": "warn",
   "confidence": "HIGH",
   "key_insight": "Unauthenticated worker channel",
   "findings": [
@@ -276,7 +276,7 @@ func TestParseReviewOutputFromCodeFence(t *testing.T) {
 	raw := "Here is my review:\n```json\n" + `{
   "persona_id": "test",
   "round": 1,
-  "verdict": "PASS",
+  "verdict": "pass",
   "confidence": "HIGH",
   "key_insight": "No issues",
   "findings": [],

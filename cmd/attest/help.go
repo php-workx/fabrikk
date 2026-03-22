@@ -52,6 +52,13 @@ var helpGroups = []helpGroup{
 			{"progress", "Show run progress"},
 		},
 	},
+	{
+		Title: "Learning",
+		Commands: []helpCommand{
+			{"learn", "Add, query, or manage learnings"},
+			{"context", "Assemble agent context for a task"},
+		},
+	},
 }
 
 func usage(w io.Writer) {

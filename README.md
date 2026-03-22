@@ -211,5 +211,3 @@ CLI (cmd/attest/)
 | [Functional Spec](docs/specs/attest-functional-spec.md) | Full product specification (82 requirements, 19 core concepts) |
 | [Technical Spec](docs/specs/attest-technical-spec.md) | Implementation architecture and design |
 | [How It Works](docs/HOW-IT-WORKS.md) | Detailed pipeline walkthrough with examples |
-| [AgentOps Research](docs/research/agentops-learnings.md) | Patterns extracted from AgentOps that attest codifies |
-| [AgentOps Deep Dive](docs/research/agentops-skill-deep-dive.md) | Detailed skill analysis — what we use, what we skip, why |

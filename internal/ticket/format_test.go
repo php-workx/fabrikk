@@ -221,6 +221,81 @@ func TestEmptyOptionalFields(t *testing.T) {
 	}
 }
 
+func TestMarshalTicketWithLearningContext(t *testing.T) {
+	task := state.Task{
+		TaskID: "task-test",
+		Title:  "Test task",
+		Status: state.TaskPending,
+		LearningContext: []state.LearningRef{
+			{ID: "lrn-abc", Category: "pattern", Summary: "Test learning"},
+		},
+	}
+
+	data, err := MarshalTicket(&task)
+	if err != nil {
+		t.Fatalf("MarshalTicket: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "## Context from Learnings") {
+		t.Error("missing '## Context from Learnings' section")
+	}
+	if !strings.Contains(content, "lrn-abc") {
+		t.Error("missing learning ID 'lrn-abc'")
+	}
+	if !strings.Contains(content, "pattern") {
+		t.Error("missing category 'pattern'")
+	}
+	if !strings.Contains(content, "Test learning") {
+		t.Error("missing summary 'Test learning'")
+	}
+}
+
+func TestUpdateFrontmatterPreservesLearningFields(t *testing.T) {
+	task := state.Task{
+		TaskID:      "task-learn",
+		Title:       "Learning fields test",
+		Status:      state.TaskPending,
+		Intent:      "Implement the feature safely",
+		Constraints: []string{"Do not modify shared state"},
+		Warnings:    []string{"High complexity area"},
+		LearningIDs: []string{"lrn-001", "lrn-002"},
+	}
+
+	data, err := MarshalTicket(&task)
+	if err != nil {
+		t.Fatalf("MarshalTicket: %v", err)
+	}
+
+	// Create an updated task with different status but same learning fields.
+	updated := task
+	updated.Status = state.TaskDone
+
+	result, err := UpdateFrontmatter(data, &updated)
+	if err != nil {
+		t.Fatalf("UpdateFrontmatter: %v", err)
+	}
+
+	// Unmarshal to verify fields survived.
+	got, err := UnmarshalTicket(result)
+	if err != nil {
+		t.Fatalf("UnmarshalTicket: %v", err)
+	}
+
+	if got.Intent != "Implement the feature safely" {
+		t.Errorf("Intent = %q, want %q", got.Intent, "Implement the feature safely")
+	}
+	if len(got.Constraints) != 1 || got.Constraints[0] != "Do not modify shared state" {
+		t.Errorf("Constraints = %v, want [Do not modify shared state]", got.Constraints)
+	}
+	if len(got.Warnings) != 1 || got.Warnings[0] != "High complexity area" {
+		t.Errorf("Warnings = %v, want [High complexity area]", got.Warnings)
+	}
+	if len(got.LearningIDs) != 2 || got.LearningIDs[0] != "lrn-001" || got.LearningIDs[1] != "lrn-002" {
+		t.Errorf("LearningIDs = %v, want [lrn-001 lrn-002]", got.LearningIDs)
+	}
+}
+
 func TestNotesAppendFormat(t *testing.T) {
 	original := "---\nid: test\nstatus: open\npriority: 0\norder: 0\n---\n# Test\n\n## Notes\n\n**2026-03-19T10:00:00Z**\n\nFirst note.\n"
 
