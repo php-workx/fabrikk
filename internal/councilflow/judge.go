@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/runger/attest/internal/agentcli"
 )
 
 // ConsolidationResult holds the judge's output for one round.
@@ -25,7 +27,7 @@ type ConsolidationResult struct {
 
 // JudgeConfig controls the judge/editor behavior.
 type JudgeConfig struct {
-	Backend    CLIBackend
+	Backend    agentcli.CLIBackend
 	TimeoutSec int
 	Mode       ReviewMode
 	StaggerSec int
@@ -34,7 +36,7 @@ type JudgeConfig struct {
 // DefaultJudgeConfig returns a config targeting Claude Opus with extended thinking.
 func DefaultJudgeConfig() JudgeConfig {
 	return JudgeConfig{
-		Backend: CLIBackend{
+		Backend: agentcli.CLIBackend{
 			Command: "claude",
 			Args:    []string{"-p", "--model", "opus"},
 		},
@@ -207,7 +209,7 @@ func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, output
 	_ = os.WriteFile(promptPath, []byte(b.String()), 0o644)
 
 	fmt.Printf("  [judge] resolving %d conflicts ...\n", len(edits))
-	output, err := InvokeFunc(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
+	output, err := agentcli.InvokeFunc(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +271,7 @@ func judgeOneReview(ctx context.Context, spec string, round int, review *ReviewO
 	promptPath := filepath.Join(outputDir, fmt.Sprintf("judge-prompt-%s.md", review.PersonaID))
 	_ = os.WriteFile(promptPath, []byte(prompt), 0o644)
 
-	output, err := InvokeFunc(ctx, &cfg.Backend, prompt, cfg.TimeoutSec)
+	output, err := agentcli.InvokeFunc(ctx, &cfg.Backend, prompt, cfg.TimeoutSec)
 	if err != nil {
 		return judgeDecision{personaID: review.PersonaID, err: err}
 	}

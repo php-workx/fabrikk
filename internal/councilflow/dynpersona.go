@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/runger/attest/internal/agentcli"
 )
 
 // MaxDynamicPersonas is the maximum number of dynamic personas per round.
@@ -37,8 +39,8 @@ func GeneratePersonas(ctx context.Context, spec, outputDir string, mode ReviewMo
 
 	fmt.Println("  generating dynamic personas ...")
 
-	backend := KnownBackends[BackendClaude]
-	output, err := InvokeFunc(ctx, &backend, prompt, 300)
+	backend := agentcli.KnownBackends[agentcli.BackendClaude]
+	output, err := agentcli.InvokeFunc(ctx, &backend, prompt, 300)
 	if err != nil {
 		return nil, fmt.Errorf("invoke persona generator: %w", err)
 	}

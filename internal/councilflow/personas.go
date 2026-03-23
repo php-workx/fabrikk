@@ -1,11 +1,6 @@
 package councilflow
 
-// Backend constants for CLI tool routing (spec section 10.1).
-const (
-	BackendClaude = "claude"
-	BackendCodex  = "codex"
-	BackendGemini = "gemini"
-)
+import "github.com/runger/attest/internal/agentcli"
 
 // FixedPersonas returns the persona set that runs in every review regardless of spec content.
 // Each persona has a single focused mandate to avoid attention-splitting.
@@ -24,7 +19,7 @@ func FixedPersonas() []Persona {
 				"Interfaces",
 				"Canonical artifacts",
 			},
-			Backend:   BackendCodex,
+			Backend:   agentcli.BackendCodex,
 			ModelPref: "gpt-5.4",
 		},
 		{
@@ -39,7 +34,7 @@ func FixedPersonas() []Persona {
 				"Architecture",
 				"Interfaces",
 			},
-			Backend:   BackendGemini,
+			Backend:   agentcli.BackendGemini,
 			ModelPref: "gemini-3-pro-preview",
 		},
 		{
@@ -54,7 +49,7 @@ func FixedPersonas() []Persona {
 				"Verification",
 				"Canonical artifacts",
 			},
-			Backend:   BackendCodex,
+			Backend:   agentcli.BackendCodex,
 			ModelPref: "gpt-5.4",
 		},
 		{
@@ -70,7 +65,7 @@ func FixedPersonas() []Persona {
 				"Canonical artifacts",
 				"Interfaces",
 			},
-			Backend:   BackendClaude,
+			Backend:   agentcli.BackendClaude,
 			ModelPref: "opus",
 		},
 	}

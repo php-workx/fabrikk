@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/runger/attest/internal/agentcli"
 )
 
 // CouncilConfig controls the council review pipeline.
@@ -444,7 +446,7 @@ func writeDryRunPrompts(roundDir, spec string, round int, personas []Persona, pr
 			return fmt.Errorf("write dry-run prompt: %w", err)
 		}
 		fmt.Printf("  [dry-run] prompt written: %s (%s via %s)\n",
-			promptPath, personas[i].DisplayName, BackendFor(&personas[i]).Command)
+			promptPath, personas[i].DisplayName, agentcli.BackendFor(personas[i].Backend, personas[i].ModelPref).Command)
 	}
 	return nil
 }

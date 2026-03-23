@@ -10,11 +10,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/runger/attest/internal/agentcli"
 )
 
 // stubInvoke returns a stub InvokeFn that maps persona/judge prompts to fixture responses.
-func stubInvoke(responses map[string]string) InvokeFn {
-	return func(_ context.Context, backend *CLIBackend, prompt string, _ int) (string, error) {
+func stubInvoke(responses map[string]string) agentcli.InvokeFn {
+	return func(_ context.Context, backend *agentcli.CLIBackend, prompt string, _ int) (string, error) {
 		for key, response := range responses {
 			if strings.Contains(prompt, key) {
 				return response, nil
@@ -46,7 +48,7 @@ func fixturePersonaJSON() string {
 		Type:         PersonaDynamic,
 		Perspective:  "Go expert",
 		Instructions: "Review for Go patterns.\n\nDo NOT flag security issues.",
-		Backend:      BackendClaude,
+		Backend:      agentcli.BackendClaude,
 		Rationale:    "Spec targets Go",
 	}}
 	data, _ := json.MarshalIndent(personas, "", "  ")
@@ -90,13 +92,13 @@ Pending.
 `
 
 func TestRunRoundWithStubBackend(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
 	// Keys use "You are: **<name>**" prefix to avoid ambiguous matching — short
 	// keys like "Architecture" match focus sections in other personas' prompts,
 	// causing flaky results due to map iteration order.
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"You are: **Security Engineer**": fixtureReviewJSON("security-engineer", VerdictWarn, []Finding{
 			{FindingID: "sec-001", Severity: "significant", Description: "No error handling"},
 		}),
@@ -134,10 +136,10 @@ func TestRunRoundWithStubBackend(t *testing.T) {
 }
 
 func TestRunRoundPartialFailure(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"You are: **Security Engineer**": fixtureReviewJSON("security-engineer", VerdictFail, []Finding{
 			{FindingID: "sec-001", Severity: "critical", Description: "Critical issue"},
 		}),
@@ -161,10 +163,10 @@ func TestRunRoundPartialFailure(t *testing.T) {
 }
 
 func TestRunRoundAllFailAborts(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = func(_ context.Context, _ *CLIBackend, _ string, _ int) (string, error) {
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
 		return "", fmt.Errorf("all backends down")
 	}
 
@@ -182,10 +184,10 @@ func TestRunRoundAllFailAborts(t *testing.T) {
 }
 
 func TestRunCouncilEmptyReviewAborts(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = func(_ context.Context, _ *CLIBackend, _ string, _ int) (string, error) {
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
 		return "", fmt.Errorf("all backends down")
 	}
 
@@ -201,10 +203,10 @@ func TestRunCouncilEmptyReviewAborts(t *testing.T) {
 }
 
 func TestRunJudgeAppliesEdits(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"Judge": fixtureJudgeJSON(
 			[]SpecEdit{{
 				FindingID: "sec-001",
@@ -247,10 +249,10 @@ func TestRunJudgeAppliesEdits(t *testing.T) {
 }
 
 func TestRunJudgeWithRejections(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"Judge": fixtureJudgeJSON(
 			nil,
 			[]Rejection{{FindingID: "sec-002", PersonaID: "test", Severity: "minor", Description: "minor issue", RejectionReason: "not relevant for MVP"}},
@@ -269,10 +271,10 @@ func TestRunJudgeWithRejections(t *testing.T) {
 }
 
 func TestRunJudgeRejectsEmptyReplace(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"Judge": fixtureJudgeJSON(
 			[]SpecEdit{{FindingID: "sec-001", Find: "Simple architecture", Replace: ""}},
 			nil,
@@ -292,11 +294,11 @@ func TestRunJudgeRejectsEmptyReplace(t *testing.T) {
 }
 
 func TestFullPipelineWithStubs(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
 	var callCount atomic.Int32
-	InvokeFunc = func(_ context.Context, backend *CLIBackend, prompt string, _ int) (string, error) {
+	agentcli.InvokeFunc = func(_ context.Context, backend *agentcli.CLIBackend, prompt string, _ int) (string, error) {
 		callCount.Add(1)
 		// Persona generation
 		if strings.Contains(prompt, "Persona Generation") {
@@ -376,8 +378,8 @@ func TestDuplicatePersonaIDRejected(t *testing.T) {
 	dir := t.TempDir()
 	runner := NewRunner(dir)
 	personas := []Persona{
-		{PersonaID: "dup", DisplayName: "A", Backend: BackendClaude},
-		{PersonaID: "dup", DisplayName: "B", Backend: BackendCodex},
+		{PersonaID: "dup", DisplayName: "A", Backend: agentcli.BackendClaude},
+		{PersonaID: "dup", DisplayName: "B", Backend: agentcli.BackendCodex},
 	}
 	_, err := runner.RunRound(context.Background(), testSpec, 1, personas, nil, "")
 	if err == nil {
@@ -389,12 +391,12 @@ func TestDuplicatePersonaIDRejected(t *testing.T) {
 }
 
 func TestMVPModeFlowsThroughPipeline(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
 	var mu sync.Mutex
 	var capturedPrompts []string
-	InvokeFunc = func(_ context.Context, _ *CLIBackend, prompt string, _ int) (string, error) {
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, prompt string, _ int) (string, error) {
 		mu.Lock()
 		capturedPrompts = append(capturedPrompts, prompt)
 		mu.Unlock()
@@ -435,19 +437,19 @@ func TestMVPModeFlowsThroughPipeline(t *testing.T) {
 }
 
 func TestCacheInvalidatedOnSpecChange(t *testing.T) {
-	old := InvokeFunc
-	defer func() { InvokeFunc = old }()
+	old := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = old }()
 
 	var callCount atomic.Int32
-	InvokeFunc = stubInvoke(map[string]string{
+	agentcli.InvokeFunc = stubInvoke(map[string]string{
 		"You are: **Security Engineer**":                  fixtureReviewJSON("security-engineer", VerdictPass, nil),
 		"You are: **Performance Engineer**":               fixtureReviewJSON("performance-engineer", VerdictPass, nil),
 		"You are: **Testability & Test Design Reviewer**": fixtureReviewJSON("testability-reviewer", VerdictPass, nil),
 		"You are: **Architecture Reviewer**":              fixtureReviewJSON("architecture-reviewer", VerdictPass, nil),
 	})
 	// Wrap to count calls.
-	realInvoke := InvokeFunc
-	InvokeFunc = func(ctx context.Context, b *CLIBackend, p string, timeout int) (string, error) {
+	realInvoke := agentcli.InvokeFunc
+	agentcli.InvokeFunc = func(ctx context.Context, b *agentcli.CLIBackend, p string, timeout int) (string, error) {
 		callCount.Add(1)
 		return realInvoke(ctx, b, p, timeout)
 	}

@@ -3,6 +3,8 @@ package councilflow
 import (
 	"strings"
 	"testing"
+
+	"github.com/runger/attest/internal/agentcli"
 )
 
 func TestFixedPersonasReturnsExpectedSet(t *testing.T) {
@@ -44,7 +46,7 @@ func TestFixedPersonasUseAllBackends(t *testing.T) {
 	for _, p := range personas {
 		backends[p.Backend] = true
 	}
-	for _, want := range []string{BackendClaude, BackendCodex, BackendGemini} {
+	for _, want := range []string{agentcli.BackendClaude, agentcli.BackendCodex, agentcli.BackendGemini} {
 		if !backends[want] {
 			t.Errorf("no persona uses backend %s", want)
 		}
@@ -65,15 +67,14 @@ func TestBackendForReturnsCorrectBackend(t *testing.T) {
 		backend string
 		wantCmd string
 	}{
-		{BackendClaude, "claude"},
-		{BackendCodex, "codex"},
-		{BackendGemini, "gemini"},
+		{agentcli.BackendClaude, "claude"},
+		{agentcli.BackendCodex, "codex"},
+		{agentcli.BackendGemini, "gemini"},
 		{"unknown", "claude"}, // fallback
 		{"", "claude"},        // fallback
 	}
 	for _, tt := range tests {
-		p := &Persona{Backend: tt.backend}
-		got := BackendFor(p)
+		got := agentcli.BackendFor(tt.backend, "")
 		// Command may be an absolute path (e.g., /usr/local/bin/claude) — check suffix.
 		if !strings.HasSuffix(got.Command, tt.wantCmd) {
 			t.Errorf("BackendFor(%q) command = %s, want suffix %s", tt.backend, got.Command, tt.wantCmd)
