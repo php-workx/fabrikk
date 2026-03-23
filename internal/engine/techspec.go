@@ -266,43 +266,12 @@ func containsAny(haystack string, needles []string) bool {
 	return false
 }
 
-type markdownSection struct {
-	heading string
-	body    string
-}
-
 func normalizeTechnicalSpec(data []byte) []byte {
-	text := string(data)
-	lower := strings.ToLower(text)
-	if hasCanonicalTechnicalSpecHeadings(lower) || !hasLegacyTechnicalSpecHeadings(lower) {
+	lower := strings.ToLower(string(data))
+	if hasCanonicalTechnicalSpecHeadings(lower) {
 		return data
 	}
-
-	title, preamble, sections := parseTechnicalSpecMarkdown(text)
-	var builder strings.Builder
-
-	if title == "" {
-		title = "# Technical Specification"
-	}
-	builder.WriteString(title)
-	builder.WriteString("\n\n")
-	if preamble != "" {
-		builder.WriteString(strings.TrimSpace(preamble))
-		builder.WriteString("\n\n")
-	}
-
-	for _, requirement := range technicalSpecRequirements {
-		content := normalizedSectionContent(requirement, text, sections)
-		if content == "" {
-			continue
-		}
-		builder.WriteString(requirement.canonicalHeading)
-		builder.WriteString("\n\n")
-		builder.WriteString(content)
-		builder.WriteString("\n\n")
-	}
-
-	return []byte(strings.TrimSpace(builder.String()) + "\n")
+	return data // pass through unchanged — don't attempt lossy rewrite
 }
 
 func hasCanonicalTechnicalSpecHeadings(text string) bool {
@@ -312,109 +281,4 @@ func hasCanonicalTechnicalSpecHeadings(text string) bool {
 		}
 	}
 	return true
-}
-
-func hasLegacyTechnicalSpecHeadings(text string) bool {
-	for _, requirement := range technicalSpecRequirements {
-		for _, alias := range requirement.aliases[1:] {
-			if strings.Contains(text, alias) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func parseTechnicalSpecMarkdown(text string) (title, preamble string, sections []markdownSection) {
-	lines := strings.Split(text, "\n")
-	var (
-		currentHeading string
-		currentBody    []string
-		preambleLines  []string
-	)
-
-	flush := func() {
-		if currentHeading == "" {
-			return
-		}
-		sections = append(sections, markdownSection{
-			heading: currentHeading,
-			body:    strings.TrimSpace(strings.Join(currentBody, "\n")),
-		})
-		currentBody = nil
-	}
-
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "# ") && title == "":
-			title = line
-		case strings.HasPrefix(line, "## "):
-			flush()
-			currentHeading = strings.TrimSpace(strings.TrimPrefix(line, "## "))
-		case currentHeading == "":
-			preambleLines = append(preambleLines, line)
-		default:
-			currentBody = append(currentBody, line)
-		}
-	}
-	flush()
-
-	return title, strings.TrimSpace(strings.Join(preambleLines, "\n")), sections
-}
-
-func normalizedSectionContent(requirement technicalSpecRequirement, fullText string, sections []markdownSection) string {
-	var matched []markdownSection
-	for _, section := range sections {
-		heading := "## " + strings.ToLower(section.heading)
-		for _, alias := range requirement.aliases {
-			if heading == alias {
-				matched = append(matched, section)
-				break
-			}
-		}
-	}
-
-	if len(matched) > 0 {
-		var builder strings.Builder
-		for idx, section := range matched {
-			if idx > 0 {
-				builder.WriteString("\n\n")
-			}
-			if "## "+strings.ToLower(section.heading) != strings.ToLower(requirement.canonicalHeading) {
-				builder.WriteString("### ")
-				builder.WriteString(stripSectionNumber(section.heading))
-				builder.WriteString("\n\n")
-			}
-			builder.WriteString(strings.TrimSpace(section.body))
-		}
-		return strings.TrimSpace(builder.String())
-	}
-
-	if evidence := matchingLine(fullText, requirement.aliases); evidence != "" {
-		return "- Source evidence: " + evidence
-	}
-
-	return ""
-}
-
-func stripSectionNumber(heading string) string {
-	parts := strings.SplitN(heading, ". ", 2)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return heading
-}
-
-func matchingLine(text string, aliases []string) string {
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		for _, alias := range aliases {
-			if strings.Contains(lower, alias) {
-				return trimmed
-			}
-		}
-	}
-	return ""
 }

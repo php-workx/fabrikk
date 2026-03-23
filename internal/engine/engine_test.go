@@ -413,7 +413,7 @@ Open questions.
 	}
 }
 
-func TestDraftTechnicalSpecNormalizesLegacyHeadings(t *testing.T) {
+func TestDraftTechnicalSpec_NonCanonicalPassThrough(t *testing.T) {
 	dir := t.TempDir()
 	runDir := state.NewRunDir(dir, "run-normalize")
 	if err := runDir.Init(); err != nil {
@@ -426,25 +426,25 @@ func TestDraftTechnicalSpecNormalizesLegacyHeadings(t *testing.T) {
 Status: Draft (post-review revision)
 
 ## 1. Implementation decisions
-Context
+Context paragraph with important details.
 
 ## 2. System architecture
-Architecture
+Architecture paragraph with important details.
 
 ## 3. Canonical artifacts
-Artifacts
+Artifacts paragraph with important details.
 
 ## 5. CLI surface
-Interfaces
+Interfaces paragraph with important details.
 
 ## 11. Council checkpoints and verification pipeline
-Verification
+Verification paragraph with important details.
 
 ## 17. Acceptance scenarios
 - **AT-TS-001**: Deterministic review.
 
 ## 19. Open v1 decisions
-Open questions.
+Open questions paragraph with important details.
 
 - every implementation task must trace to requirement IDs from this spec
 `
@@ -462,22 +462,23 @@ Open questions.
 		t.Fatalf("ReadTechnicalSpec: %v", err)
 	}
 	got := string(data)
+
+	// Non-canonical doc must pass through with original content preserved.
 	for _, heading := range []string{
-		"## 1. Technical context",
-		"## 2. Architecture",
-		"## 3. Canonical artifacts and schemas",
-		"## 4. Interfaces",
-		"## 5. Verification",
-		"## 6. Requirement traceability",
-		"## 7. Open questions and risks",
-		"## 8. Approval",
+		"## 1. Implementation decisions",
+		"## 2. System architecture",
+		"## 3. Canonical artifacts",
+		"## 5. CLI surface",
+		"## 11. Council checkpoints and verification pipeline",
+		"## 19. Open v1 decisions",
 	} {
 		if !strings.Contains(got, heading) {
-			t.Fatalf("normalized spec missing heading %q:\n%s", heading, got)
+			t.Fatalf("original heading %q was lost — content must be preserved:\n%s", heading, got)
 		}
 	}
-	if strings.Contains(got, "## 1. Implementation decisions") {
-		t.Fatalf("normalized spec kept legacy heading:\n%s", got)
+	// Content must not be truncated.
+	if len(data) < len([]byte(spec))-10 {
+		t.Fatalf("content truncated: output %d bytes, input %d bytes", len(data), len([]byte(spec)))
 	}
 }
 
