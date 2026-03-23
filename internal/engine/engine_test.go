@@ -556,6 +556,117 @@ too short to preserve the content.
 	}
 }
 
+func TestDraftTechnicalSpec_AgentFallbackOnGarbledOutput(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-agent-garble")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "non-canonical.md")
+	spec := `# My Custom Spec
+
+## Overview
+This document has no canonical headings at all.
+
+## Implementation Notes
+Some important content that must survive.
+`
+	if err := os.WriteFile(sourcePath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Stub agent to return text without canonical headings (long enough to pass length check).
+	original := agentcli.InvokeFunc
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		return "# Garbled Output\n\nThis text has no canonical headings.\n\nIt is long enough to pass the length check but has zero canonical section headings.\n\nMore padding text to exceed 50% of input length.", nil
+	}
+	t.Cleanup(func() { agentcli.InvokeFunc = original })
+
+	eng := engine.New(runDir, dir)
+	if err := eng.DraftTechnicalSpec(context.Background(), sourcePath, false); err != nil {
+		t.Fatalf("DraftTechnicalSpec: %v", err)
+	}
+
+	data, err := runDir.ReadTechnicalSpec()
+	if err != nil {
+		t.Fatalf("ReadTechnicalSpec: %v", err)
+	}
+	// Original content must be preserved when agent output is garbled.
+	if !strings.Contains(string(data), "## Overview") {
+		t.Fatalf("original content lost after garbled agent output:\n%s", string(data))
+	}
+}
+
+func TestDraftTechnicalSpec_AgentSuccess(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-agent-ok")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "non-canonical.md")
+	spec := `# My Custom Spec
+
+## Overview
+Some content.
+`
+	if err := os.WriteFile(sourcePath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Stub agent to return well-formed normalized output with canonical headings.
+	normalized := `# Technical Specification
+
+## 1. Technical context
+
+Some content.
+
+## 2. Architecture
+
+Derived from overview.
+
+## 3. Canonical artifacts and schemas
+
+No artifacts specified.
+
+## 4. Interfaces
+
+No interfaces specified.
+
+## 5. Verification
+
+No verification specified.
+
+## 7. Open questions and risks
+
+None identified.
+`
+	original := agentcli.InvokeFunc
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		return normalized, nil
+	}
+	t.Cleanup(func() { agentcli.InvokeFunc = original })
+
+	eng := engine.New(runDir, dir)
+	if err := eng.DraftTechnicalSpec(context.Background(), sourcePath, false); err != nil {
+		t.Fatalf("DraftTechnicalSpec: %v", err)
+	}
+
+	data, err := runDir.ReadTechnicalSpec()
+	if err != nil {
+		t.Fatalf("ReadTechnicalSpec: %v", err)
+	}
+	got := string(data)
+	// Agent's normalized output should be used.
+	if !strings.Contains(got, "## 1. Technical context") {
+		t.Fatalf("expected canonical heading in output:\n%s", got)
+	}
+	if !strings.Contains(got, "Some content.") {
+		t.Fatalf("expected original content preserved in normalized output:\n%s", got)
+	}
+}
+
 func TestApproveTechnicalSpecRejectsArtifactChangedAfterReview(t *testing.T) {
 	dir := t.TempDir()
 	runDir := state.NewRunDir(dir, "run-tech-approve")
