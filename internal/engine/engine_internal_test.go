@@ -9,7 +9,7 @@ import (
 func TestDeriveTags(t *testing.T) {
 	task := &state.Task{
 		Scope: state.TaskScope{
-			OwnedPaths: []string{"internal/compiler", "cmd/attest"},
+			OwnedPaths: []string{"internal/compiler", "cmd/fabrikk"},
 		},
 		RequirementIDs: []string{"AT-FR-001", "AT-TS-002"},
 		TaskType:       "implementation",
@@ -32,8 +32,8 @@ func TestDeriveTags(t *testing.T) {
 	if !has("internal") {
 		t.Error("missing tag 'internal' from OwnedPaths")
 	}
-	if !has("attest") {
-		t.Error("missing tag 'attest' from OwnedPaths")
+	if !has("fabrikk") {
+		t.Error("missing tag 'fabrikk' from OwnedPaths")
 	}
 	if !has("cmd") {
 		t.Error("missing tag 'cmd' from OwnedPaths")

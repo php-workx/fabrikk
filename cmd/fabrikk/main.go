@@ -19,6 +19,13 @@ import (
 	"github.com/php-workx/fabrikk/internal/state"
 )
 
+// Build-time variables set via ldflags by goreleaser / justfile.
+var (
+	Version   = "dev"
+	GitCommit = "unknown"
+	BuildDate = "unknown"
+)
+
 const (
 	commandReview  = "review"
 	commandApprove = "approve"
@@ -39,6 +46,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	switch args[0] {
 	case "help", "--help", "-h":
 		usage(stderr)
+		return 0
+	case "version", "--version", "-v":
+		_, _ = fmt.Fprintf(stderr, "fabrikk %s (%s, %s)\n", Version, GitCommit, BuildDate)
 		return 0
 	case "prepare":
 		err = cmdPrepare(ctx, args[1:])

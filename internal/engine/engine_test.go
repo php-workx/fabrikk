@@ -91,7 +91,7 @@ func writeApprovedExecutionPlanForArtifact(t *testing.T, runDir *state.RunDir, a
 			DependsOn:          trimTaskPrefix(task.DependsOn),
 			FilesLikelyTouched: append([]string(nil), task.Scope.OwnedPaths...),
 			OwnedPaths:         append([]string(nil), task.Scope.OwnedPaths...),
-			AcceptanceChecks:   []string{"just check", "attest verify <run-id> <task-id>"},
+			AcceptanceChecks:   []string{"just check", "fabrikk verify <run-id> <task-id>"},
 			Risk:               task.RiskLevel,
 			Size:               "small",
 		})
