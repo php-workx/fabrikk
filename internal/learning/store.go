@@ -21,6 +21,12 @@ import (
 // autoExpiryThreshold is the duration after which a learning with no query match is expired.
 const autoExpiryThreshold = 90 * 24 * time.Hour
 
+// indexFile is the JSONL filename used for the learning store index.
+const indexFile = "index.jsonl"
+
+// corruptLinesFmt is the error format for corrupt JSONL lines.
+const corruptLinesFmt = "%w: %d corrupt lines — run 'fabrikk learn repair' to fix"
+
 // ErrCorruptLearningStore indicates the JSONL store has corrupt lines.
 var ErrCorruptLearningStore = errors.New("corrupt learning store")
 
@@ -104,7 +110,7 @@ func (s *Store) Add(l *Learning) error {
 			return err
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
+			return fmt.Errorf(corruptLinesFmt,
 				ErrCorruptLearningStore, skipped)
 		}
 		learnings = append(learnings, *l)
@@ -127,7 +133,7 @@ func (s *Store) RecordOutcome(ids []string, passed bool) error {
 			return err
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
+			return fmt.Errorf(corruptLinesFmt,
 				ErrCorruptLearningStore, skipped)
 		}
 		idSet := make(map[string]bool, len(ids))
@@ -445,7 +451,7 @@ func readJSONLWithCount(dir string) ([]Learning, int, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create learnings dir: %w", err)
 	}
-	path := filepath.Join(dir, "index.jsonl")
+	path := filepath.Join(dir, indexFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -513,7 +519,7 @@ func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 			return readErr
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
+			return fmt.Errorf(corruptLinesFmt,
 				ErrCorruptLearningStore, skipped)
 		}
 
@@ -556,7 +562,7 @@ func (s *Store) Repair() (kept, dropped int, retErr error) {
 		}
 
 		// Back up corrupt file.
-		src := filepath.Join(s.SharedDir, "index.jsonl")
+		src := filepath.Join(s.SharedDir, indexFile)
 		backup := src + ".corrupt." + s.now().Format("20060102T150405")
 		data, err := os.ReadFile(src)
 		if err == nil {
@@ -976,7 +982,7 @@ func (s *Store) writeAll(learnings []Learning) error {
 	// Write unredacted to LocalDir (if set).
 	if s.LocalDir != "" {
 		if mkErr := os.MkdirAll(s.LocalDir, 0o755); mkErr == nil {
-			localPath := filepath.Join(s.LocalDir, "index.jsonl")
+			localPath := filepath.Join(s.LocalDir, indexFile)
 			if wErr := atomicWrite(localPath, data); wErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to write local learning store: %v\n", wErr)
 			}
@@ -997,7 +1003,7 @@ func (s *Store) writeAll(learnings []Learning) error {
 		}
 	}
 
-	sharedPath := filepath.Join(s.SharedDir, "index.jsonl")
+	sharedPath := filepath.Join(s.SharedDir, indexFile)
 	return atomicWrite(sharedPath, data)
 }
 

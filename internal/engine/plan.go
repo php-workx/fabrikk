@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	sha256Prefix      = "sha256:"
-	graphFindingFmtID = "epr-graph-%03d"
+	sha256Prefix       = "sha256:"
+	graphFindingFmtID  = "epr-graph-%03d"
+	waveWarningIDFmt   = "epr-w-%03d"
+	readTechSpecErrFmt = "read technical spec: %w"
 )
 
 // DraftExecutionPlan derives a run-scoped execution plan from an approved technical spec.
@@ -386,14 +388,14 @@ func reviewSlice(slice *state.ExecutionSlice, review *state.ExecutionPlanReview)
 
 	if len(slice.RequirementIDs) > 4 {
 		review.Warnings = append(review.Warnings, state.ReviewWarning{
-			WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 			SliceID:   slice.SliceID,
 			Summary:   "slice covers more than four requirements; consider splitting if execution drifts",
 		})
 	}
 	if len(slice.FilesLikelyTouched) == 0 {
 		review.Warnings = append(review.Warnings, state.ReviewWarning{
-			WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 			SliceID:   slice.SliceID,
 			Summary:   "slice is missing likely file touch points",
 		})
@@ -450,7 +452,7 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 			}
 			sort.Strings(sliceIDs)
 			review.Warnings = append(review.Warnings, state.ReviewWarning{
-				WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
+				WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 				Summary:   fmt.Sprintf("requirement %s is covered by %d slices (%s); verify this is intentional", reqID, len(sliceIDs), strings.Join(sliceIDs, ", ")),
 			})
 		}

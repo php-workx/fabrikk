@@ -132,7 +132,7 @@ func (s *Store) ReadTask(taskID string) (*state.Task, error) {
 	path := filepath.Join(s.Dir, resolvedID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTicketNotFound, err)
+		return nil, fmt.Errorf(errWrapFmt, ErrTicketNotFound, err)
 	}
 	task, err := UnmarshalTicket(data)
 	if err != nil {
@@ -181,7 +181,7 @@ func (s *Store) UpdateStatus(taskID string, status state.TaskStatus, reason stri
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		task, parseErr := UnmarshalTicket(data)
 		if parseErr != nil {
@@ -210,7 +210,7 @@ func (s *Store) AddNote(id, text string) error {
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 
 		content := string(data)
@@ -243,7 +243,7 @@ func (s *Store) AddDep(id, depID string) error {
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		task, parseErr := UnmarshalTicket(data)
 		if parseErr != nil {
@@ -282,7 +282,7 @@ func (s *Store) RemoveDep(id, depID string) error {
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		task, parseErr := UnmarshalTicket(data)
 		if parseErr != nil {

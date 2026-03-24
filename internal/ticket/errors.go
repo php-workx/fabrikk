@@ -2,6 +2,9 @@ package ticket
 
 import "errors"
 
+// errWrapFmt is the format string for wrapping a sentinel error with a detail value.
+const errWrapFmt = "%w: %v"
+
 // Sentinel errors for the ticket store.
 var (
 	ErrTicketNotFound = errors.New("ticket not found")

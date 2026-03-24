@@ -45,7 +45,7 @@ func (s *Store) ClaimTask(taskID, ownerID, backend string, lease time.Duration) 
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {
@@ -108,7 +108,7 @@ func (s *Store) ReleaseClaim(taskID, ownerID string, newStatus state.TaskStatus,
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {
@@ -153,7 +153,7 @@ func (s *Store) RenewClaim(taskID, ownerID string, lease time.Duration) error {
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {

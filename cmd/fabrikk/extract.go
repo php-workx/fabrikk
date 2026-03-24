@@ -10,6 +10,12 @@ import (
 	"github.com/php-workx/fabrikk/internal/state"
 )
 
+const (
+	tagPrefixRejected = "rejected:"
+	tagPrefixFinding  = "finding:"
+	tagPrefixVerifier = "verifier:"
+)
+
 // existingFindingTags loads all finding/rejection tags from the store for batch dedup.
 func existingFindingTags(store *learning.Store, prefixes ...string) map[string]bool {
 	allLearnings, err := store.Query(learning.QueryOpts{})
@@ -68,7 +74,7 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 	lastRound := &result.Rounds[len(result.Rounds)-1]
 	accepted := acceptedFindingIDs(result)
 	rejected := rejectedFindingIDs(result)
-	existing := existingFindingTags(store, "finding:", "rejected:")
+	existing := existingFindingTags(store, tagPrefixFinding, tagPrefixRejected)
 
 	// Extract from findings (skip rejected — those are handled by extractRejections).
 	for i := range lastRound.Reviews {
@@ -77,7 +83,7 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 				break
 			}
 			f := &lastRound.Reviews[i].Findings[j]
-			if existing["finding:"+f.FindingID] || rejected[f.FindingID] {
+			if existing[tagPrefixFinding+f.FindingID] || rejected[f.FindingID] {
 				continue
 			}
 			l := learning.FromFinding(learning.ExtractedFinding{
@@ -88,7 +94,7 @@ func extractLearningsFromCouncil(wd string, result *councilflow.CouncilResult, r
 			if err := store.Add(l); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to add learning for finding %s: %v\n", f.FindingID, err)
 			} else {
-				existing["finding:"+f.FindingID] = true
+				existing[tagPrefixFinding+f.FindingID] = true
 				extracted++
 				fmt.Printf("  Extracted learning: %s (%s)\n", l.ID, l.Summary)
 			}
@@ -115,7 +121,7 @@ func extractRejections(store *learning.Store, result *councilflow.CouncilResult,
 			break
 		}
 		rej := &lastConsol.RejectionLog.Rejections[i]
-		if existing["rejected:"+rej.FindingID] {
+		if existing[tagPrefixRejected+rej.FindingID] {
 			continue
 		}
 		l := learning.FromRejection(learning.ExtractedRejection{
@@ -127,7 +133,7 @@ func extractRejections(store *learning.Store, result *councilflow.CouncilResult,
 			if err := store.Add(l); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to add rejection learning for %s: %v\n", rej.FindingID, err)
 			} else {
-				existing["rejected:"+rej.FindingID] = true
+				existing[tagPrefixRejected+rej.FindingID] = true
 				extracted++
 				fmt.Printf("  Extracted rejection learning: %s\n", l.ID)
 			}
@@ -146,7 +152,7 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 	const maxExtract = 5
 	extracted := 0
 
-	existing := existingFindingTags(store, "verifier:")
+	existing := existingFindingTags(store, tagPrefixVerifier)
 
 	for i := range result.BlockingFindings {
 		if extracted >= maxExtract {
@@ -158,7 +164,7 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 		if dedup == "" {
 			dedup = f.FindingID
 		}
-		if existing["verifier:"+dedup] {
+		if existing[tagPrefixVerifier+dedup] {
 			continue
 		}
 		var sourcePaths, extraTags []string
@@ -175,7 +181,7 @@ func extractLearningsFromVerifier(wd string, result *state.VerifierResult, task 
 		if err := store.Add(l); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to add verifier learning for %s: %v\n", f.FindingID, err)
 		} else {
-			existing["verifier:"+dedup] = true
+			existing[tagPrefixVerifier+dedup] = true
 			extracted++
 			fmt.Printf("  Extracted verifier learning: %s (%s)\n", l.ID, l.Summary)
 		}

@@ -2,6 +2,9 @@ package councilflow
 
 import "github.com/php-workx/fabrikk/internal/agentcli"
 
+// focusSectionCanonicalArtifacts is the shared focus section label for canonical artifacts.
+const focusSectionCanonicalArtifacts = "Canonical artifacts"
+
 // FixedPersonas returns the persona set that runs in every review regardless of spec content.
 // Each persona has a single focused mandate to avoid attention-splitting.
 func FixedPersonas() []Persona {
@@ -17,7 +20,7 @@ func FixedPersonas() []Persona {
 			FocusSections: []string{
 				"Architecture",
 				"Interfaces",
-				"Canonical artifacts",
+				focusSectionCanonicalArtifacts,
 			},
 			Backend:   agentcli.BackendCodex,
 			ModelPref: "gpt-5.4",
@@ -47,7 +50,7 @@ func FixedPersonas() []Persona {
 			Instructions: testabilityInstructions,
 			FocusSections: []string{
 				"Verification",
-				"Canonical artifacts",
+				focusSectionCanonicalArtifacts,
 			},
 			Backend:   agentcli.BackendCodex,
 			ModelPref: "gpt-5.4",
@@ -62,7 +65,7 @@ func FixedPersonas() []Persona {
 			Instructions: architectureInstructions,
 			FocusSections: []string{
 				"Architecture",
-				"Canonical artifacts",
+				focusSectionCanonicalArtifacts,
 				"Interfaces",
 			},
 			Backend:   agentcli.BackendClaude,

@@ -30,6 +30,10 @@ var (
 const (
 	commandReview  = "review"
 	commandApprove = "approve"
+
+	fabrikDir            = ".fabrikk"
+	flagFrom             = "--from"
+	completionReportFile = "completion-report.json"
 )
 
 func main() {
@@ -110,7 +114,7 @@ func newEngine(wd, runID string) *engine.Engine {
 }
 
 func newLearningStore(wd string) *learning.Store {
-	sharedDir := filepath.Join(wd, ".fabrikk", "learnings")
+	sharedDir := filepath.Join(wd, fabrikDir, "learnings")
 	localDir := resolveLocalLearningDir(wd)
 	if localDir != "" {
 		return learning.NewStoreWithLocalDir(sharedDir, localDir)
@@ -239,10 +243,10 @@ func parseTechSpecFlags(args []string) techSpecFlags {
 	if len(args) > 0 {
 		f.action = args[0]
 	}
-	valuedFlags := map[string]bool{"--from": true, "--round": true, "--mode": true}
+	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true}
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--from" {
+		if arg == flagFrom {
 			i++
 			if i < len(args) {
 				f.fromPath = args[i]
@@ -384,7 +388,7 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, noNorma
 // findRunBySpecHash scans existing runs for one whose source spec matches the given hash.
 // Returns the most recent matching run, or nil if none found.
 func findRunBySpecHash(wd, specHash string) (runDir *state.RunDir, runID string) {
-	runsDir := filepath.Join(wd, ".fabrikk", "runs")
+	runsDir := filepath.Join(wd, fabrikDir, "runs")
 	entries, err := os.ReadDir(runsDir)
 	if err != nil {
 		return nil, ""
@@ -635,7 +639,7 @@ func cmdStatus(_ context.Context, args []string) error {
 
 	if len(args) == 0 {
 		// List all runs.
-		runsDir := filepath.Join(wd, ".fabrikk", "runs")
+		runsDir := filepath.Join(wd, fabrikDir, "runs")
 		entries, err := os.ReadDir(runsDir)
 		if err != nil {
 			return fmt.Errorf("no runs found (is this a fabrikk project?)")
@@ -689,7 +693,7 @@ func cmdReport(args []string) error {
 	taskID := args[1]
 	var fromPath string
 	for i := 2; i < len(args); i++ {
-		if args[i] == "--from" && i+1 < len(args) {
+		if args[i] == flagFrom && i+1 < len(args) {
 			fromPath = args[i+1]
 			i++
 		}
@@ -734,7 +738,7 @@ func cmdReport(args []string) error {
 		report.AttemptID = "manual-report"
 	}
 
-	reportPath := filepath.Join(runDir.ReportDir(taskID, report.AttemptID), "completion-report.json")
+	reportPath := filepath.Join(runDir.ReportDir(taskID, report.AttemptID), completionReportFile)
 	if err := state.WriteJSON(reportPath, &report); err != nil {
 		return fmt.Errorf("write completion report: %w", err)
 	}
@@ -851,7 +855,7 @@ func cmdRetry(args []string) error {
 
 func readLatestCompletionReport(runDir *state.RunDir, taskID string, report *state.CompletionReport) bool {
 	// Try task-level path first (backward compat).
-	taskPath := filepath.Join(runDir.ReportDir(taskID), "completion-report.json")
+	taskPath := filepath.Join(runDir.ReportDir(taskID), completionReportFile)
 	if state.ReadJSON(taskPath, report) == nil {
 		return true
 	}
@@ -864,7 +868,7 @@ func readLatestCompletionReport(runDir *state.RunDir, taskID string, report *sta
 		if !entries[i].IsDir() {
 			continue
 		}
-		attemptPath := filepath.Join(runDir.ReportDir(taskID, entries[i].Name()), "completion-report.json")
+		attemptPath := filepath.Join(runDir.ReportDir(taskID, entries[i].Name()), completionReportFile)
 		if state.ReadJSON(attemptPath, report) == nil {
 			return true
 		}
