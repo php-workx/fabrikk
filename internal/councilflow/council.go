@@ -16,16 +16,17 @@ import (
 
 // CouncilConfig controls the council review pipeline.
 type CouncilConfig struct {
-	Rounds          int        // number of review rounds (default: 2)
-	Mode            ReviewMode // review tone and strictness (default: standard)
-	SpecPath        string     // absolute path to spec file (reviewers read from file instead of inline)
-	CodebaseContext string     // optional codebase context for reviewers
-	DryRun          bool       // generate prompts without executing
-	Force           bool       // re-run all reviewers even if cached results exist
-	SkipJudge       bool       // skip judge consolidation (review-only mode)
-	SkipDynPersonas bool       // skip dynamic persona generation (fixed personas only)
-	SkipApproval    bool       // skip interactive persona approval
-	StaggerDelay    int        // seconds between launching parallel reviewers/judges (default: 15)
+	Rounds          int               // number of review rounds (default: 2)
+	Mode            ReviewMode        // review tone and strictness (default: standard)
+	SpecPath        string            // absolute path to spec file (reviewers read from file instead of inline)
+	CodebaseContext string            // optional codebase context for reviewers
+	DryRun          bool              // generate prompts without executing
+	Force           bool              // re-run all reviewers even if cached results exist
+	SkipJudge       bool              // skip judge consolidation (review-only mode)
+	SkipDynPersonas bool              // skip dynamic persona generation (fixed personas only)
+	SkipApproval    bool              // skip interactive persona approval
+	StaggerDelay    int               // seconds between launching parallel reviewers/judges (default: 15)
+	JudgeInvokeFn   agentcli.InvokeFn // daemon-bound invoke for consolidated judge queries; nil = default
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -186,6 +187,7 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	judgeCfg := DefaultJudgeConfig()
 	judgeCfg.Mode = cfg.Mode
 	judgeCfg.StaggerSec = cfg.StaggerDelay
+	judgeCfg.ConsolidateInvokeFn = cfg.JudgeInvokeFn
 	consolidation, judgeErr := RunJudge(ctx, spec, round, roundResult.Reviews, roundDir, judgeCfg)
 	if judgeErr != nil {
 		return "", fmt.Errorf("round %d judge: %w", round, judgeErr)

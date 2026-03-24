@@ -27,10 +27,20 @@ type ConsolidationResult struct {
 
 // JudgeConfig controls the judge/editor behavior.
 type JudgeConfig struct {
-	Backend    agentcli.CLIBackend
-	TimeoutSec int
-	Mode       ReviewMode
-	StaggerSec int
+	Backend             agentcli.CLIBackend
+	TimeoutSec          int
+	Mode                ReviewMode
+	StaggerSec          int
+	ConsolidateInvokeFn agentcli.InvokeFn // daemon-bound invoke for consolidated queries; nil = use InvokeFunc
+}
+
+// consolidateInvoke returns the configured invoke function for consolidated judge queries,
+// falling back to the package-level InvokeFunc.
+func consolidateInvoke(cfg *JudgeConfig) agentcli.InvokeFn {
+	if cfg.ConsolidateInvokeFn != nil {
+		return cfg.ConsolidateInvokeFn
+	}
+	return agentcli.InvokeFunc
 }
 
 // DefaultJudgeConfig returns a config targeting Claude Opus with extended thinking.
@@ -209,7 +219,7 @@ func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, output
 	_ = os.WriteFile(promptPath, []byte(b.String()), 0o644)
 
 	fmt.Printf("  [judge] resolving %d conflicts ...\n", len(edits))
-	output, err := agentcli.InvokeFunc(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
+	output, err := consolidateInvoke(cfg)(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}

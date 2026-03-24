@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/php-workx/fabrikk/internal/agentcli"
 	"github.com/php-workx/fabrikk/internal/councilflow"
 	"github.com/php-workx/fabrikk/internal/engine"
 	"github.com/php-workx/fabrikk/internal/learning"
@@ -463,12 +464,17 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 		}
 	}
 
+	// Start daemon for judge context accumulation.
+	daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
+	defer daemonCleanup()
+
 	cfg := councilflow.DefaultConfig()
 	cfg.Rounds = rounds
 	cfg.Mode = mode
 	cfg.DryRun = dryRun
 	cfg.Force = force
 	cfg.SkipApproval = skipApproval
+	cfg.JudgeInvokeFn = daemon
 
 	// Inject prevention checks from high-effectiveness learnings.
 	learnStore := newLearningStore(eng.WorkDir)
@@ -505,6 +511,26 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	}
 
 	return nil
+}
+
+// startJudgeDaemon starts a persistent Claude daemon for judge context accumulation.
+// Returns the daemon's InvokeFn (nil if daemon failed to start) and a cleanup function.
+func startJudgeDaemon(ctx context.Context, eng *engine.Engine) (invokeFn agentcli.InvokeFn, cleanup func()) {
+	noop := func() {}
+	runID := filepath.Base(eng.RunDir.Root)
+	if runID == "" {
+		return nil, noop
+	}
+	daemon := agentcli.NewDaemon(agentcli.DaemonConfig{
+		Backend:   agentcli.KnownBackends[agentcli.BackendClaude],
+		SocketDir: os.TempDir(),
+		RunID:     runID,
+	})
+	if err := daemon.Start(ctx); err != nil {
+		fmt.Printf("  daemon start failed (falling back to one-shot): %v\n", err)
+		return nil, noop
+	}
+	return daemon.QueryFunc(), func() { _ = daemon.Stop() }
 }
 
 func cmdPlan(ctx context.Context, args []string) error {
