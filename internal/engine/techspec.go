@@ -104,6 +104,7 @@ func (e *Engine) DraftTechnicalSpec(ctx context.Context, sourcePath string, noNo
 		fmt.Println("Document doesn't match canonical headings — attempting agent normalization ...")
 		if normalized, normErr := normalizeWithAgent(ctx, data); normErr == nil {
 			data = normalized
+			fmt.Println("Agent normalization applied successfully.")
 		} else {
 			fmt.Printf("Agent normalization unavailable (%v) — using original document\n", normErr)
 		}

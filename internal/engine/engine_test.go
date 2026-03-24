@@ -1901,3 +1901,68 @@ func TestReviewExecutionPlanPassesWithFullCoverage(t *testing.T) {
 		t.Fatalf("review should pass with full coverage, got: %s (findings: %+v)", review.Status, review.BlockingFindings)
 	}
 }
+
+func TestDraftTechnicalSpec_CanonicalPassThrough(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-canonical")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "canonical-spec.md")
+	spec := `# Technical Specification
+
+## 1. Technical context
+Context content.
+
+## 2. Architecture
+Architecture content.
+
+## 3. Canonical artifacts and schemas
+Artifacts content.
+
+## 4. Interfaces
+Interfaces content.
+
+## 5. Verification
+Verification content.
+
+## 6. Requirement traceability
+Traceability content.
+
+## 7. Open questions and risks
+Risks content.
+
+## 8. Approval
+Status: Draft
+`
+	if err := os.WriteFile(sourcePath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Track whether InvokeFunc is called — it should NOT be for canonical docs.
+	invokeCalled := false
+	original := agentcli.InvokeFunc
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		invokeCalled = true
+		return "", fmt.Errorf("should not be called")
+	}
+	t.Cleanup(func() { agentcli.InvokeFunc = original })
+
+	eng := engine.New(runDir, dir)
+	if err := eng.DraftTechnicalSpec(context.Background(), sourcePath, false); err != nil {
+		t.Fatalf("DraftTechnicalSpec: %v", err)
+	}
+
+	if invokeCalled {
+		t.Fatal("agent InvokeFunc was called for canonical doc — should have been skipped")
+	}
+
+	data, err := runDir.ReadTechnicalSpec()
+	if err != nil {
+		t.Fatalf("ReadTechnicalSpec: %v", err)
+	}
+	if string(data) != spec {
+		t.Fatalf("canonical doc was modified:\n  got:  %d bytes\n  want: %d bytes", len(data), len(spec))
+	}
+}

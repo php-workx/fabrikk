@@ -265,7 +265,7 @@ func parseTechSpecFlags(args []string) techSpecFlags {
 
 func cmdTechSpec(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> [run-id] [--from <path>] [--council] [--force] [--round N]")
+		return fmt.Errorf("usage: attest tech-spec <draft|review|approve> [run-id] [--from <path>] [--no-normalize] [--council] [--force] [--round N]")
 	}
 
 	f := parseTechSpecFlags(args)
@@ -277,7 +277,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 
 	// Shortcut: "review --from <path>" without a run-id creates a temporary run.
 	if f.action == commandReview && f.runID == "" && f.fromPath != "" {
-		return cmdTechSpecReviewFromFile(ctx, wd, f.fromPath, f.remaining)
+		return cmdTechSpecReviewFromFile(ctx, wd, f.fromPath, f.noNormalize, f.remaining)
 	}
 
 	if f.runID == "" {
@@ -317,7 +317,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 
 // cmdTechSpecReviewFromFile creates or reuses a run for reviewing a spec file.
 // If a previous run exists with the same spec hash, it is reused (reviews/personas cached).
-func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags []string) error {
+func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, noNormalize bool, flags []string) error {
 	// Hash the spec to find an existing run.
 	specData, err := os.ReadFile(fromPath)
 	if err != nil {
@@ -330,7 +330,7 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags [
 		fmt.Printf("Reusing run: %s (spec unchanged)\n", runID)
 		eng := engine.New(runDir, wd)
 		// Re-draft to ensure in-run spec matches source (council may have rewritten it).
-		if err := eng.DraftTechnicalSpec(ctx, fromPath, false); err != nil {
+		if err := eng.DraftTechnicalSpec(ctx, fromPath, noNormalize); err != nil {
 			return fmt.Errorf("re-draft: %w", err)
 		}
 		return cmdTechSpecReview(ctx, eng, flags, true)
@@ -363,7 +363,7 @@ func cmdTechSpecReviewFromFile(ctx context.Context, wd, fromPath string, flags [
 	eng := engine.New(runDir, wd)
 	fmt.Printf("Run created: %s\n", runID)
 
-	if err := eng.DraftTechnicalSpec(ctx, fromPath, false); err != nil {
+	if err := eng.DraftTechnicalSpec(ctx, fromPath, noNormalize); err != nil {
 		return fmt.Errorf("draft: %w", err)
 	}
 

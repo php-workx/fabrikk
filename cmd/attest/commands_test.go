@@ -1161,3 +1161,43 @@ func TestCmdLearnGC(t *testing.T) {
 	})
 	assertContains(t, output, "Garbage collected: 0")
 }
+
+func TestCmdTechSpecDraftNoNormalize(t *testing.T) {
+	baseDir := t.TempDir()
+	runID := "run-no-norm-cli"
+
+	runDir := state.NewRunDir(baseDir, runID)
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := runDir.WriteArtifact(&state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         runID,
+	}); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	specPath := filepath.Join(baseDir, "non-canonical.md")
+	spec := "# My Custom Spec\n\n## Overview\nImportant content.\n"
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	withWorkingDir(t, baseDir)
+
+	output := captureStdout(t, func() {
+		if err := cmdTechSpec(context.Background(), []string{"draft", runID, "--from", specPath, "--no-normalize"}); err != nil {
+			t.Fatalf("cmdTechSpec draft --no-normalize: %v", err)
+		}
+	})
+	assertContains(t, output, "Technical spec recorded")
+
+	// Verify content passed through unchanged.
+	data, err := runDir.ReadTechnicalSpec()
+	if err != nil {
+		t.Fatalf("ReadTechnicalSpec: %v", err)
+	}
+	if string(data) != spec {
+		t.Fatalf("--no-normalize did not preserve content:\n  got:  %q\n  want: %q", string(data), spec)
+	}
+}
