@@ -1,0 +1,60 @@
+version: 2
+
+project_name: fabrikk
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: fabrikk
+    main: ./cmd/fabrikk
+    binary: fabrikk
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.GitCommit={{.ShortCommit}}
+      - -X main.BuildDate={{.Date}}
+
+archives:
+  - id: fabrikk
+    builds:
+      - fabrikk
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+brews:
+  - name: fabrikk
+    homepage: "https://github.com/php-workx/fabrikk"
+    description: "Spec-driven autonomous run system for coding agents"
+    license: "MIT"
+    repository:
+      owner: php-workx
+      name: homebrew-tap
+    install: |
+      bin.install "fabrikk"
+      bin.install_symlink "fabrikk" => "fab"
+    test: |
+      system "#{bin}/fabrikk", "--version"

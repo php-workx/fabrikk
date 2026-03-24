@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/runger/attest/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/compiler"
 )
 
 func TestIngestSpec(t *testing.T) {

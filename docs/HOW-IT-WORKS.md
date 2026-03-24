@@ -1,14 +1,14 @@
-# How attest Works
+# How fabrikk Works
 
-This document walks through the attest pipeline in detail, explaining each stage, the mechanisms that enforce quality, and how the system self-corrects.
+This document walks through the fabrikk pipeline in detail, explaining each stage, the mechanisms that enforce quality, and how the system self-corrects.
 
-For the full specification, see [attest-functional-spec.md](specs/attest-functional-spec.md).
+For the full specification, see [fabrikk-functional-spec.md](specs/fabrikk-functional-spec.md).
 
 ---
 
 ## The Core Idea
 
-attest combines two principles:
+fabrikk combines two principles:
 
 1. **Rigid skeleton.** The pipeline stages are coded in Go. No agent can skip, reorder, or invent stages.
 2. **Convergence-driven loops.** Within each stage, loops run until exit criteria are met — not for a fixed number of iterations.
@@ -407,7 +407,7 @@ On restart, the orchestrator reads the last wave checkpoint and continues from t
 ## The Principles
 
 ### Verify then trust
-Agent completion claims are never trusted. Every result is validated mechanically before acceptance. This is the single most important principle in attest.
+Agent completion claims are never trusted. Every result is validated mechanically before acceptance. This is the single most important principle in fabrikk.
 
 ### The spec is the anchor
 Every review iteration checks against the same approved spec. Not the agent's self-assessment. Not whatever the agent drifted toward. The original, approved spec.

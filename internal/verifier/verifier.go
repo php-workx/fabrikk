@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // Verify runs the full deterministic verification pipeline for a task (spec section 11.3).

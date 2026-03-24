@@ -16,7 +16,7 @@ func WriteAtomic(path string, data []byte) error {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".attest-tmp-*")
+	tmp, err := os.CreateTemp(dir, ".fabrikk-tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}

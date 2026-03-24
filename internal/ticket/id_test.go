@@ -31,7 +31,7 @@ func TestIdPrefixSingleSegment(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"attest", "att"},
+		{"fabrikk", "fab"},
 		{"hello", "hel"},
 		{"go", "go"},
 		{"x", "x"},

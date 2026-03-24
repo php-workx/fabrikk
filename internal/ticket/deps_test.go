@@ -3,7 +3,7 @@ package ticket
 import (
 	"testing"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func TestReadyNoDeps(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // autoExpiryThreshold is the duration after which a learning with no query match is expired.
@@ -26,8 +26,8 @@ var ErrCorruptLearningStore = errors.New("corrupt learning store")
 
 // Store manages the learning JSONL file and tag index.
 type Store struct {
-	SharedDir  string               // committed path: .attest/learnings/
-	LocalDir   string               // local-only path: .git/attest/learnings/ (optional)
+	SharedDir  string               // committed path: .fabrikk/learnings/
+	LocalDir   string               // local-only path: .git/fabrikk/learnings/ (optional)
 	Scanner    *ContentScanner      // content scanner (nil = no scanning)
 	Now        func() time.Time     // clock injection for tests; defaults to time.Now
 	OnMaintain func(MaintainReport) // optional callback for logging
@@ -104,7 +104,7 @@ func (s *Store) Add(l *Learning) error {
 			return err
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'attest learn repair' to fix",
+			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
 				ErrCorruptLearningStore, skipped)
 		}
 		learnings = append(learnings, *l)
@@ -127,7 +127,7 @@ func (s *Store) RecordOutcome(ids []string, passed bool) error {
 			return err
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'attest learn repair' to fix",
+			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
 				ErrCorruptLearningStore, skipped)
 		}
 		idSet := make(map[string]bool, len(ids))
@@ -513,7 +513,7 @@ func (s *Store) Maintain(maxAge time.Duration) (*MaintainReport, error) {
 			return readErr
 		}
 		if skipped > 0 {
-			return fmt.Errorf("%w: %d corrupt lines — run 'attest learn repair' to fix",
+			return fmt.Errorf("%w: %d corrupt lines — run 'fabrikk learn repair' to fix",
 				ErrCorruptLearningStore, skipped)
 		}
 
@@ -1032,7 +1032,7 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".attest-learning-*")
+	f, err := os.CreateTemp(dir, ".fabrikk-learning-*")
 	if err != nil {
 		return err
 	}

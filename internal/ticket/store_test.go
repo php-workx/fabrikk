@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 const testRunID = "run-1"
@@ -330,7 +330,7 @@ func TestAtomicWriteDoesNotCorruptOnPartialFailure(t *testing.T) {
 
 	// Simulate a "crash" by writing a leftover temp file (as if atomicWrite
 	// was interrupted after creating the temp but before rename).
-	leftover := filepath.Join(dir, ".attest-ticket-leftover")
+	leftover := filepath.Join(dir, ".fabrikk-ticket-leftover")
 	if err := os.WriteFile(leftover, []byte("partial garbage"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestAtomicWriteDoesNotCorruptOnPartialFailure(t *testing.T) {
 	// (os.CreateTemp creates new files, doesn't reuse the leftover).
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if e.Name() != "task-atomic.md" && e.Name() != ".attest-ticket-leftover" {
+		if e.Name() != "task-atomic.md" && e.Name() != ".fabrikk-ticket-leftover" {
 			t.Errorf("unexpected file left behind: %s", e.Name())
 		}
 	}

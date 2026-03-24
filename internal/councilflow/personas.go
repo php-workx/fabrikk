@@ -1,6 +1,6 @@
 package councilflow
 
-import "github.com/runger/attest/internal/agentcli"
+import "github.com/php-workx/fabrikk/internal/agentcli"
 
 // FixedPersonas returns the persona set that runs in every review regardless of spec content.
 // Each persona has a single focused mandate to avoid attention-splitting.

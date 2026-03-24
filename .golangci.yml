@@ -1,6 +1,6 @@
 version: "2"
 
-# golangci-lint v2 configuration for attest
+# golangci-lint v2 configuration for fabrikk
 # Keep version in sync with Justfile and CI
 
 run:
@@ -88,7 +88,7 @@ linters:
         - G104  # unhandled errors — errcheck covers this
         - G301  # dir perms 0755 — standard for work directories in a file-based tool
         - G302  # file perms 0644 — standard for non-secret data files
-        - G304  # file inclusion via variable — attest is a file-management tool by design
+        - G304  # file inclusion via variable — fabrikk is a file-management tool by design
         - G306  # WriteFile 0644 — same as G302
 
 

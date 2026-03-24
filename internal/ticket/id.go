@@ -9,9 +9,11 @@ import (
 )
 
 // GenerateID creates a new ticket ID matching Ticket's {prefix}-{4char} format.
-// The prefix is derived from the directory name. Checks for collisions.
+// The prefix is derived from the project directory name (parent of dir).
+// This matches tk CLI behavior: tk uses basename of the working directory.
 func GenerateID(dir string) (string, error) {
-	prefix := idPrefix(filepath.Base(dir))
+	projectDir := filepath.Base(filepath.Dir(dir))
+	prefix := idPrefix(projectDir)
 
 	for attempt := 0; attempt < 3; attempt++ {
 		suffix, err := randomSuffix(4)
@@ -85,9 +87,9 @@ func ResolveID(dir, partial string) (string, error) {
 	}
 }
 
-// idPrefix generates a prefix from a directory name.
+// idPrefix generates a prefix from a project directory name.
 // Takes first letter of each hyphen/underscore segment.
-// e.g., "my-cool-project" → "mcp", "attest" → "att"
+// e.g., "my-cool-project" → "mcp", "fabrikk" → "fab"
 func idPrefix(dirName string) string {
 	dirName = strings.ToLower(dirName)
 	parts := strings.FieldsFunc(dirName, func(r rune) bool {
@@ -101,7 +103,7 @@ func idPrefix(dirName string) string {
 		if dirName != "" {
 			return dirName
 		}
-		return "att" // fallback for empty/separator-only input
+		return "tkt" // fallback for empty/separator-only input
 	}
 
 	var prefix strings.Builder
@@ -112,7 +114,7 @@ func idPrefix(dirName string) string {
 	}
 	result := prefix.String()
 	if result == "" {
-		return "att" // fallback for edge cases like all-empty segments
+		return "tkt" // fallback for edge cases like all-empty segments
 	}
 	return result
 }

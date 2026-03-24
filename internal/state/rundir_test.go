@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func TestRunDirInitCreatesDirectoryStructure(t *testing.T) {
@@ -43,25 +43,25 @@ func TestRunDirPathHelpers(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "artifact", got: runDir.Artifact(), want: "/tmp/project/.attest/runs/run-456/run-artifact.json"},
-		{name: "tasks", got: runDir.Tasks(), want: "/tmp/project/.attest/runs/run-456/tasks.json"},
-		{name: "coverage", got: runDir.Coverage(), want: "/tmp/project/.attest/runs/run-456/requirement-coverage.json"},
-		{name: "status", got: runDir.Status(), want: "/tmp/project/.attest/runs/run-456/run-status.json"},
-		{name: "events", got: runDir.Events(), want: "/tmp/project/.attest/runs/run-456/events.jsonl"},
-		{name: "clarifications", got: runDir.Clarifications(), want: "/tmp/project/.attest/runs/run-456/clarifications.json"},
-		{name: "engine", got: runDir.Engine(), want: "/tmp/project/.attest/runs/run-456/engine.json"},
-		{name: "engine log", got: runDir.EngineLog(), want: "/tmp/project/.attest/runs/run-456/engine.log"},
-		{name: "technical spec", got: runDir.TechnicalSpec(), want: "/tmp/project/.attest/runs/run-456/technical-spec.md"},
-		{name: "technical spec review", got: runDir.TechnicalSpecReview(), want: "/tmp/project/.attest/runs/run-456/technical-spec-review.json"},
-		{name: "technical spec approval", got: runDir.TechnicalSpecApproval(), want: "/tmp/project/.attest/runs/run-456/technical-spec-approval.json"},
-		{name: "execution plan", got: runDir.ExecutionPlan(), want: "/tmp/project/.attest/runs/run-456/execution-plan.json"},
-		{name: "execution plan markdown", got: runDir.ExecutionPlanMarkdown(), want: "/tmp/project/.attest/runs/run-456/execution-plan.md"},
-		{name: "execution plan review", got: runDir.ExecutionPlanReview(), want: "/tmp/project/.attest/runs/run-456/execution-plan-review.json"},
-		{name: "execution plan approval", got: runDir.ExecutionPlanApproval(), want: "/tmp/project/.attest/runs/run-456/execution-plan-approval.json"},
-		{name: "claim path", got: runDir.ClaimPath("task-1"), want: "/tmp/project/.attest/runs/run-456/claims/task-1.json"},
-		{name: "report dir", got: runDir.ReportDir("task-1"), want: "/tmp/project/.attest/runs/run-456/reports/task-1"},
-		{name: "attempt path", got: runDir.AttemptPath("task-1"), want: "/tmp/project/.attest/runs/run-456/reports/task-1/attempt.json"},
-		{name: "council result path", got: runDir.CouncilResultPath("task-1"), want: "/tmp/project/.attest/runs/run-456/reports/task-1/council-result.json"},
+		{name: "artifact", got: runDir.Artifact(), want: "/tmp/project/.fabrikk/runs/run-456/run-artifact.json"},
+		{name: "tasks", got: runDir.Tasks(), want: "/tmp/project/.fabrikk/runs/run-456/tasks.json"},
+		{name: "coverage", got: runDir.Coverage(), want: "/tmp/project/.fabrikk/runs/run-456/requirement-coverage.json"},
+		{name: "status", got: runDir.Status(), want: "/tmp/project/.fabrikk/runs/run-456/run-status.json"},
+		{name: "events", got: runDir.Events(), want: "/tmp/project/.fabrikk/runs/run-456/events.jsonl"},
+		{name: "clarifications", got: runDir.Clarifications(), want: "/tmp/project/.fabrikk/runs/run-456/clarifications.json"},
+		{name: "engine", got: runDir.Engine(), want: "/tmp/project/.fabrikk/runs/run-456/engine.json"},
+		{name: "engine log", got: runDir.EngineLog(), want: "/tmp/project/.fabrikk/runs/run-456/engine.log"},
+		{name: "technical spec", got: runDir.TechnicalSpec(), want: "/tmp/project/.fabrikk/runs/run-456/technical-spec.md"},
+		{name: "technical spec review", got: runDir.TechnicalSpecReview(), want: "/tmp/project/.fabrikk/runs/run-456/technical-spec-review.json"},
+		{name: "technical spec approval", got: runDir.TechnicalSpecApproval(), want: "/tmp/project/.fabrikk/runs/run-456/technical-spec-approval.json"},
+		{name: "execution plan", got: runDir.ExecutionPlan(), want: "/tmp/project/.fabrikk/runs/run-456/execution-plan.json"},
+		{name: "execution plan markdown", got: runDir.ExecutionPlanMarkdown(), want: "/tmp/project/.fabrikk/runs/run-456/execution-plan.md"},
+		{name: "execution plan review", got: runDir.ExecutionPlanReview(), want: "/tmp/project/.fabrikk/runs/run-456/execution-plan-review.json"},
+		{name: "execution plan approval", got: runDir.ExecutionPlanApproval(), want: "/tmp/project/.fabrikk/runs/run-456/execution-plan-approval.json"},
+		{name: "claim path", got: runDir.ClaimPath("task-1"), want: "/tmp/project/.fabrikk/runs/run-456/claims/task-1.json"},
+		{name: "report dir", got: runDir.ReportDir("task-1"), want: "/tmp/project/.fabrikk/runs/run-456/reports/task-1"},
+		{name: "attempt path", got: runDir.AttemptPath("task-1"), want: "/tmp/project/.fabrikk/runs/run-456/reports/task-1/attempt.json"},
+		{name: "council result path", got: runDir.CouncilResultPath("task-1"), want: "/tmp/project/.fabrikk/runs/run-456/reports/task-1/council-result.json"},
 	}
 
 	for _, tt := range tests {

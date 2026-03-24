@@ -1,4 +1,4 @@
-module github.com/runger/attest
+module github.com/php-workx/fabrikk
 
 go 1.26.1
 

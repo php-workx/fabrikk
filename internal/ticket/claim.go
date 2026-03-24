@@ -11,7 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // Compile-time interface assertion.
@@ -69,7 +69,7 @@ func (s *Store) ClaimTask(taskID, ownerID, backend string, lease time.Duration) 
 		}
 
 		// Status check: only pending and repair_pending are claimable.
-		status := StatusFromTicket(fm.Status, fm.AttestStatus)
+		status := StatusFromTicket(fm.Status, fm.ExtendedStatus)
 		if status != state.TaskPending && status != state.TaskRepairPending {
 			return fmt.Errorf("%w: current status is %s", ErrNotClaimable, status)
 		}
@@ -85,7 +85,7 @@ func (s *Store) setClaim(fm *Frontmatter, body, path, ownerID, backend string, l
 	fm.ClaimBackend = backend
 	fm.ClaimExpires = formatTime(now.Add(lease))
 	fm.ClaimHeartbeat = formatTime(now)
-	fm.AttestStatus = string(state.TaskClaimed)
+	fm.ExtendedStatus = string(state.TaskClaimed)
 	fm.Status = StatusToTicket(state.TaskClaimed)
 	fm.UpdatedAt = formatTime(now)
 
@@ -126,7 +126,7 @@ func (s *Store) ReleaseClaim(taskID, ownerID string, newStatus state.TaskStatus,
 		fm.ClaimBackend = ""
 		fm.ClaimExpires = ""
 		fm.ClaimHeartbeat = ""
-		fm.AttestStatus = string(newStatus)
+		fm.ExtendedStatus = string(newStatus)
 		fm.Status = StatusToTicket(newStatus)
 		if reason != "" {
 			fm.StatusReason = reason
@@ -245,7 +245,7 @@ func (s *Store) ReclaimExpired(runID string) ([]string, error) {
 			fm.ClaimBackend = ""
 			fm.ClaimExpires = ""
 			fm.ClaimHeartbeat = ""
-			fm.AttestStatus = string(state.TaskPending)
+			fm.ExtendedStatus = string(state.TaskPending)
 			fm.Status = StatusToTicket(state.TaskPending)
 			fm.StatusReason = "claim expired"
 			fm.UpdatedAt = formatTime(now)

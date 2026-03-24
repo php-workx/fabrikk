@@ -3,8 +3,8 @@ package compiler_test
 import (
 	"testing"
 
-	"github.com/runger/attest/internal/compiler"
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func TestCompileDeterministic(t *testing.T) {

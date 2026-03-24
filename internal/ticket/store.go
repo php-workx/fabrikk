@@ -10,7 +10,7 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // Store implements state.TaskStore using Ticket-format markdown files.
@@ -169,7 +169,7 @@ func (s *Store) WriteTask(task *state.Task) error {
 	})
 }
 
-// UpdateStatus updates a task's status (both attest_status and tk status).
+// UpdateStatus updates a task's status (both extended_status and tk status).
 // Read and write are inside the same lock to prevent race conditions.
 func (s *Store) UpdateStatus(taskID string, status state.TaskStatus, reason string) error {
 	resolvedID, err := ResolveID(s.Dir, taskID)
@@ -407,7 +407,7 @@ func atomicWrite(path string, data []byte) error {
 		return err
 	}
 
-	f, err := os.CreateTemp(dir, ".attest-ticket-*")
+	f, err := os.CreateTemp(dir, ".fabrikk-ticket-*")
 	if err != nil {
 		return err
 	}

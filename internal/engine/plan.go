@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/compiler"
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 const (
@@ -603,7 +603,7 @@ func acceptanceChecksForTask(artifact *state.RunArtifact, task *state.Task) []st
 		checks = append(checks, artifact.QualityGate.Command)
 	}
 	if len(task.RequiredEvidence) > 0 {
-		checks = append(checks, "attest verify <run-id> <task-id>")
+		checks = append(checks, "fabrikk verify <run-id> <task-id>")
 	}
 	return checks
 }

@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runger/attest/internal/agentcli"
-	"github.com/runger/attest/internal/compiler"
-	"github.com/runger/attest/internal/engine"
-	"github.com/runger/attest/internal/state"
-	"github.com/runger/attest/internal/ticket"
+	"github.com/php-workx/fabrikk/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/engine"
+	"github.com/php-workx/fabrikk/internal/state"
+	"github.com/php-workx/fabrikk/internal/ticket"
 )
 
 func writeTestSpec(t *testing.T, dir string) string {
@@ -91,7 +91,7 @@ func writeApprovedExecutionPlanForArtifact(t *testing.T, runDir *state.RunDir, a
 			DependsOn:          trimTaskPrefix(task.DependsOn),
 			FilesLikelyTouched: append([]string(nil), task.Scope.OwnedPaths...),
 			OwnedPaths:         append([]string(nil), task.Scope.OwnedPaths...),
-			AcceptanceChecks:   []string{"just check", "attest verify <run-id> <task-id>"},
+			AcceptanceChecks:   []string{"just check", "fabrikk verify <run-id> <task-id>"},
 			Risk:               task.RiskLevel,
 			Size:               "small",
 		})
@@ -374,7 +374,7 @@ func TestReviewTechnicalSpecAcceptsLegacyHeadings(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	spec := `# attest Technical Specification
+	spec := `# fabrikk Technical Specification
 
 Status: Draft (post-review revision)
 
@@ -423,7 +423,7 @@ func TestDraftTechnicalSpec_NoNormalizePassThrough(t *testing.T) {
 	}
 
 	sourcePath := filepath.Join(dir, "legacy-technical-spec.md")
-	spec := `# attest Technical Specification
+	spec := `# fabrikk Technical Specification
 
 Status: Draft (post-review revision)
 

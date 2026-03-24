@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/runger/attest/internal/state"
-	"github.com/runger/attest/internal/verifier"
+	"github.com/php-workx/fabrikk/internal/state"
+	"github.com/php-workx/fabrikk/internal/verifier"
 )
 
 func TestVerifyPassesWithValidEvidence(t *testing.T) {
@@ -95,7 +95,7 @@ func TestVerifyScopeViolation(t *testing.T) {
 		TaskID:    "task-1",
 		AttemptID: "attempt-1",
 		ChangedFiles: []string{
-			"cmd/attest/main.go", // Outside scope.
+			"cmd/fabrikk/main.go", // Outside scope.
 		},
 	}
 

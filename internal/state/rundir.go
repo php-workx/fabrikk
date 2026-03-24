@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-// RunDir manages the .attest/runs/<run-id>/ directory structure (spec section 3.1).
+// RunDir manages the .fabrikk/runs/<run-id>/ directory structure (spec section 3.1).
 type RunDir struct {
-	Root string // .attest/runs/<run-id>
+	Root string // .fabrikk/runs/<run-id>
 }
 
 // NewRunDir creates a RunDir for the given base directory and run ID.
 func NewRunDir(baseDir, runID string) *RunDir {
 	return &RunDir{
-		Root: filepath.Join(baseDir, ".attest", "runs", runID),
+		Root: filepath.Join(baseDir, ".fabrikk", "runs", runID),
 	}
 }
 

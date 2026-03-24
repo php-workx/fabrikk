@@ -221,15 +221,16 @@ This positions fabrikk as the contrarian take in the agent space — rigor over 
 
 ## Rename checklist
 
-When ready to rename from `attest` to `fabrikk`:
-
-- [ ] Secure domains: fabrikk.dev (primary), fabrikk.sh (redirect)
-- [ ] Create GitHub org or rename repo: `fabrikk/fabrikk` or `runger/fabrikk`
-- [ ] Update Go module path: `github.com/runger/fabrikk` (or `github.com/fabrikk/fabrikk`)
-- [ ] Rename binary in `cmd/attest/` → `cmd/fabrikk/`
-- [ ] Add `fab` symlink in build/install scripts
-- [ ] Update all internal references: `.attest/` → `.fabrikk/`, CLAUDE.md, README, help text
-- [ ] Update Homebrew formula name
-- [ ] Register on npm/PyPI/crates.io (even if just placeholder — protect the namespace)
-- [ ] Set up redirect from old repo URL
-- [ ] Update CI/CD pipeline references
+- [x] Rename repo: `php-workx/attest` → `php-workx/fabrikk`
+- [x] Update Go module path: `github.com/php-workx/fabrikk`
+- [x] Rename binary: `cmd/attest/` → `cmd/fabrikk/`
+- [x] Add `fab` symlink in build scripts (justfile)
+- [x] Update all internal references: `.attest/` → `.fabrikk/`, CLAUDE.md, README, help text
+- [x] Set up goreleaser with Homebrew tap (`php-workx/homebrew-tap`)
+- [x] Update CI/CD pipeline references
+- [x] Add `--version` flag with ldflags
+- [x] Rename spec files: `attest-*.md` → `fabrikk-*.md`
+- [x] Rename `attest_status` YAML field → `extended_status`
+- [x] Fix GenerateID prefix derivation (project dir, not .tickets/)
+- [ ] Secure domains: fabrikk.dev, fabrikk.sh (deferred — not blocking v1)
+- [ ] Register on npm/PyPI/crates.io (deferred — placeholder protection)

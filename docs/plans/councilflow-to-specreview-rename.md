@@ -120,19 +120,19 @@ Specific internal references to update:
 **`cmd/attest/main.go` line 13:**
 ```go
 // Before
-"github.com/runger/attest/internal/councilflow"
+"github.com/php-workx/fabrikk/internal/councilflow"
 
 // After
-"github.com/runger/attest/internal/specreview"
+"github.com/php-workx/fabrikk/internal/specreview"
 ```
 
 **`internal/engine/techspec.go` line 11:**
 ```go
 // Before
-"github.com/runger/attest/internal/councilflow"
+"github.com/php-workx/fabrikk/internal/councilflow"
 
 // After
-"github.com/runger/attest/internal/specreview"
+"github.com/php-workx/fabrikk/internal/specreview"
 ```
 
 ## Step 5: Update `internal/engine/techspec.go` call sites

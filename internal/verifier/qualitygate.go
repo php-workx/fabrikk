@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // RunQualityGate executes the project quality gate command (spec section 11.2, 11.3).

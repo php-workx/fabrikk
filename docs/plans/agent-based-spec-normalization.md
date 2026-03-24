@@ -5,7 +5,7 @@
 
 ## Context
 
-When `attest tech-spec review --from <path>` receives a document that doesn't match the canonical template headings, `normalizeTechnicalSpec()` attempts to mechanically reformat it using keyword matching. This is lossy — it stripped a 260-line plan down to 9 lines because:
+When `fabrikk tech-spec review --from <path>` receives a document that doesn't match the canonical template headings, `normalizeTechnicalSpec()` attempts to mechanically reformat it using keyword matching. This is lossy — it stripped a 260-line plan down to 9 lines because:
 
 1. `hasLegacyTechnicalSpecHeadings()` matched on `"status: draft"` (from `**Status:** Draft`), triggering the rewrite path
 2. `normalizedSectionContent()` looked for sections matching exact heading aliases — found almost none
@@ -127,18 +127,18 @@ if hasCanonicalTechnicalSpecHeadings(strings.ToLower(string(data))) {
 
 Note: `DraftTechnicalSpec` currently ignores `ctx` (`_ = ctx`). The agent-based path needs `ctx` for timeout/cancellation — remove the `_ = ctx` line.
 
-**`--no-normalize` flag:** Add a `--no-normalize` flag to `attest tech-spec draft` that skips both the canonical-heading check and agent normalization, passing the document through as-is. This is useful when the user knows the document isn't a technical spec (e.g., a plan document, a design doc) and wants to skip the reformatting attempt entirely.
+**`--no-normalize` flag:** Add a `--no-normalize` flag to `fabrikk tech-spec draft` that skips both the canonical-heading check and agent normalization, passing the document through as-is. This is useful when the user knows the document isn't a technical spec (e.g., a plan document, a design doc) and wants to skip the reformatting attempt entirely.
 
 **All 3 `DraftTechnicalSpec` call sites must be updated (pm-001):**
-1. `cmd/attest/main.go` line 283: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpec` draft action
-2. `cmd/attest/main.go` line 317: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpecReviewFromFile` first call
-3. `cmd/attest/main.go` line 350: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpecReviewFromFile` second call
+1. `cmd/fabrikk/main.go` line 283: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpec` draft action
+2. `cmd/fabrikk/main.go` line 317: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpecReviewFromFile` first call
+3. `cmd/fabrikk/main.go` line 350: `eng.DraftTechnicalSpec(ctx, fromPath, noNormalize)` — in `cmdTechSpecReviewFromFile` second call
 
 Missing any of these causes a compile error. All 3 must be updated in the same commit.
 
 **Files:**
 - `internal/engine/techspec.go` (update `DraftTechnicalSpec`)
-- `cmd/attest/main.go` (add `--no-normalize` flag parsing, update all 3 call sites)
+- `cmd/fabrikk/main.go` (add `--no-normalize` flag parsing, update all 3 call sites)
 
 ### 4. Remove mechanical normalization functions — Absorbed into Phase 0
 
@@ -156,7 +156,7 @@ Linter required dead code deletion in the same commit as Phase 0. All 7 function
 - **Agent fallback on garbled output:** Mock agent returning text with fewer than 4 canonical headings → verify original document passes through.
 - **Agent success:** Mock agent returning a well-formed normalized spec → verify output is used, contains canonical headings, preserves content.
 - **`--no-normalize` flag:** Pass `--no-normalize` → verify document passes through unchanged regardless of headings.
-- **Integration test:** `attest tech-spec draft <run-id> --from <free-form-doc>` with a real document (no mock) → verify output contains all original content. (Only runs when CLI tools are available; skip in CI.)
+- **Integration test:** `fabrikk tech-spec draft <run-id> --from <free-form-doc>` with a real document (no mock) → verify output contains all original content. (Only runs when CLI tools are available; skip in CI.)
 
 **Mock cleanup (pm-004):** Every test that stubs `agentcli.InvokeFunc` MUST restore the original via `t.Cleanup()`:
 ```go
@@ -168,7 +168,7 @@ Without cleanup, parallel tests (`-race`) race on the shared package-level var.
 
 **Files:**
 - `internal/engine/engine_test.go` (update/add tests)
-- `cmd/attest/commands_test.go` (add `--no-normalize` test)
+- `cmd/fabrikk/commands_test.go` (add `--no-normalize` test)
 
 ## Template content (hardcoded in prompt)
 
@@ -201,8 +201,8 @@ Without cleanup, parallel tests (`-race`) race on the shared package-level var.
 | `internal/councilflow/runner.go` | 1 | Refactor: import agentcli, remove duplicated logic |
 | `internal/engine/techspec.go` | 2, 3, 4 | Add `normalizeWithAgent`, update `DraftTechnicalSpec`, delete mechanical code |
 | `internal/engine/engine_test.go` | 5 | Update/add normalization tests |
-| `cmd/attest/main.go` | 3 | Add `--no-normalize` flag |
-| `cmd/attest/commands_test.go` | 5 | Add `--no-normalize` test |
+| `cmd/fabrikk/main.go` | 3 | Add `--no-normalize` flag |
+| `cmd/fabrikk/commands_test.go` | 5 | Add `--no-normalize` test |
 
 ## Implementation order
 
@@ -241,17 +241,17 @@ Phase 0 can ship on its own branch/commit. Tasks 1-5 can be one branch.
 ```bash
 # After Phase 0:
 just pre-commit
-attest tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md
+fabrikk tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md
 # → verify technical spec contains all original content, not a 9-line stub
 
 # After Tasks 1-5:
 just pre-commit
-attest tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md
+fabrikk tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md
 # → verify technical spec has canonical headings AND all original content
 
-attest tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md --no-normalize
+fabrikk tech-spec draft <run-id> --from docs/plans/councilflow-to-specreview-rename.md --no-normalize
 # → verify document passes through as-is
 
-attest tech-spec draft <run-id> --from docs/specs/attest-technical-spec.md
+fabrikk tech-spec draft <run-id> --from docs/specs/attest-technical-spec.md
 # → verify canonical doc passes through unchanged (fast path)
 ```

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/agentcli"
 )
 
 // CouncilConfig controls the council review pipeline.

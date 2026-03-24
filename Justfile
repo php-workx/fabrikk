@@ -1,4 +1,4 @@
-# attest project quality gate
+# fabrikk project quality gate
 # Single source of truth for "my code is clean" — hooks and CI delegate here.
 
 # Pinned tool versions — keep in sync with CI (.github/workflows/ci.yml)
@@ -123,14 +123,15 @@ sonar:
 
 # --- Build targets ---
 
-# Build the attest binary with version info
+# Build the fabrikk binary with version info
 build:
     mkdir -p bin
-    go build -ldflags '{{ldflags}}' -o bin/attest ./cmd/attest
+    go build -ldflags '{{ldflags}}' -o bin/fabrikk ./cmd/fabrikk
+    ln -sf fabrikk bin/fab
 
-# Install attest to $GOPATH/bin (or $GOBIN)
+# Install fabrikk to $GOPATH/bin (or $GOBIN)
 install:
-    go install -ldflags '{{ldflags}}' ./cmd/attest
+    go install -ldflags '{{ldflags}}' ./cmd/fabrikk
 
 # --- Setup ---
 
@@ -143,8 +144,8 @@ setup: install-dev
     git config core.hooksPath .githooks
     @echo "Git hooks configured (.githooks/)"
     mkdir -p .claude/skills
-    ln -sfn ../../skills/attest .claude/skills/attest
-    @echo "Claude Code skill symlinked (skills/attest → .claude/skills/attest)"
+    ln -sfn ../../skills/fabrikk .claude/skills/fabrikk
+    @echo "Claude Code skill symlinked (skills/fabrikk → .claude/skills/fabrikk)"
 
 # Install required development tools (pinned versions)
 install-dev:

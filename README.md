@@ -1,4 +1,4 @@
-# attest
+# fabrikk
 
 A spec-driven autonomous run system for coding agents. Written in Go — stdlib only, single binary.
 
@@ -16,7 +16,7 @@ These problems get worse with parallelism. Multiple agents working concurrently 
 
 ## How It Works
 
-attest uses a **rigid skeleton with convergence-driven loops**. The pipeline stages are coded in Go — no agent gets to skip a stage, invent a new one, or decide the workflow:
+fabrikk uses a **rigid skeleton with convergence-driven loops**. The pipeline stages are coded in Go — no agent gets to skip a stage, invent a new one, or decide the workflow:
 
 ```
                          ┌─────────────────────────────────────────┐
@@ -173,25 +173,25 @@ Auto-select review intensity based on scope (quick / standard / deep). Codex and
 just build
 
 # Prepare a run from your spec
-./bin/attest prepare docs/specs/my-feature-spec.md
+./bin/fabrikk prepare docs/specs/my-feature-spec.md
 
 # Approve the normalized run artifact
-./bin/attest approve <run-id>
+./bin/fabrikk approve <run-id>
 
 # Launch autonomous execution
-./bin/attest run <run-id>
+./bin/fabrikk run <run-id>
 
 # Check status anytime
-./bin/attest status <run-id>
+./bin/fabrikk status <run-id>
 
 # Resume after interruption
-./bin/attest run <run-id>  # picks up from last checkpoint
+./bin/fabrikk run <run-id>  # picks up from last checkpoint
 ```
 
 ## Architecture
 
 ```
-CLI (cmd/attest/)
+CLI (cmd/fabrikk/)
   |-- Engine (internal/engine/)      -- Run lifecycle orchestration
   |   |-- Compiler (internal/compiler/) -- Spec -> task graph (deterministic, no LLM)
   |   |-- Councilflow (internal/councilflow/) -- Multi-model review pipeline
@@ -200,7 +200,7 @@ CLI (cmd/attest/)
 ```
 
 - **Zero external dependencies** — stdlib only, single binary
-- **State lives on disk** — all run state in `.attest/runs/<run-id>/` as JSON/JSONL
+- **State lives on disk** — all run state in `.fabrikk/runs/<run-id>/` as JSON/JSONL
 - **Compiler is deterministic** — no LLM involvement in task graph generation
 - **Councilflow** — parallel fan-out to persona reviewers across multiple rounds
 
@@ -208,6 +208,6 @@ CLI (cmd/attest/)
 
 | Document | Description |
 |----------|-------------|
-| [Functional Spec](docs/specs/attest-functional-spec.md) | Full product specification (82 requirements, 19 core concepts) |
-| [Technical Spec](docs/specs/attest-technical-spec.md) | Implementation architecture and design |
+| [Functional Spec](docs/specs/fabrikk-functional-spec.md) | Full product specification (82 requirements, 19 core concepts) |
+| [Technical Spec](docs/specs/fabrikk-technical-spec.md) | Implementation architecture and design |
 | [How It Works](docs/HOW-IT-WORKS.md) | Detailed pipeline walkthrough with examples |

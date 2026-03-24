@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func testTask() state.Task {
@@ -98,7 +98,7 @@ func TestStatusMapping(t *testing.T) {
 	}
 }
 
-func TestStatusFromTicketPrefersAttestStatus(t *testing.T) {
+func TestStatusFromTicketPrefersExtendedStatus(t *testing.T) {
 	got := StatusFromTicket("open", "implementing")
 	if got != state.TaskImplementing {
 		t.Errorf("StatusFromTicket(open, implementing) = %q, want implementing", got)
@@ -112,8 +112,8 @@ func TestStatusFromTicketFallsBackToTkStatus(t *testing.T) {
 	}
 }
 
-func TestStatusFromTicketRejectsInvalidAttestStatus(t *testing.T) {
-	// Invalid attest_status should fall back to tk status mapping, not blindly cast.
+func TestStatusFromTicketRejectsInvalidExtendedStatus(t *testing.T) {
+	// Invalid extended_status should fall back to tk status mapping, not blindly cast.
 	got := StatusFromTicket("closed", "typo_status")
 	if got != state.TaskDone {
 		t.Errorf("StatusFromTicket(closed, typo_status) = %q, want done (fallback to tk status)", got)
@@ -148,7 +148,7 @@ func TestMarshalContainsAttestFields(t *testing.T) {
 	data, _ := MarshalTicket(&task)
 	content := string(data)
 
-	for _, field := range []string{"attest_status:", "requirement_ids:", "risk_level:", "owned_paths:"} {
+	for _, field := range []string{"extended_status:", "requirement_ids:", "risk_level:", "owned_paths:"} {
 		if !strings.Contains(content, field) {
 			t.Errorf("missing field %q in output", field)
 		}
@@ -338,8 +338,8 @@ func TestUpdateFrontmatterPreservesBody(t *testing.T) {
 	if !strings.Contains(content, "## Notes") {
 		t.Error("Notes section was lost")
 	}
-	if !strings.Contains(content, "attest_status: done") {
-		t.Error("attest_status not updated")
+	if !strings.Contains(content, "extended_status: done") {
+		t.Error("extended_status not updated")
 	}
 }
 
@@ -377,7 +377,7 @@ func TestUpdateFrontmatterPreservesTkNativeFields(t *testing.T) {
 		t.Error("body was lost")
 	}
 	// Status must be updated.
-	if !strings.Contains(content, "attest_status: done") {
-		t.Error("attest_status not updated")
+	if !strings.Contains(content, "extended_status: done") {
+		t.Error("extended_status not updated")
 	}
 }

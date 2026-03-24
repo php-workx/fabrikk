@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/runger/attest/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/agentcli"
 )
 
 func TestFixedPersonasReturnsExpectedSet(t *testing.T) {

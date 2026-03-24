@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // requirementPattern matches requirement IDs like AT-FR-001, AT-TS-001, AT-NFR-001, AT-AS-001.

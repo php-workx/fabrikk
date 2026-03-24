@@ -1,6 +1,6 @@
 // Package ticket implements a Ticket-format (wedow/ticket) task store.
 // It reads and writes markdown files with YAML frontmatter compatible
-// with the tk CLI, while extending the format with attest-specific fields.
+// with the tk CLI, while extending the format with extended status fields.
 package ticket
 
 import (
@@ -11,10 +11,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
-// Frontmatter holds all YAML fields (both tk-native and attest-custom).
+// Frontmatter holds all YAML fields (both tk-native and extended).
 type Frontmatter struct {
 	// tk-native fields — understood and managed by tk CLI.
 	ID          string   `yaml:"id"`
@@ -30,8 +30,8 @@ type Frontmatter struct {
 	Parent      string   `yaml:"parent,omitempty"`
 	Tags        []string `yaml:"tags,omitempty"`
 
-	// attest-specific fields — custom YAML keys, preserved by tk as pass-through.
-	AttestStatus     string   `yaml:"attest_status,omitempty"`
+	// extended status fields — custom YAML keys, preserved by tk as pass-through.
+	ExtendedStatus   string   `yaml:"extended_status,omitempty"`
 	RequirementIDs   []string `yaml:"requirement_ids,omitempty"`
 	RiskLevel        string   `yaml:"risk_level,omitempty"`
 	Order            int      `yaml:"order"`
@@ -63,8 +63,8 @@ type Frontmatter struct {
 	Extra map[string]interface{} `yaml:",inline"`
 }
 
-// Status mapping: attest 9 states → tk 3 states.
-var attestToTicketStatus = map[state.TaskStatus]string{
+// Status mapping: fabrikk 9 states → tk 3 states.
+var extendedToTicketStatus = map[state.TaskStatus]string{
 	state.TaskPending:       "open",
 	state.TaskClaimed:       "in_progress",
 	state.TaskImplementing:  "in_progress",
@@ -76,16 +76,16 @@ var attestToTicketStatus = map[state.TaskStatus]string{
 	state.TaskFailed:        "closed",
 }
 
-// StatusToTicket maps an attest TaskStatus to a tk-native status string.
+// StatusToTicket maps a fabrikk TaskStatus to a tk-native status string.
 func StatusToTicket(s state.TaskStatus) string {
-	if tk, ok := attestToTicketStatus[s]; ok {
+	if tk, ok := extendedToTicketStatus[s]; ok {
 		return tk
 	}
 	return "open"
 }
 
-// validAttestStatuses maps known attest_status strings to their TaskStatus constants.
-var validAttestStatuses = map[string]state.TaskStatus{
+// validExtendedStatuses maps known extended_status strings to their TaskStatus constants.
+var validExtendedStatuses = map[string]state.TaskStatus{
 	string(state.TaskPending):       state.TaskPending,
 	string(state.TaskClaimed):       state.TaskClaimed,
 	string(state.TaskImplementing):  state.TaskImplementing,
@@ -97,14 +97,14 @@ var validAttestStatuses = map[string]state.TaskStatus{
 	string(state.TaskFailed):        state.TaskFailed,
 }
 
-// StatusFromTicket maps tk-native status + attest_status back to TaskStatus.
-// Prefers attest_status if present and valid; falls back to tk status mapping.
-func StatusFromTicket(tkStatus, attestStatus string) state.TaskStatus {
-	if attestStatus != "" {
-		if s, ok := validAttestStatuses[attestStatus]; ok {
+// StatusFromTicket maps tk-native status + extended_status back to TaskStatus.
+// Prefers extended_status if present and valid; falls back to tk status mapping.
+func StatusFromTicket(tkStatus, extendedStatus string) state.TaskStatus {
+	if extendedStatus != "" {
+		if s, ok := validExtendedStatuses[extendedStatus]; ok {
 			return s
 		}
-		// Unrecognized attest_status — fall through to tk status mapping.
+		// Unrecognized extended_status — fall through to tk status mapping.
 	}
 	switch tkStatus {
 	case "in_progress":
@@ -158,7 +158,7 @@ func TaskToFrontmatter(task *state.Task) *Frontmatter {
 		Priority:         task.Priority,
 		Tags:             task.Tags,
 		Parent:           task.ParentTaskID,
-		AttestStatus:     string(task.Status),
+		ExtendedStatus:   string(task.Status),
 		RequirementIDs:   task.RequirementIDs,
 		RiskLevel:        task.RiskLevel,
 		Order:            task.Order,
@@ -204,7 +204,7 @@ func FrontmatterToTask(fm *Frontmatter) *state.Task {
 		Priority:         fm.Priority,
 		RiskLevel:        fm.RiskLevel,
 		DefaultModel:     fm.DefaultModel,
-		Status:           StatusFromTicket(fm.Status, fm.AttestStatus),
+		Status:           StatusFromTicket(fm.Status, fm.ExtendedStatus),
 		StatusReason:     fm.StatusReason,
 		RequiredEvidence: fm.RequiredEvidence,
 		ParentTaskID:     fm.Parent,

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/agentcli"
-	"github.com/runger/attest/internal/councilflow"
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/councilflow"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 type technicalSpecRequirement struct {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/agentcli"
 )
 
 // Runner executes council reviews for a technical spec.

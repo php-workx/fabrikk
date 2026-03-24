@@ -22,7 +22,7 @@ Three tests required by the spec are missing:
    which is a different code path.
 
 2. **CLI --no-normalize test** (commands_test.go): Spec line 183 requires
-   TestCmdTechSpecDraftNoNormalize in cmd/attest/commands_test.go. Not implemented.
+   TestCmdTechSpecDraftNoNormalize in cmd/fabrikk/commands_test.go. Not implemented.
 
 3. **stdin fallback threshold test** (agentcli_test.go): Spec line 75 mentions
    testing the 32000-byte stdin threshold. Not implemented.

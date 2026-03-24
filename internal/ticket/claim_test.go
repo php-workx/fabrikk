@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func writeClaimableTask(t *testing.T, store *Store, taskID string) {
@@ -324,8 +324,8 @@ func TestClaimPreservedThroughUpdateStatus(t *testing.T) {
 	if !strings.Contains(content, "claimed_by: agent-a") {
 		t.Error("claim fields lost after UpdateStatus")
 	}
-	if !strings.Contains(content, "attest_status: implementing") {
-		t.Error("attest_status not updated")
+	if !strings.Contains(content, "extended_status: implementing") {
+		t.Error("extended_status not updated")
 	}
 }
 

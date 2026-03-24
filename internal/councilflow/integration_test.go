@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/runger/attest/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/agentcli"
 )
 
 // stubInvoke returns a stub InvokeFn that maps persona/judge prompts to fixture responses.

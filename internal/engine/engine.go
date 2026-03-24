@@ -1,4 +1,4 @@
-// Package engine implements the attest run engine lifecycle.
+// Package engine implements the fabrikk run engine lifecycle.
 package engine
 
 import (
@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/compiler"
-	"github.com/runger/attest/internal/state"
-	"github.com/runger/attest/internal/verifier"
+	"github.com/php-workx/fabrikk/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/state"
+	"github.com/php-workx/fabrikk/internal/verifier"
 )
 
 const (

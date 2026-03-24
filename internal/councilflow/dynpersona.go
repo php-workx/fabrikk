@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/runger/attest/internal/agentcli"
+	"github.com/php-workx/fabrikk/internal/agentcli"
 )
 
 // MaxDynamicPersonas is the maximum number of dynamic personas per round.

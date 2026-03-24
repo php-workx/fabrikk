@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runger/attest/internal/state"
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 // CompileResult holds the output of task compilation.
@@ -505,7 +505,7 @@ func inferOwnedPaths(text string) []string {
 	}
 
 	if containsAny(text, "prepare", "review", "status", "tasks", "ready", "blocked", "next", "progress", "resume", "launch", "explain", "cli", "command") {
-		add("cmd/attest")
+		add("cmd/fabrikk")
 	}
 	if containsAny(text, "ingest", "spec", "artifact", "requirement", "compile", "task graph") {
 		add("internal/compiler", defaultOwnedPath)
