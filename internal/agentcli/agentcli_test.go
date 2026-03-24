@@ -28,6 +28,7 @@ func TestExtractFromCodeFence_Variants(t *testing.T) {
 		want  string
 	}{
 		{"json fence", "before\n```json\n{\"key\": \"val\"}\n```\nafter", `{"key": "val"}`},
+		{"markdown fence", "before\n```markdown\n# Heading\ncontent\n```\nafter", "# Heading\ncontent"},
 		{"generic fence", "before\n```\ncontent\n```\nafter", "content"},
 		{"no fence", "plain text", ""},
 		{"empty fence", "```\n```", ""},

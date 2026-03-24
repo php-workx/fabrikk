@@ -66,18 +66,20 @@ func ResolveCommand(name string) string {
 // BackendFor returns the CLI backend for a persona with a given backend name and model preference.
 // If the backend name is unknown, it defaults to Claude.
 func BackendFor(backendName, modelPref string) CLIBackend {
+	resolvedName := backendName
 	base, ok := KnownBackends[backendName]
 	if !ok {
+		resolvedName = BackendClaude
 		base = KnownBackends[BackendClaude]
 	}
 	if modelPref == "" {
 		return base
 	}
 
-	// Override the model in the args.
+	// Override the model in the args using the resolved backend name.
 	args := make([]string, len(base.Args))
 	copy(args, base.Args)
-	args = overrideModelArg(backendName, args, modelPref)
+	args = overrideModelArg(resolvedName, args, modelPref)
 	return CLIBackend{Command: base.Command, Args: args, PromptFlag: base.PromptFlag}
 }
 
@@ -156,18 +158,19 @@ func Invoke(ctx context.Context, backend *CLIBackend, prompt string, timeoutSec 
 }
 
 // ExtractFromCodeFence extracts content from a markdown code fence.
+// Skips the optional info-string (e.g., ```json, ```markdown) on the opening line.
 func ExtractFromCodeFence(s string) string {
-	if idx := strings.Index(s, "```json"); idx >= 0 {
-		start := idx + len("```json")
-		if end := strings.Index(s[start:], "```"); end >= 0 {
-			return strings.TrimSpace(s[start : start+end])
-		}
+	idx := strings.Index(s, "```")
+	if idx < 0 {
+		return ""
 	}
-	if idx := strings.Index(s, "```"); idx >= 0 {
-		start := idx + len("```")
-		if end := strings.Index(s[start:], "```"); end >= 0 {
-			return strings.TrimSpace(s[start : start+end])
-		}
+	start := idx + len("```")
+	// Skip the info-string line (everything up to and including the first newline after ```).
+	if nl := strings.IndexByte(s[start:], '\n'); nl >= 0 {
+		start += nl + 1
+	}
+	if end := strings.Index(s[start:], "```"); end >= 0 {
+		return strings.TrimSpace(s[start : start+end])
 	}
 	return ""
 }

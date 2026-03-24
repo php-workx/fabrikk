@@ -332,14 +332,9 @@ func normalizeWithAgent(ctx context.Context, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("output too short (%d bytes vs %d input bytes)", len(result), len(data))
 	}
 
-	// Output validation: require at least 4 canonical headings.
-	lower := strings.ToLower(string(result))
-	headingCount := 0
-	for _, req := range technicalSpecRequirements {
-		if strings.Contains(lower, strings.ToLower(req.canonicalHeading)) {
-			headingCount++
-		}
-	}
+	// Output validation: require at least 4 canonical headings as actual section lines
+	// (not substring matches, which could match the echoed prompt text inside the output).
+	headingCount := countCanonicalHeadings(string(result))
 	if headingCount < 4 {
 		return nil, fmt.Errorf("output has only %d of 8 canonical headings (need at least 4)", headingCount)
 	}
@@ -360,6 +355,33 @@ func countMarkdownSections(text string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "## ") {
+			count++
+		}
+	}
+	return count
+}
+
+// countCanonicalHeadings counts how many of the 8 canonical headings appear
+// as actual section lines in the document (not as substring matches inside
+// code blocks or echoed prompt text).
+func countCanonicalHeadings(text string) int {
+	canonicalSet := make(map[string]bool, len(technicalSpecRequirements))
+	for _, req := range technicalSpecRequirements {
+		canonicalSet[strings.ToLower(req.canonicalHeading)] = true
+	}
+
+	count := 0
+	inFence := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if canonicalSet[strings.ToLower(trimmed)] {
 			count++
 		}
 	}

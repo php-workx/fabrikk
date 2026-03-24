@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -407,18 +408,21 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 		return
 	}
 
-	// Build coverage map: requirement ID → covering slice IDs.
-	covered := make(map[string][]string, len(slices))
+	// Build coverage map: requirement ID → unique covering slice IDs.
+	covered := make(map[string]map[string]struct{}, len(slices))
 	for i := range slices {
 		for _, reqID := range slices[i].RequirementIDs {
-			covered[reqID] = append(covered[reqID], slices[i].SliceID)
+			if covered[reqID] == nil {
+				covered[reqID] = make(map[string]struct{})
+			}
+			covered[reqID][slices[i].SliceID] = struct{}{}
 		}
 	}
 
 	// Check for dropped requirements.
 	for i := range artifact.Requirements {
 		reqID := artifact.Requirements[i].ID
-		if sliceIDs, ok := covered[reqID]; !ok || len(sliceIDs) == 0 {
+		if len(covered[reqID]) == 0 {
 			review.Status = state.ReviewFail
 			review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
 				FindingID:       fmt.Sprintf("epr-cov-%03d", len(review.BlockingFindings)+1),
@@ -431,9 +435,20 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 		}
 	}
 
-	// Warn on requirements covered by multiple slices.
-	for reqID, sliceIDs := range covered {
-		if len(sliceIDs) > 1 {
+	// Warn on requirements covered by multiple slices (deterministic order).
+	reqIDs := make([]string, 0, len(covered))
+	for reqID := range covered {
+		reqIDs = append(reqIDs, reqID)
+	}
+	sort.Strings(reqIDs)
+	for _, reqID := range reqIDs {
+		sliceSet := covered[reqID]
+		if len(sliceSet) > 1 {
+			sliceIDs := make([]string, 0, len(sliceSet))
+			for sid := range sliceSet {
+				sliceIDs = append(sliceIDs, sid)
+			}
+			sort.Strings(sliceIDs)
 			review.Warnings = append(review.Warnings, state.ReviewWarning{
 				WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
 				Summary:   fmt.Sprintf("requirement %s is covered by %d slices (%s); verify this is intentional", reqID, len(sliceIDs), strings.Join(sliceIDs, ", ")),

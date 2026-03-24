@@ -156,7 +156,7 @@ Linter required dead code deletion in the same commit as Phase 0. All 7 function
 - **Agent fallback on garbled output:** Mock agent returning text with fewer than 4 canonical headings → verify original document passes through.
 - **Agent success:** Mock agent returning a well-formed normalized spec → verify output is used, contains canonical headings, preserves content.
 - **`--no-normalize` flag:** Pass `--no-normalize` → verify document passes through unchanged regardless of headings.
-- **Integration test:** `attest tech-spec draft --from <free-form-doc>` with a real document (no mock) → verify output contains all original content. (Only runs when CLI tools are available; skip in CI.)
+- **Integration test:** `attest tech-spec draft <run-id> --from <free-form-doc>` with a real document (no mock) → verify output contains all original content. (Only runs when CLI tools are available; skip in CI.)
 
 **Mock cleanup (pm-004):** Every test that stubs `agentcli.InvokeFunc` MUST restore the original via `t.Cleanup()`:
 ```go
