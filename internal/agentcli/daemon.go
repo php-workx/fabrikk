@@ -442,16 +442,19 @@ func startClaudeProcess(ctx context.Context, cfg DaemonConfig) (*claudeProcess, 
 
 	if err := sendInitMessage(stdin); err != nil {
 		cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = cmd.Wait()     // reap to avoid zombie
 		return nil, err
 	}
 
 	if err := waitForInit(scanner); err != nil {
 		cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = cmd.Wait()     // reap to avoid zombie
 		return nil, err
 	}
 
 	if err := waitForResult(scanner); err != nil {
 		cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = cmd.Wait()     // reap to avoid zombie
 		return nil, err
 	}
 
@@ -534,6 +537,7 @@ func (c *claudeProcess) query(prompt string) (string, error) {
 	}
 
 	var result string
+	gotResult := false
 	for c.scanner.Scan() {
 		var resp StreamResponse
 		if err := json.Unmarshal([]byte(c.scanner.Text()), &resp); err != nil {
@@ -545,6 +549,7 @@ func (c *claudeProcess) query(prompt string) (string, error) {
 		}
 
 		if resp.Type == "result" {
+			gotResult = true
 			if resp.Result != "" {
 				result = resp.Result
 			}
@@ -554,6 +559,9 @@ func (c *claudeProcess) query(prompt string) (string, error) {
 
 	if err := c.scanner.Err(); err != nil {
 		return "", fmt.Errorf("scanner error: %w", err)
+	}
+	if !gotResult {
+		return "", fmt.Errorf("stream ended before result frame")
 	}
 
 	return strings.TrimSpace(result), nil
