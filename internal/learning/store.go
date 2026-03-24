@@ -60,49 +60,10 @@ func NewStoreWithLocalDir(sharedDir, localDir string) *Store {
 
 // Add appends a learning to the store. Acquires exclusive lock.
 func (s *Store) Add(l *Learning) error {
-	isNew := l.ID == ""
-	if isNew {
-		id, err := generateID()
-		if err != nil {
-			return err
-		}
-		l.ID = id
+	if err := s.initLearningDefaults(l); err != nil {
+		return err
 	}
-	if l.CreatedAt.IsZero() {
-		l.CreatedAt = s.now()
-	}
-	if isNew && l.Confidence == 0 {
-		l.Confidence = 0.5
-	}
-	// Validate category.
-	switch l.Category {
-	case CategoryPattern, CategoryAntiPattern, CategoryTooling, CategoryCodebase, CategoryProcess:
-		// valid
-	case "":
-		l.Category = CategoryCodebase
-	default:
-		return fmt.Errorf("unknown category %q (valid: pattern, anti_pattern, tooling, codebase, process)", l.Category)
-	}
-
-	// Cap content length.
-	const maxContentLen = 10240 // 10KB
-	if len(l.Content) > maxContentLen {
-		l.Content = l.Content[:maxContentLen]
-	}
-
-	if l.Source == "" {
-		l.Source = "manual"
-	}
-
-	// Normalize tags.
-	for i := range l.Tags {
-		l.Tags[i] = strings.ToLower(strings.TrimSpace(l.Tags[i]))
-	}
-
-	// Normalize SourcePaths: filepath.Clean + forward slashes.
-	for i := range l.SourcePaths {
-		l.SourcePaths[i] = normalizePath(l.SourcePaths[i])
-	}
+	normalizeLearningFields(l)
 
 	return s.withLock(func() error {
 		learnings, skipped, err := s.readAllWithCount()
@@ -121,6 +82,58 @@ func (s *Store) Add(l *Learning) error {
 	})
 }
 
+// initLearningDefaults sets default ID, timestamps, confidence, category, and source.
+func (s *Store) initLearningDefaults(l *Learning) error {
+	isNew := l.ID == ""
+	if isNew {
+		id, err := generateID()
+		if err != nil {
+			return err
+		}
+		l.ID = id
+	}
+	if l.CreatedAt.IsZero() {
+		l.CreatedAt = s.now()
+	}
+	if isNew && l.Confidence == 0 {
+		l.Confidence = 0.5
+	}
+	if err := validateCategory(&l.Category); err != nil {
+		return err
+	}
+	if l.Source == "" {
+		l.Source = "manual"
+	}
+	return nil
+}
+
+// validateCategory normalizes an empty category to CategoryCodebase or rejects unknown values.
+func validateCategory(cat *Category) error {
+	switch *cat {
+	case CategoryPattern, CategoryAntiPattern, CategoryTooling, CategoryCodebase, CategoryProcess:
+		return nil
+	case "":
+		*cat = CategoryCodebase
+		return nil
+	default:
+		return fmt.Errorf("unknown category %q (valid: pattern, anti_pattern, tooling, codebase, process)", *cat)
+	}
+}
+
+// normalizeLearningFields caps content length and normalizes tags and paths.
+func normalizeLearningFields(l *Learning) {
+	const maxContentLen = 10240 // 10KB
+	if len(l.Content) > maxContentLen {
+		l.Content = l.Content[:maxContentLen]
+	}
+	for i := range l.Tags {
+		l.Tags[i] = strings.ToLower(strings.TrimSpace(l.Tags[i]))
+	}
+	for i := range l.SourcePaths {
+		l.SourcePaths[i] = normalizePath(l.SourcePaths[i])
+	}
+}
+
 // RecordOutcome records verification outcomes for learnings attached to a task.
 // Increments AttachCount for all IDs, and SuccessCount when passed is true.
 func (s *Store) RecordOutcome(ids []string, passed bool) error {
@@ -136,22 +149,27 @@ func (s *Store) RecordOutcome(ids []string, passed bool) error {
 			return fmt.Errorf(corruptLinesFmt,
 				ErrCorruptLearningStore, skipped)
 		}
-		idSet := make(map[string]bool, len(ids))
-		for _, id := range ids {
-			idSet[id] = true
-		}
-		now := s.now()
-		for i := range learnings {
-			if idSet[learnings[i].ID] {
-				learnings[i].AttachCount++
-				if passed {
-					learnings[i].SuccessCount++
-				}
-				learnings[i].LastAttachedAt = &now
-			}
-		}
+		applyOutcomes(learnings, ids, passed, s.now())
 		return s.writeAll(learnings)
 	})
+}
+
+// applyOutcomes increments attach/success counters for matching learnings.
+func applyOutcomes(learnings []Learning, ids []string, passed bool, now time.Time) {
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	for i := range learnings {
+		if !idSet[learnings[i].ID] {
+			continue
+		}
+		learnings[i].AttachCount++
+		if passed {
+			learnings[i].SuccessCount++
+		}
+		learnings[i].LastAttachedAt = &now
+	}
 }
 
 // Query returns learnings matching the filter options.
@@ -161,43 +179,55 @@ func (s *Store) Query(opts QueryOpts) ([]Learning, error) {
 		return nil, err
 	}
 
+	results := s.filterActiveLearnings(learnings, &opts)
+	sortLearnings(results, opts.SortBy)
+
+	if opts.Limit > 0 && len(results) > opts.Limit {
+		results = results[:opts.Limit]
+	}
+	return results, nil
+}
+
+// filterActiveLearnings returns non-expired, non-superseded learnings that match the filter.
+func (s *Store) filterActiveLearnings(learnings []Learning, opts *QueryOpts) []Learning {
 	var results []Learning
 	for i := range learnings {
 		l := &learnings[i]
 		if l.Expired || l.SupersededBy != "" {
 			continue
 		}
-
-		if !s.matchesFilter(l, &opts) {
+		if !s.matchesFilter(l, opts) {
 			continue
 		}
 		results = append(results, *l)
 	}
+	return results
+}
 
-	// Sort.
-	switch opts.SortBy {
+// sortLearnings sorts by the given sort key (default: effectiveness, then created_at, then ID).
+func sortLearnings(results []Learning, sortBy string) {
+	switch sortBy {
 	case "created_at":
 		sort.Slice(results, func(i, j int) bool {
 			return results[i].CreatedAt.After(results[j].CreatedAt)
 		})
 	default: // "effectiveness"
 		sort.Slice(results, func(i, j int) bool {
-			effI := results[i].Effectiveness()
-			effJ := results[j].Effectiveness()
-			if effI != effJ {
-				return effI > effJ
-			}
-			if !results[i].CreatedAt.Equal(results[j].CreatedAt) {
-				return results[i].CreatedAt.After(results[j].CreatedAt)
-			}
-			return results[i].ID < results[j].ID
+			return lessEffectiveness(&results[i], &results[j])
 		})
 	}
+}
 
-	if opts.Limit > 0 && len(results) > opts.Limit {
-		results = results[:opts.Limit]
+// lessEffectiveness returns true if a should sort before b by effectiveness, then recency, then ID.
+func lessEffectiveness(a, b *Learning) bool {
+	effA, effB := a.Effectiveness(), b.Effectiveness()
+	if effA != effB {
+		return effA > effB
 	}
-	return results, nil
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 // QueryLearnings satisfies state.LearningEnricher. Returns top learnings
@@ -601,30 +631,49 @@ func (s *Store) compilePreventionChecks(learnings []Learning) (int, error) {
 		}
 	}
 
-	// Track which learning IDs should have prevention checks.
+	wanted, compiled, err := s.writeQualifiedChecks(learnings, subdirs)
+	if err != nil {
+		return compiled, err
+	}
+	pruneStaleChecks(s.SharedDir, subdirs, wanted)
+	return compiled, nil
+}
+
+// qualifiesForPrevention returns true if a learning should be compiled into a prevention check.
+func qualifiesForPrevention(l *Learning) bool {
+	if l.Expired || l.SupersededBy != "" {
+		return false
+	}
+	return l.AttachCount >= preventionMinAttachCount && l.Effectiveness() >= preventionMinEffectiveness
+}
+
+// writeQualifiedChecks writes prevention check files for qualifying learnings.
+// Returns the set of wanted IDs, count written, and any error.
+func (s *Store) writeQualifiedChecks(learnings []Learning, subdirs []string) (wantedIDs map[string]bool, written int, err error) {
 	wanted := make(map[string]bool)
 	compiled := 0
 	for i := range learnings {
 		l := &learnings[i]
-		if l.Expired || l.SupersededBy != "" {
+		if !qualifiesForPrevention(l) {
 			continue
 		}
-		if l.AttachCount >= preventionMinAttachCount && l.Effectiveness() >= preventionMinEffectiveness {
-			wanted[l.ID] = true
-			content := formatPreventionCheck(l, s.now())
-			for _, subdir := range subdirs {
-				path := filepath.Join(s.SharedDir, "prevention", subdir, l.ID+".md")
-				if err := atomicWrite(path, []byte(content)); err != nil {
-					return compiled, fmt.Errorf("write prevention check %s/%s: %w", subdir, l.ID, err)
-				}
+		wanted[l.ID] = true
+		content := formatPreventionCheck(l, s.now())
+		for _, subdir := range subdirs {
+			path := filepath.Join(s.SharedDir, "prevention", subdir, l.ID+".md")
+			if err := atomicWrite(path, []byte(content)); err != nil {
+				return wanted, compiled, fmt.Errorf("write prevention check %s/%s: %w", subdir, l.ID, err)
 			}
-			compiled++
 		}
+		compiled++
 	}
+	return wanted, compiled, nil
+}
 
-	// Remove prevention checks for learnings that no longer qualify.
+// pruneStaleChecks removes prevention check files whose IDs are not in the wanted set.
+func pruneStaleChecks(sharedDir string, subdirs []string, wanted map[string]bool) {
 	for _, subdir := range subdirs {
-		dir := filepath.Join(s.SharedDir, "prevention", subdir)
+		dir := filepath.Join(sharedDir, "prevention", subdir)
 		entries, _ := os.ReadDir(dir)
 		for _, e := range entries {
 			name := e.Name()
@@ -637,8 +686,6 @@ func (s *Store) compilePreventionChecks(learnings []Learning) (int, error) {
 			}
 		}
 	}
-
-	return compiled, nil
 }
 
 func formatPreventionCheck(l *Learning, now time.Time) string {
@@ -712,31 +759,42 @@ func (s *Store) loadPreventionForContext(queryPaths []string, tokensUsed, tokenB
 	totalTokens = tokensUsed
 	for _, subdir := range []string{"review", "planning"} {
 		preventDir := filepath.Join(s.SharedDir, "prevention", subdir)
-		entries, dirErr := os.ReadDir(preventDir)
-		if dirErr != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			data, readErr := os.ReadFile(filepath.Join(preventDir, e.Name()))
-			if readErr != nil {
-				continue
-			}
-			content := string(data)
-			if len(queryPaths) > 0 && !preventionMatchesPaths(content, queryPaths) {
-				continue
-			}
-			contentTokens := len(content) / 4
-			if totalTokens+contentTokens > tokenBudget {
-				return checks, totalTokens
-			}
-			checks = append(checks, content)
-			totalTokens += contentTokens
+		var done bool
+		checks, totalTokens, done = collectPreventionChecks(preventDir, queryPaths, checks, totalTokens, tokenBudget)
+		if done {
+			return checks, totalTokens
 		}
 	}
 	return checks, totalTokens
+}
+
+// collectPreventionChecks reads matching prevention checks from a directory, appending to checks
+// until the token budget is exceeded. Returns done=true when budget is exhausted.
+func collectPreventionChecks(dir string, queryPaths, checks []string, tokensUsed, tokenBudget int) (updatedChecks []string, updatedTokens int, done bool) {
+	entries, dirErr := os.ReadDir(dir)
+	if dirErr != nil {
+		return checks, tokensUsed, false
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if readErr != nil {
+			continue
+		}
+		content := string(data)
+		if len(queryPaths) > 0 && !preventionMatchesPaths(content, queryPaths) {
+			continue
+		}
+		contentTokens := len(content) / 4
+		if tokensUsed+contentTokens > tokenBudget {
+			return checks, tokensUsed, true
+		}
+		checks = append(checks, content)
+		tokensUsed += contentTokens
+	}
+	return checks, tokensUsed, false
 }
 
 // preventionMatchesPaths checks if a prevention check file's applicable_paths
@@ -754,25 +812,38 @@ func preventionMatchesPaths(content string, queryPaths []string) bool {
 // applyDedup merges learnings with ≥2 shared tags and similar summaries.
 func applyDedup(learnings []Learning, report *MaintainReport) {
 	for i := range learnings {
-		if learnings[i].Expired || learnings[i].SupersededBy != "" {
+		if !isActiveLearning(&learnings[i]) {
 			continue
 		}
 		for j := i + 1; j < len(learnings); j++ {
-			if learnings[j].Expired || learnings[j].SupersededBy != "" {
+			if !isActiveLearning(&learnings[j]) {
 				continue
 			}
-			shared := sharedTagCount(learnings[i].Tags, learnings[j].Tags)
-			if shared >= 2 && similarSummary(learnings[i].Summary, learnings[j].Summary) {
-				// Keep the one with higher effectiveness.
-				if learnings[i].Effectiveness() >= learnings[j].Effectiveness() {
-					learnings[j].SupersededBy = learnings[i].ID
-				} else {
-					learnings[i].SupersededBy = learnings[j].ID
-				}
+			if tryMergeDuplicate(&learnings[i], &learnings[j]) {
 				report.Merged++
 			}
 		}
 	}
+}
+
+// isActiveLearning returns true if the learning is neither expired nor superseded.
+func isActiveLearning(l *Learning) bool {
+	return !l.Expired && l.SupersededBy == ""
+}
+
+// tryMergeDuplicate checks if two learnings are duplicates (≥2 shared tags + similar summaries)
+// and supersedes the weaker one. Returns true if a merge occurred.
+func tryMergeDuplicate(a, b *Learning) bool {
+	shared := sharedTagCount(a.Tags, b.Tags)
+	if shared < 2 || !similarSummary(a.Summary, b.Summary) {
+		return false
+	}
+	if a.Effectiveness() >= b.Effectiveness() {
+		b.SupersededBy = a.ID
+	} else {
+		a.SupersededBy = b.ID
+	}
+	return true
 }
 
 func sharedTagCount(a, b []string) int {
@@ -807,29 +878,41 @@ func similarSummary(a, b string) bool {
 func findContradictions(learnings []Learning) []Contradiction {
 	var result []Contradiction
 	for i := range learnings {
-		if learnings[i].Expired || learnings[i].SupersededBy != "" {
+		if !isActiveLearning(&learnings[i]) {
 			continue
 		}
 		for j := i + 1; j < len(learnings); j++ {
-			if learnings[j].Expired || learnings[j].SupersededBy != "" {
+			if !isActiveLearning(&learnings[j]) {
 				continue
 			}
-			isConflict := (learnings[i].Category == CategoryAntiPattern && learnings[j].Category == CategoryPattern) ||
-				(learnings[i].Category == CategoryPattern && learnings[j].Category == CategoryAntiPattern)
-			if !isConflict {
-				continue
-			}
-			shared := sharedTags(learnings[i].Tags, learnings[j].Tags)
-			if len(shared) >= 2 {
-				result = append(result, Contradiction{
-					LearningA:  learnings[i].ID,
-					LearningB:  learnings[j].ID,
-					SharedTags: shared,
-				})
+			if c, ok := detectContradiction(&learnings[i], &learnings[j]); ok {
+				result = append(result, c)
 			}
 		}
 	}
 	return result
+}
+
+// areCategoryConflict returns true if one learning is a pattern and the other is an anti-pattern.
+func areCategoryConflict(a, b *Learning) bool {
+	return (a.Category == CategoryAntiPattern && b.Category == CategoryPattern) ||
+		(a.Category == CategoryPattern && b.Category == CategoryAntiPattern)
+}
+
+// detectContradiction checks if two learnings are contradictory (conflicting categories + ≥2 shared tags).
+func detectContradiction(a, b *Learning) (Contradiction, bool) {
+	if !areCategoryConflict(a, b) {
+		return Contradiction{}, false
+	}
+	shared := sharedTags(a.Tags, b.Tags)
+	if len(shared) < 2 {
+		return Contradiction{}, false
+	}
+	return Contradiction{
+		LearningA:  a.ID,
+		LearningB:  b.ID,
+		SharedTags: shared,
+	}, true
 }
 
 func sharedTags(a, b []string) []string {

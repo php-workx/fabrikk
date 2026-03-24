@@ -245,37 +245,37 @@ func parseTechSpecFlags(args []string) techSpecFlags {
 	}
 	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true}
 	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		if arg == flagFrom {
-			i++
-			if i < len(args) {
-				f.fromPath = args[i]
-			}
-			continue
-		}
-		if arg == "--no-normalize" {
-			f.noNormalize = true
-			continue
-		}
-		if valuedFlags[arg] {
-			f.remaining = append(f.remaining, arg)
-			i++
-			if i < len(args) {
-				f.remaining = append(f.remaining, args[i])
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "--") {
-			f.remaining = append(f.remaining, arg)
-			continue
-		}
-		if f.runID == "" {
-			f.runID = arg
-			continue
-		}
-		f.remaining = append(f.remaining, arg)
+		i = parseTechSpecArg(&f, args, i, valuedFlags)
 	}
 	return f
+}
+
+// parseTechSpecArg processes a single argument during tech-spec flag parsing.
+// Returns the (possibly advanced) index.
+func parseTechSpecArg(f *techSpecFlags, args []string, i int, valuedFlags map[string]bool) int {
+	arg := args[i]
+	switch {
+	case arg == flagFrom:
+		i++
+		if i < len(args) {
+			f.fromPath = args[i]
+		}
+	case arg == "--no-normalize":
+		f.noNormalize = true
+	case valuedFlags[arg]:
+		f.remaining = append(f.remaining, arg)
+		i++
+		if i < len(args) {
+			f.remaining = append(f.remaining, args[i])
+		}
+	case strings.HasPrefix(arg, "--"):
+		f.remaining = append(f.remaining, arg)
+	case f.runID == "":
+		f.runID = arg
+	default:
+		f.remaining = append(f.remaining, arg)
+	}
+	return i
 }
 
 func cmdTechSpec(ctx context.Context, args []string) error {
@@ -414,57 +414,96 @@ func findRunBySpecHash(wd, specHash string) (runDir *state.RunDir, runID string)
 	return nil, ""
 }
 
-func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, externalSpec bool) error {
-	structuralOnly := false
-	dryRun := false
-	force := false
-	skipApproval := false
-	rounds := 2
-	mode := councilflow.ReviewStandard
+// reviewFlags holds parsed flags for the tech-spec review command.
+type reviewFlags struct {
+	structuralOnly bool
+	dryRun         bool
+	force          bool
+	skipApproval   bool
+	rounds         int
+	mode           councilflow.ReviewMode
+}
+
+// parseReviewFlags extracts review-specific flags from the argument list.
+func parseReviewFlags(flags []string) (reviewFlags, error) {
+	rf := reviewFlags{rounds: 2, mode: councilflow.ReviewStandard}
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case "--structural-only":
-			structuralOnly = true
+			rf.structuralOnly = true
 		case "--council":
 			// Accepted for backward compat but council is now the default.
 		case "--dry-run":
-			dryRun = true
+			rf.dryRun = true
 		case "--force":
-			force = true
+			rf.force = true
 		case "--skip-approval":
-			skipApproval = true
+			rf.skipApproval = true
 		case "--round":
 			if i+1 < len(flags) {
-				_, _ = fmt.Sscanf(flags[i+1], "%d", &rounds)
+				_, _ = fmt.Sscanf(flags[i+1], "%d", &rf.rounds)
 				i++
 			}
 		case "--mode":
 			if i+1 < len(flags) {
 				m := councilflow.ReviewMode(flags[i+1])
-				if councilflow.ValidReviewModes[m] {
-					mode = m
-				} else {
-					return fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
+				if !councilflow.ValidReviewModes[m] {
+					return rf, fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
 				}
+				rf.mode = m
 				i++
 			}
 		}
 	}
+	return rf, nil
+}
+
+// runStructuralReview runs the pre-flight structural review and returns whether
+// council review should proceed. Returns an error if the review fails.
+func runStructuralReview(ctx context.Context, eng *engine.Engine, structuralOnly bool) (proceed bool, err error) {
+	review, err := eng.ReviewTechnicalSpec(ctx)
+	if err != nil {
+		return false, err
+	}
+	data, _ := json.MarshalIndent(review, "", "  ")
+	fmt.Println(string(data))
+
+	if structuralOnly {
+		return false, nil
+	}
+	if review.Status != state.ReviewPass {
+		return false, fmt.Errorf("structural review failed — fix before running council")
+	}
+	return true, nil
+}
+
+// postCouncilLearnings extracts learnings and runs maintenance after a council review.
+func postCouncilLearnings(eng *engine.Engine, result *councilflow.CouncilResult) {
+	extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
+	_ = eng.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "learning_extraction",
+		RunID:     filepath.Base(eng.RunDir.Root),
+		Detail:    fmt.Sprintf("source=council rounds=%d", len(result.Rounds)),
+	})
+	learnStore := newLearningStore(eng.WorkDir)
+	_, _ = learnStore.Maintain(90 * 24 * time.Hour)
+}
+
+func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, externalSpec bool) error {
+	rf, err := parseReviewFlags(flags)
+	if err != nil {
+		return err
+	}
 
 	// Structural review (pre-flight). Skipped for external specs that don't follow our template.
 	if !externalSpec {
-		review, err := eng.ReviewTechnicalSpec(ctx)
-		if err != nil {
-			return err
+		proceed, sErr := runStructuralReview(ctx, eng, rf.structuralOnly)
+		if sErr != nil {
+			return sErr
 		}
-		data, _ := json.MarshalIndent(review, "", "  ")
-		fmt.Println(string(data))
-
-		if structuralOnly {
+		if !proceed {
 			return nil
-		}
-		if review.Status != state.ReviewPass {
-			return fmt.Errorf("structural review failed — fix before running council")
 		}
 	}
 
@@ -473,11 +512,11 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	defer daemonCleanup()
 
 	cfg := councilflow.DefaultConfig()
-	cfg.Rounds = rounds
-	cfg.Mode = mode
-	cfg.DryRun = dryRun
-	cfg.Force = force
-	cfg.SkipApproval = skipApproval
+	cfg.Rounds = rf.rounds
+	cfg.Mode = rf.mode
+	cfg.DryRun = rf.dryRun
+	cfg.Force = rf.force
+	cfg.SkipApproval = rf.skipApproval
 	cfg.JudgeInvokeFn = daemon
 
 	// Inject prevention checks from high-effectiveness learnings.
@@ -491,6 +530,18 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 		return err
 	}
 
+	printCouncilVerdict(result)
+
+	// Extract learnings from council findings (Phase 2) — skip during dry-run.
+	if !rf.dryRun {
+		postCouncilLearnings(eng, result)
+	}
+
+	return nil
+}
+
+// printCouncilVerdict outputs the council review verdict summary.
+func printCouncilVerdict(result *councilflow.CouncilResult) {
 	fmt.Printf("\nCouncil verdict: %s\n", result.OverallVerdict)
 	for i := range result.Rounds {
 		round := &result.Rounds[i]
@@ -499,22 +550,6 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 			fmt.Printf("  [round %d] %s: %s (%d findings)\n", round.Round, r.PersonaID, r.Verdict, len(r.Findings))
 		}
 	}
-
-	// Extract learnings from council findings (Phase 2) — skip during dry-run.
-	if !dryRun {
-		extractLearningsFromCouncil(eng.WorkDir, result, filepath.Base(eng.RunDir.Root))
-		_ = eng.RunDir.AppendEvent(state.Event{
-			Timestamp: time.Now(),
-			Type:      "learning_extraction",
-			RunID:     filepath.Base(eng.RunDir.Root),
-			Detail:    fmt.Sprintf("source=council rounds=%d", len(result.Rounds)),
-		})
-		// Trigger learning maintenance after extraction.
-		learnStore := newLearningStore(eng.WorkDir)
-		_, _ = learnStore.Maintain(90 * 24 * time.Hour)
-	}
-
-	return nil
 }
 
 // startJudgeDaemon starts a persistent Claude daemon for judge context accumulation.
@@ -638,31 +673,39 @@ func cmdStatus(_ context.Context, args []string) error {
 	}
 
 	if len(args) == 0 {
-		// List all runs.
-		runsDir := filepath.Join(wd, fabrikDir, "runs")
-		entries, err := os.ReadDir(runsDir)
-		if err != nil {
-			return fmt.Errorf("no runs found (is this a fabrikk project?)")
-		}
-		fmt.Println("Runs:")
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			eng := newEngine(wd, e.Name())
-			status, err := eng.ReconcileRunStatus()
-			if err != nil {
-				fmt.Printf("  %s (status unreadable)\n", e.Name())
-				continue
-			}
-			fmt.Printf("  %s  state=%s\n", status.RunID, status.State)
-		}
-		showLatestHandoff(wd, "")
-		showLearningHealth(wd)
-		return nil
+		return listAllRuns(wd)
 	}
 
-	runID := args[0]
+	return showRunStatus(wd, args[0])
+}
+
+// listAllRuns displays a summary of all runs in the project.
+func listAllRuns(wd string) error {
+	runsDir := filepath.Join(wd, fabrikDir, "runs")
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		return fmt.Errorf("no runs found (is this a fabrikk project?)")
+	}
+	fmt.Println("Runs:")
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		eng := newEngine(wd, e.Name())
+		status, err := eng.ReconcileRunStatus()
+		if err != nil {
+			fmt.Printf("  %s (status unreadable)\n", e.Name())
+			continue
+		}
+		fmt.Printf("  %s  state=%s\n", status.RunID, status.State)
+	}
+	showLatestHandoff(wd, "")
+	showLearningHealth(wd)
+	return nil
+}
+
+// showRunStatus displays detailed status for a single run.
+func showRunStatus(wd, runID string) error {
 	eng := newEngine(wd, runID)
 	status, err := eng.ReconcileRunStatus()
 	if err != nil {
@@ -684,14 +727,13 @@ func cmdStatus(_ context.Context, args []string) error {
 	return nil
 }
 
-func cmdReport(args []string) error {
+// parseReportArgs parses the report command arguments, returning runID, taskID, and fromPath.
+func parseReportArgs(args []string) (runID, taskID, fromPath string, err error) {
 	if len(args) < 3 {
-		return fmt.Errorf("usage: fabrikk report <run-id> <task-id> --from <path>")
+		return "", "", "", fmt.Errorf("usage: fabrikk report <run-id> <task-id> --from <path>")
 	}
-
-	runID := args[0]
-	taskID := args[1]
-	var fromPath string
+	runID = args[0]
+	taskID = args[1]
 	for i := 2; i < len(args); i++ {
 		if args[i] == flagFrom && i+1 < len(args) {
 			fromPath = args[i+1]
@@ -699,7 +741,33 @@ func cmdReport(args []string) error {
 		}
 	}
 	if fromPath == "" {
-		return fmt.Errorf("usage: fabrikk report <run-id> <task-id> --from <path>")
+		return "", "", "", fmt.Errorf("usage: fabrikk report <run-id> <task-id> --from <path>")
+	}
+	return runID, taskID, fromPath, nil
+}
+
+// loadAndValidateReport reads a completion report from disk and validates it against the taskID.
+func loadAndValidateReport(fromPath, taskID string) (state.CompletionReport, error) {
+	var report state.CompletionReport
+	if err := state.ReadJSON(fromPath, &report); err != nil {
+		return report, fmt.Errorf("read completion report: %w", err)
+	}
+	if report.TaskID == "" {
+		report.TaskID = taskID
+	}
+	if report.TaskID != taskID {
+		return report, fmt.Errorf("completion report task_id %q does not match %q", report.TaskID, taskID)
+	}
+	if report.AttemptID == "" {
+		report.AttemptID = "manual-report"
+	}
+	return report, nil
+}
+
+func cmdReport(args []string) error {
+	runID, taskID, fromPath, err := parseReportArgs(args)
+	if err != nil {
+		return err
 	}
 
 	wd, err := workDir()
@@ -707,37 +775,17 @@ func cmdReport(args []string) error {
 		return err
 	}
 
-	runDir := state.NewRunDir(wd, runID) // needed for ReportDir + AppendEvent (not task ops)
 	eng := newEngine(wd, runID)
-	tasks, err := eng.TaskStore.ReadTasks(runID)
-	if err != nil && !errors.Is(err, state.ErrPartialRead) {
-		return fmt.Errorf("read tasks: %w", err)
-	}
-	found := false
-	for i := range tasks {
-		if tasks[i].TaskID == taskID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("task %s not found", taskID)
+	if err := requireTaskExists(eng.TaskStore, runID, taskID); err != nil {
+		return err
 	}
 
-	var report state.CompletionReport
-	if err := state.ReadJSON(fromPath, &report); err != nil {
-		return fmt.Errorf("read completion report: %w", err)
-	}
-	if report.TaskID == "" {
-		report.TaskID = taskID
-	}
-	if report.TaskID != taskID {
-		return fmt.Errorf("completion report task_id %q does not match %q", report.TaskID, taskID)
-	}
-	if report.AttemptID == "" {
-		report.AttemptID = "manual-report"
+	report, err := loadAndValidateReport(fromPath, taskID)
+	if err != nil {
+		return err
 	}
 
+	runDir := state.NewRunDir(wd, runID)
 	reportPath := filepath.Join(runDir.ReportDir(taskID, report.AttemptID), completionReportFile)
 	if err := state.WriteJSON(reportPath, &report); err != nil {
 		return fmt.Errorf("write completion report: %w", err)
@@ -754,6 +802,63 @@ func cmdReport(args []string) error {
 	return nil
 }
 
+// requireTaskExists checks that a task exists in the store, returning an error if not found.
+func requireTaskExists(store state.TaskStore, runID, taskID string) error {
+	tasks, err := store.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
+		return fmt.Errorf("read tasks: %w", err)
+	}
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			return nil
+		}
+	}
+	return fmt.Errorf("task %s not found", taskID)
+}
+
+// findTask looks up a task by ID from the store, returning a pointer or an error.
+func findTask(store state.TaskStore, runID, taskID string) (*state.Task, error) {
+	tasks, err := store.ReadTasks(runID)
+	if err != nil && !errors.Is(err, state.ErrPartialRead) {
+		return nil, fmt.Errorf("read tasks: %w", err)
+	}
+	for i := range tasks {
+		if tasks[i].TaskID == taskID {
+			return &tasks[i], nil
+		}
+	}
+	return nil, fmt.Errorf("task %s not found", taskID)
+}
+
+// handleVerifyPass runs post-verification steps for a passing result.
+func handleVerifyPass(wd string) {
+	learnStore := newLearningStore(wd)
+	report, mErr := learnStore.Maintain(90 * 24 * time.Hour)
+	if mErr != nil || report.Skipped {
+		return
+	}
+	if report.Merged > 0 || report.AutoExpired > 0 || report.GCRemoved > 0 {
+		fmt.Printf("Learning maintenance: %d merged, %d expired, %d removed\n",
+			report.Merged, report.AutoExpired, report.GCRemoved)
+	}
+}
+
+// handleVerifyFail runs post-verification steps for a failing result.
+func handleVerifyFail(eng *engine.Engine, result *state.VerifierResult, task *state.Task) {
+	for _, f := range result.BlockingFindings {
+		fmt.Printf("  [%s] %s: %s\n", f.Severity, f.Category, f.Summary)
+	}
+	// Extract learnings from verification failures (Phase 2)
+	extractLearningsFromVerifier(eng.WorkDir, result, task)
+	_ = eng.RunDir.AppendEvent(state.Event{
+		Timestamp: time.Now(),
+		Type:      "learning_extraction",
+		RunID:     filepath.Base(eng.RunDir.Root),
+		TaskID:    task.TaskID,
+		Detail:    fmt.Sprintf("source=verifier findings=%d", len(result.BlockingFindings)),
+	})
+}
+
 func cmdVerify(ctx context.Context, args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: fabrikk verify <run-id> <task-id>")
@@ -768,20 +873,9 @@ func cmdVerify(ctx context.Context, args []string) error {
 
 	eng := newEngine(wd, runID)
 
-	tasks, err := eng.TaskStore.ReadTasks(runID)
-	if err != nil && !errors.Is(err, state.ErrPartialRead) {
-		return fmt.Errorf("read tasks: %w", err)
-	}
-
-	var task *state.Task
-	for i := range tasks {
-		if tasks[i].TaskID == taskID {
-			task = &tasks[i]
-			break
-		}
-	}
-	if task == nil {
-		return fmt.Errorf("task %s not found", taskID)
+	task, err := findTask(eng.TaskStore, runID, taskID)
+	if err != nil {
+		return err
 	}
 
 	// Read completion report: check task-level path (backward compat),
@@ -804,28 +898,10 @@ func cmdVerify(ctx context.Context, args []string) error {
 
 	if result.Pass {
 		fmt.Println("\nVerification: PASS")
-		// Trigger learning maintenance after successful verification.
-		learnStore := newLearningStore(wd)
-		if report, mErr := learnStore.Maintain(90 * 24 * time.Hour); mErr == nil && !report.Skipped {
-			if report.Merged > 0 || report.AutoExpired > 0 || report.GCRemoved > 0 {
-				fmt.Printf("Learning maintenance: %d merged, %d expired, %d removed\n",
-					report.Merged, report.AutoExpired, report.GCRemoved)
-			}
-		}
+		handleVerifyPass(wd)
 	} else {
 		fmt.Println("\nVerification: FAIL")
-		for _, f := range result.BlockingFindings {
-			fmt.Printf("  [%s] %s: %s\n", f.Severity, f.Category, f.Summary)
-		}
-		// Extract learnings from verification failures (Phase 2)
-		extractLearningsFromVerifier(wd, result, task)
-		_ = eng.RunDir.AppendEvent(state.Event{
-			Timestamp: time.Now(),
-			Type:      "learning_extraction",
-			RunID:     filepath.Base(eng.RunDir.Root),
-			TaskID:    task.TaskID,
-			Detail:    fmt.Sprintf("source=verifier findings=%d", len(result.BlockingFindings)),
-		})
+		handleVerifyFail(eng, result, task)
 	}
 
 	return nil
