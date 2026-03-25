@@ -510,6 +510,7 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	// Start daemon for judge context accumulation.
 	daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
 	defer daemonCleanup()
+	eng.InvokeFn = daemon
 
 	cfg := councilflow.DefaultConfig()
 	cfg.Rounds = rf.rounds

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/php-workx/fabrikk/internal/agentcli"
 	"github.com/php-workx/fabrikk/internal/compiler"
 	"github.com/php-workx/fabrikk/internal/state"
 	"github.com/php-workx/fabrikk/internal/verifier"
@@ -31,6 +32,7 @@ type Engine struct {
 	WorkDir          string                 // repository root
 	TaskStore        state.TaskStore        // nil = fall back to RunDir
 	LearningEnricher state.LearningEnricher // nil = skip learning enrichment
+	InvokeFn         agentcli.InvokeFn      // nil = use agentcli.InvokeFunc; daemon-bound for orchestrator queries
 }
 
 // taskStore returns the configured TaskStore or falls back to RunDir.

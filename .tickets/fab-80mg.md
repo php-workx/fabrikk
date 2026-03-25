@@ -1,6 +1,6 @@
 ---
 id: fab-80mg
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-03-25T12:27:29Z
