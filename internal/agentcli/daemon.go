@@ -289,8 +289,14 @@ func (d *Daemon) queryViaSocket(ctx context.Context, prompt string) (string, err
 
 // restart stops and re-starts the daemon with the same configuration.
 func (d *Daemon) restart(ctx context.Context) error {
+	fmt.Fprintln(os.Stderr, "  daemon: crash detected, restarting...")
 	_ = d.Stop()
-	return d.Start(ctx)
+	if err := d.Start(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "  daemon: restart failed: %v\n", err)
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "  daemon: restarted successfully (context from prior queries lost)")
+	return nil
 }
 
 // QueryFunc returns an InvokeFn that tries the daemon first and falls back

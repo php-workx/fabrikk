@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -399,6 +400,95 @@ func TestDaemon_ContextRetention(t *testing.T) {
 	}
 	if strings.Contains(r3, "alpha") {
 		t.Errorf("query 3 result = %q, should NOT contain %q (context lost on restart)", r3, "alpha")
+	}
+}
+
+func TestDaemon_ConcurrentQuery(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+	cfg := fixtureDaemonConfig(t)
+	d := NewDaemon(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			result, err := d.Query(ctx, fmt.Sprintf("concurrent-%d", n))
+			if err != nil {
+				errs <- fmt.Errorf("query %d: %w", n, err)
+				return
+			}
+			if !strings.Contains(result, fmt.Sprintf("concurrent-%d", n)) {
+				errs <- fmt.Errorf("query %d: unexpected result %q", n, result)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestDaemon_SocketPathTooLong(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+	cfg := fixtureDaemonConfig(t)
+	// Create a very long RunID to exceed Unix socket path limit (~104 bytes on macOS)
+	cfg.RunID = strings.Repeat("x", 200)
+	d := NewDaemon(cfg)
+	err := d.Start(context.Background())
+	if err == nil {
+		_ = d.Stop()
+		t.Fatal("expected error for socket path too long, got nil")
+	}
+	// The error should come from net.Listen, not a panic
+	t.Logf("got expected error: %v", err)
+}
+
+func TestDaemon_AlreadyRunning(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+	cfg := fixtureDaemonConfig(t)
+
+	// Start daemon A
+	a := NewDaemon(cfg)
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("start A: %v", err)
+	}
+
+	// Try to start daemon B on the same socket
+	b := NewDaemon(cfg)
+	err := b.Start(context.Background())
+	if err == nil {
+		_ = b.Stop()
+		_ = a.Stop()
+		t.Fatal("expected error when daemon already running, got nil")
+	}
+	if !strings.Contains(err.Error(), "daemon already running") {
+		_ = a.Stop()
+		t.Fatalf("expected 'daemon already running' error, got: %v", err)
+	}
+
+	// Stop A, now B should be able to start
+	_ = a.Stop()
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("start B after A stopped: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+
+	// Verify B works
+	result, err := b.Query(context.Background(), "hello from B")
+	if err != nil {
+		t.Fatalf("query B: %v", err)
+	}
+	if !strings.Contains(result, "hello from B") {
+		t.Errorf("unexpected result from B: %q", result)
 	}
 }
 
