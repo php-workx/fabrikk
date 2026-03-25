@@ -1,7 +1,7 @@
 # Plan: Daemon-Based Orchestrator Connection
 
-**Status:** Planned
-**Branch:** TBD
+**Status:** Implemented
+**Branch:** feat/daemon-orchestrator
 **Date:** 2026-03-24
 
 ---
@@ -101,13 +101,14 @@ The daemon lives for the duration of a single `fabrikk run`. It is **not** a sys
 type DaemonConfig struct {
     Backend     CLIBackend    // which CLI backend to use (default: Claude Opus)
     SocketDir   string        // directory for the Unix socket (default: os.TempDir())
+    RunID       string        // used in socket/PID filename
     IdleTimeout time.Duration // auto-shutdown after inactivity (default: 30m)
 }
 ```
 
 **Socket location:** `$TMPDIR/fabrikk-<run-id>.sock` — uses a short temp-dir path to avoid Unix socket path length limits (~104 bytes). Scoped per run via run ID. Multiple concurrent runs get separate daemons. The run directory MUST be created with mode 0700 and the socket file MUST be created with mode 0600, restricting access to the owning user.
 
-**PID tracking:** `<run-dir>/daemon.pid` — for cleanup on crash.
+**PID tracking:** `$TMPDIR/fabrikk-<run-id>.pid` — stored next to the socket in TMPDIR, for cleanup on crash.
 
 **Startup sequence:**
 1. Resolve Claude CLI path (existing `ResolveCommand`)
@@ -123,11 +124,13 @@ type DaemonConfig struct {
 ```go
 // Daemon manages a persistent Claude process for a single run.
 type Daemon struct {
-    config   DaemonConfig
-    process  *claudeProcess
-    listener net.Listener
-    sockPath string
-    pidPath  string
+    config       DaemonConfig
+    process      *claudeProcess
+    listener     net.Listener
+    sockPath     string
+    pidPath      string
+    mu           sync.Mutex // protects needsRestart and restart operations
+    needsRestart bool
 }
 
 // Start launches the Claude process and begins accepting connections.
@@ -144,16 +147,12 @@ The daemon lifecycle is managed by the CLI command that orchestrates a full run 
 
 ```go
 // In the CLI command that orchestrates a full run (cmd/fabrikk/):
-daemon := agentcli.NewDaemon(agentcli.DaemonConfig{
-    Backend:   agentcli.KnownBackends[agentcli.BackendClaude],
-    SocketDir: os.TempDir(),
-})
-if err := daemon.Start(ctx); err != nil {
-    logger.Warn("daemon start failed, falling back to one-shot", "err", err)
-} else {
-    defer daemon.Stop()
-    judgeConfig.InvokeFn = daemon.QueryFunc()
-}
+// startJudgeDaemon returns (invokeFn, cleanup) — invokeFn is nil on failure.
+daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
+defer daemonCleanup()
+
+cfg := councilflow.DefaultConfig()
+cfg.JudgeInvokeFn = daemon // nil-safe: nil means fall back to one-shot
 
 // ... call engine phase methods (Prepare, Compile, etc.) ...
 ```
@@ -195,7 +194,7 @@ cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
 
 #### Wave 3: Hardening
 
-6. **Crash recovery** — If the daemon process dies during query Q: (a) Q is retried once via one-shot `Invoke` and either succeeds or surfaces that error to the caller; (b) before the next daemon-eligible query, a fresh daemon is started; (c) old `<run-dir>/daemon.sock` and `<run-dir>/daemon.pid` are removed before the new daemon creates replacements; (d) conversation context from prior queries is lost — the run continues but subsequent judge queries no longer benefit from accumulated context. Log the crash and restart event.
+6. **Crash recovery** — If the daemon process dies during query Q: (a) Q is retried once via one-shot `Invoke` and either succeeds or surfaces that error to the caller; (b) before the next daemon-eligible query, a fresh daemon is started; (c) old `$TMPDIR/fabrikk-<run-id>.sock` and `$TMPDIR/fabrikk-<run-id>.pid` are removed before the new daemon creates replacements; (d) conversation context from prior queries is lost — the run continues but subsequent judge queries no longer benefit from accumulated context. Log the crash and restart event.
 
 7. **Graceful shutdown** — Context cancellation propagates to the Claude process. Socket cleanup on all exit paths (defer, signal handler, panic recovery).
 
@@ -254,7 +253,7 @@ type DaemonResponse struct {
 ### Run-Scoped Artifacts
 
 - **Socket:** `$TMPDIR/fabrikk-<run-id>.sock` — Unix domain socket, short path to avoid sun_path limits
-- **PID file:** `<run-dir>/daemon.pid` — process ID for crash cleanup
+- **PID file:** `$TMPDIR/fabrikk-<run-id>.pid` — process ID for crash cleanup (next to socket)
 
 ## 4. Interfaces
 
@@ -271,12 +270,12 @@ func (d *Daemon) QueryFunc() InvokeFn {
             return result, nil
         }
         // Daemon failed, fall back to one-shot
-        return Invoke(ctx, backend, prompt, timeoutSec)
+        return InvokeFunc(ctx, backend, prompt, timeoutSec)
     }
 }
 ```
 
-The engine passes `daemon.QueryFunc()` to `JudgeConfig.InvokeFn` and orchestrator config at run start. Persona reviewers continue using `agentcli.Invoke` directly — they need parallel execution, not shared context. The package-level `InvokeFunc` global is not mutated.
+The CLI passes `daemon.QueryFunc()` to `CouncilConfig.JudgeInvokeFn` at run start. The council pipeline maps this to `JudgeConfig.ConsolidateInvokeFn` (used only for `resolveConflicts`, not per-reviewer `judgeOneReview` calls). Persona reviewers continue using `agentcli.Invoke` directly — they need parallel execution, not shared context. The package-level `InvokeFunc` global is not mutated.
 
 ### Daemon API
 
@@ -325,4 +324,4 @@ func (d *Daemon) QueryFunc() agentcli.InvokeFn { ... }
 
 ## 8. Approval
 
-**Status:** Planned — not yet approved for implementation.
+**Status:** Implemented on feat/daemon-orchestrator branch.
