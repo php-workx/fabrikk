@@ -316,7 +316,8 @@ func (d *Daemon) QueryFunc() InvokeFn {
 }
 
 // IsDaemonRunning checks whether a daemon is listening on the given Unix
-// socket path by attempting a connection.
+// socket path by attempting a connection. Intended for CLI status commands,
+// health checks, and multi-run coordination.
 func IsDaemonRunning(sockPath string) bool {
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {

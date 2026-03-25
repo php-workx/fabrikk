@@ -244,7 +244,7 @@ type DaemonResponse struct {
 | `internal/agentcli/daemon.go` | **NEW** — Daemon process management, socket listener, query client | ~250 |
 | `internal/agentcli/daemon_test.go` | **NEW** — Daemon lifecycle tests using fixture process (start, query, context retention, stop, fallback, crash recovery). Tests must NOT invoke the real Claude CLI. A scripted fake process emits fixed `stream-json` init/result/error frames and can terminate on demand. | ~200 |
 | `internal/agentcli/stream.go` | **NEW** — Stream-JSON types and parsing (StreamMessage, StreamResponse) | ~80 |
-| `internal/agentcli/agentcli.go` | Add `IsDaemonRunning` helper | +10 |
+| `internal/agentcli/daemon.go` | (also contains) `IsDaemonRunning` helper | — |
 | `cmd/fabrikk/` (run command) | Start/stop daemon at run boundaries, wire judge invoke function via config | +30 |
 | `internal/councilflow/judge.go` | Accept `InvokeFn` parameter instead of using package-level `InvokeFunc` | ~10 (refactor) |
 

@@ -545,3 +545,31 @@ func TestDaemon_GracefulShutdown(t *testing.T) {
 		t.Fatalf("second Stop: %v", err)
 	}
 }
+
+func TestIsDaemonRunning(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+
+	cfg := fixtureDaemonConfig(t)
+	d := NewDaemon(cfg)
+
+	// Not started yet — should return false.
+	if IsDaemonRunning(d.SocketPath()) {
+		t.Fatal("expected false before Start")
+	}
+
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Running — should return true.
+	if !IsDaemonRunning(d.SocketPath()) {
+		t.Fatal("expected true while running")
+	}
+
+	_ = d.Stop()
+
+	// Stopped — should return false.
+	if IsDaemonRunning(d.SocketPath()) {
+		t.Fatal("expected false after Stop")
+	}
+}
