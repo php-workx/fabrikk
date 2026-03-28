@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Backend name constants for CLI tool routing.
@@ -108,19 +110,54 @@ func replaceArgValue(args []string, flag, value string) []string {
 	return append(args, flag, value)
 }
 
-// isBackendDisabled checks if a backend name appears in the FABRIKK_DISABLED_BACKENDS
-// environment variable (comma-separated list, e.g., "gemini,codex").
+// isBackendDisabled checks if a backend is disabled via:
+// 1. FABRIKK_DISABLED_BACKENDS env var (comma-separated, e.g., "gemini,codex")
+// 2. .fabrikk/config.yaml disabled_backends list in the working directory
+// Env var takes precedence when set.
 func isBackendDisabled(name string) bool {
-	disabled := os.Getenv("FABRIKK_DISABLED_BACKENDS")
-	if disabled == "" {
-		return false
-	}
-	for _, d := range strings.Split(disabled, ",") {
-		if strings.TrimSpace(d) == name {
+	disabled := disabledBackendsList()
+	for _, d := range disabled {
+		if d == name {
 			return true
 		}
 	}
 	return false
+}
+
+// disabledBackendsList returns the list of disabled backends from env or config file.
+func disabledBackendsList() []string {
+	// Env var takes precedence.
+	if env := os.Getenv("FABRIKK_DISABLED_BACKENDS"); env != "" {
+		var result []string
+		for _, d := range strings.Split(env, ",") {
+			if s := strings.TrimSpace(d); s != "" {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+
+	// Fall back to config file.
+	return loadDisabledBackendsFromConfig()
+}
+
+// configDisabledBackends is the YAML structure for .fabrikk/config.yaml.
+type configDisabledBackends struct {
+	DisabledBackends []string `yaml:"disabled_backends"`
+}
+
+// loadDisabledBackendsFromConfig reads fabrikk.yaml from the working directory.
+// Returns nil if the file doesn't exist or can't be parsed.
+func loadDisabledBackendsFromConfig() []string {
+	data, err := os.ReadFile("fabrikk.yaml")
+	if err != nil {
+		return nil
+	}
+	var cfg configDisabledBackends
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	return cfg.DisabledBackends
 }
 
 // InvokeFn is the function signature for invoking a CLI backend.
