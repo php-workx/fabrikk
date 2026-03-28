@@ -347,11 +347,20 @@ func (d *Daemon) restartLocked(ctx context.Context) error {
 // get daemon-or-fallback transparently. When the daemon fails, it logs the
 // event and the daemon will attempt restart on the next call.
 //
-// Note: the returned function ignores the backend and timeoutSec arguments
-// when the daemon is healthy — the daemon always uses the backend it was
-// configured with. These args are forwarded to the one-shot fallback only.
+// The returned function uses timeoutSec to derive a context deadline when
+// the caller's ctx has none (matching the contract of one-shot Invoke).
+// The backend argument is only used for the one-shot fallback path — the
+// daemon always uses the backend it was configured with.
 func (d *Daemon) QueryFunc() InvokeFn {
 	return func(ctx context.Context, backend *CLIBackend, prompt string, timeoutSec int) (string, error) {
+		// Derive deadline from timeoutSec when ctx has none, so the daemon
+		// path respects the same timeout contract as one-shot Invoke.
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline && timeoutSec > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+			defer cancel()
+		}
+
 		result, err := d.Query(ctx, prompt)
 		if err == nil {
 			return result, nil
