@@ -31,8 +31,10 @@ type Daemon struct {
 	listener     net.Listener
 	sockPath     string
 	pidPath      string
-	mu           sync.Mutex // protects needsRestart and restart operations
+	mu           sync.Mutex // protects needsRestart, process, listener, and restart operations
 	needsRestart bool
+	stopOnce     sync.Once
+	stopCh       chan struct{} // closed by Stop to signal background goroutines
 }
 
 // NewDaemon creates a Daemon with sensible defaults applied to the config.
@@ -47,6 +49,7 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 		config:   cfg,
 		sockPath: filepath.Join(cfg.SocketDir, fmt.Sprintf("fabrikk-%s.sock", cfg.RunID)),
 		pidPath:  filepath.Join(cfg.SocketDir, fmt.Sprintf("fabrikk-%s.pid", cfg.RunID)),
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -118,38 +121,51 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start claude process: %w", err)
 	}
-	d.process = proc
 
-	// Set restrictive umask before creating socket to avoid a permissions
-	// window between Listen and Chmod.
-	oldMask := syscall.Umask(0o177) // creates socket with 0600
 	ln, err := net.Listen("unix", d.sockPath)
-	syscall.Umask(oldMask) // restore original umask
 	if err != nil {
-		d.process.cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
-		_ = d.process.cmd.Wait()     // reap to avoid zombie
+		proc.cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = proc.cmd.Wait()     // reap to avoid zombie
 		return fmt.Errorf("listen on socket: %w", err)
 	}
-	d.listener = ln
 
-	pidData := fmt.Sprintf("%d", d.process.cmd.Process.Pid)
+	// Set socket permissions explicitly (avoids process-wide Umask manipulation).
+	if err := os.Chmod(d.sockPath, 0o600); err != nil {
+		_ = ln.Close()
+		proc.cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = proc.cmd.Wait()     // reap to avoid zombie
+		return fmt.Errorf("chmod socket: %w", err)
+	}
+
+	pidData := fmt.Sprintf("%d", proc.cmd.Process.Pid)
 	if err := os.WriteFile(d.pidPath, []byte(pidData), 0o600); err != nil {
-		_ = d.listener.Close()
-		d.process.cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = ln.Close()
+		_ = os.Remove(d.sockPath)
+		proc.cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
+		_ = proc.cmd.Wait()     // reap to avoid zombie
 		return fmt.Errorf("write pid file: %w", err)
 	}
 
+	// Commit state under lock.
+	d.mu.Lock()
+	d.process = proc
+	d.listener = ln
+	d.stopOnce = sync.Once{} // reset for restart
+	d.stopCh = make(chan struct{})
+	d.mu.Unlock()
+
 	var activityMu sync.Mutex
 	lastActivity := time.Now()
+	stopCh := d.stopCh // capture by value for goroutines
 
 	// Accept loop.
 	go func() {
 		for {
-			conn, acceptErr := d.listener.Accept()
+			conn, acceptErr := ln.Accept()
 			if acceptErr != nil {
 				return // listener closed
 			}
-			go handleDaemonConn(conn, d.process, &activityMu, &lastActivity)
+			go handleDaemonConn(conn, proc, &activityMu, &lastActivity)
 		}
 	}()
 
@@ -167,16 +183,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 					_ = d.Stop()
 					return
 				}
+			case <-stopCh:
+				return
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
-	// Context cancellation watcher.
+	// Context cancellation watcher — capture ln by value so it only closes
+	// the listener it was created for, not a future one after restart.
 	go func() {
-		<-ctx.Done()
-		_ = d.listener.Close()
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+		case <-stopCh:
+			// daemon stopped explicitly — goroutine exits cleanly
+		}
 	}()
 
 	return nil
@@ -185,38 +208,51 @@ func (d *Daemon) Start(ctx context.Context) error {
 // Stop shuts down the daemon gracefully: closes the listener, sends EOF to the
 // Claude process via stdin close, waits for it to exit (with timeout), and
 // removes the socket and PID files. If the process does not exit within 5
-// seconds, it is forcefully killed. Safe to call multiple times.
+// seconds, it is forcefully killed. Safe to call multiple times (idempotent
+// via sync.Once).
 func (d *Daemon) Stop() error {
-	// Close listener first to stop accepting new connections.
-	if d.listener != nil {
-		_ = d.listener.Close()
-	}
+	d.stopOnce.Do(func() {
+		// Signal background goroutines to exit.
+		close(d.stopCh)
 
-	if d.process != nil {
-		// Try graceful shutdown: close stdin so Claude receives EOF.
-		if d.process.stdin != nil {
-			_ = d.process.stdin.Close()
+		d.mu.Lock()
+		ln := d.listener
+		proc := d.process
+		d.listener = nil
+		d.process = nil
+		d.mu.Unlock()
+
+		// Close listener first to stop accepting new connections.
+		if ln != nil {
+			_ = ln.Close()
 		}
 
-		// Wait for process to exit, with timeout.
-		done := make(chan error, 1)
-		go func() {
-			done <- d.process.wait()
-		}()
+		if proc != nil {
+			// Try graceful shutdown: close stdin so Claude receives EOF.
+			if proc.stdin != nil {
+				_ = proc.stdin.Close()
+			}
 
-		select {
-		case <-done:
-			// Process exited gracefully.
-		case <-time.After(5 * time.Second):
-			// Force kill after timeout.
-			_ = d.process.cmd.Process.Kill()
-			<-done // Wait for Kill to complete.
+			// Wait for process to exit, with timeout.
+			done := make(chan error, 1)
+			go func() {
+				done <- proc.wait()
+			}()
+
+			select {
+			case <-done:
+				// Process exited gracefully.
+			case <-time.After(5 * time.Second):
+				// Force kill after timeout.
+				_ = proc.cmd.Process.Kill()
+				<-done // Wait for Kill to complete.
+			}
 		}
-	}
 
-	// Clean up files.
-	_ = os.Remove(d.sockPath)
-	_ = os.Remove(d.pidPath)
+		// Clean up files.
+		_ = os.Remove(d.sockPath)
+		_ = os.Remove(d.pidPath)
+	})
 	return nil
 }
 
@@ -225,18 +261,20 @@ func (d *Daemon) Stop() error {
 // restart before querying. On failure, it marks the daemon for restart on
 // the next call.
 func (d *Daemon) Query(ctx context.Context, prompt string) (string, error) {
-	// If daemon needs restart from a previous crash, attempt it.
+	// If daemon needs restart from a previous crash, attempt it while holding
+	// d.mu to prevent concurrent callers from querying a dead socket.
 	d.mu.Lock()
 	if d.needsRestart {
 		d.needsRestart = false
-		d.mu.Unlock()
-		if restartErr := d.restart(ctx); restartErr != nil {
-			// Re-mark for retry on next call so we don't get stuck.
-			d.mu.Lock()
+		// Hold the lock during restart so concurrent callers wait rather than
+		// hitting the dead socket.
+		restartErr := d.restartLocked(ctx)
+		if restartErr != nil {
 			d.needsRestart = true
 			d.mu.Unlock()
 			return "", fmt.Errorf("daemon restart failed: %w", restartErr)
 		}
+		d.mu.Unlock()
 	} else {
 		d.mu.Unlock()
 	}
@@ -287,11 +325,16 @@ func (d *Daemon) queryViaSocket(ctx context.Context, prompt string) (string, err
 	return resp.Result, nil
 }
 
-// restart stops and re-starts the daemon with the same configuration.
-func (d *Daemon) restart(ctx context.Context) error {
+// restartLocked stops and re-starts the daemon. Caller must hold d.mu.
+// The lock is temporarily released during Stop/Start to allow those methods
+// to acquire it internally, then re-acquired before return.
+func (d *Daemon) restartLocked(ctx context.Context) error {
+	d.mu.Unlock() // release for Stop/Start which may lock internally
 	fmt.Fprintln(os.Stderr, "  daemon: crash detected, restarting...")
 	_ = d.Stop()
-	if err := d.Start(ctx); err != nil {
+	err := d.Start(ctx)
+	d.mu.Lock() // re-acquire before returning to caller
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "  daemon: restart failed: %v\n", err)
 		return err
 	}
@@ -303,6 +346,10 @@ func (d *Daemon) restart(ctx context.Context) error {
 // to one-shot Invoke on error. This is the key integration point — callers
 // get daemon-or-fallback transparently. When the daemon fails, it logs the
 // event and the daemon will attempt restart on the next call.
+//
+// Note: the returned function ignores the backend and timeoutSec arguments
+// when the daemon is healthy — the daemon always uses the backend it was
+// configured with. These args are forwarded to the one-shot fallback only.
 func (d *Daemon) QueryFunc() InvokeFn {
 	return func(ctx context.Context, backend *CLIBackend, prompt string, timeoutSec int) (string, error) {
 		result, err := d.Query(ctx, prompt)

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -110,13 +111,22 @@ func replaceArgValue(args []string, flag, value string) []string {
 	return append(args, flag, value)
 }
 
+// disabledBackendsOnce caches the disabled backends list for the process lifetime.
+var (
+	disabledBackendsOnce   sync.Once
+	disabledBackendsCached []string
+)
+
 // isBackendDisabled checks if a backend is disabled via:
 // 1. FABRIKK_DISABLED_BACKENDS env var (comma-separated, e.g., "gemini,codex")
-// 2. .fabrikk/config.yaml disabled_backends list in the working directory
-// Env var takes precedence when set.
+// 2. fabrikk.yaml disabled_backends list in the working directory
+// Env var takes precedence when set (even if empty — empty clears all restrictions).
+// The result is cached for the process lifetime via sync.Once.
 func isBackendDisabled(name string) bool {
-	disabled := disabledBackendsList()
-	for _, d := range disabled {
+	disabledBackendsOnce.Do(func() {
+		disabledBackendsCached = resolveDisabledBackends()
+	})
+	for _, d := range disabledBackendsCached {
 		if d == name {
 			return true
 		}
@@ -124,10 +134,12 @@ func isBackendDisabled(name string) bool {
 	return false
 }
 
-// disabledBackendsList returns the list of disabled backends from env or config file.
-func disabledBackendsList() []string {
-	// Env var takes precedence.
-	if env := os.Getenv("FABRIKK_DISABLED_BACKENDS"); env != "" {
+// resolveDisabledBackends loads the disabled backends list from env or config file.
+// Uses os.LookupEnv to distinguish "not set" from "set to empty" — an empty
+// env var clears config-file restrictions (returns nil, not fallthrough).
+func resolveDisabledBackends() []string {
+	// Env var takes precedence when set (including empty = no restrictions).
+	if env, present := os.LookupEnv("FABRIKK_DISABLED_BACKENDS"); present {
 		var result []string
 		for _, d := range strings.Split(env, ",") {
 			if s := strings.TrimSpace(d); s != "" {
@@ -141,7 +153,7 @@ func disabledBackendsList() []string {
 	return loadDisabledBackendsFromConfig()
 }
 
-// configDisabledBackends is the YAML structure for .fabrikk/config.yaml.
+// configDisabledBackends is the YAML structure for fabrikk.yaml.
 type configDisabledBackends struct {
 	DisabledBackends []string `yaml:"disabled_backends"`
 }
@@ -155,6 +167,7 @@ func loadDisabledBackendsFromConfig() []string {
 	}
 	var cfg configDisabledBackends
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: fabrikk.yaml parse error: %v\n", err)
 		return nil
 	}
 	return cfg.DisabledBackends

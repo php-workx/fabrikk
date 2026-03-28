@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -45,7 +46,16 @@ func TestExtractFromCodeFence_Variants(t *testing.T) {
 	}
 }
 
+// resetDisabledBackendsCache resets the sync.Once cache so tests can set
+// different env vars and see the effect. Must be called before each test that
+// changes FABRIKK_DISABLED_BACKENDS.
+func resetDisabledBackendsCache() {
+	disabledBackendsOnce = sync.Once{}
+	disabledBackendsCached = nil
+}
+
 func TestBackendFor_DisabledFallsBackToClaude(t *testing.T) {
+	resetDisabledBackendsCache()
 	t.Setenv("FABRIKK_DISABLED_BACKENDS", "gemini")
 
 	got := BackendFor(BackendGemini, "")
@@ -62,6 +72,7 @@ func TestBackendFor_DisabledFallsBackToClaude(t *testing.T) {
 }
 
 func TestBackendFor_MultipleDisabled(t *testing.T) {
+	resetDisabledBackendsCache()
 	t.Setenv("FABRIKK_DISABLED_BACKENDS", "gemini,codex")
 
 	gotGemini := BackendFor(BackendGemini, "")
@@ -77,6 +88,7 @@ func TestBackendFor_MultipleDisabled(t *testing.T) {
 }
 
 func TestBackendFor_NoneDisabled(t *testing.T) {
+	resetDisabledBackendsCache()
 	t.Setenv("FABRIKK_DISABLED_BACKENDS", "")
 
 	got := BackendFor(BackendGemini, "")
@@ -87,8 +99,7 @@ func TestBackendFor_NoneDisabled(t *testing.T) {
 }
 
 func TestBackendFor_DisabledViaConfigFile(t *testing.T) {
-	// Env var must be unset so config file is consulted.
-	t.Setenv("FABRIKK_DISABLED_BACKENDS", "")
+	resetDisabledBackendsCache()
 
 	// Create a temp dir with fabrikk.yaml and chdir into it.
 	dir := t.TempDir()

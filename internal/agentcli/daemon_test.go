@@ -324,13 +324,9 @@ func TestDaemon_CrashRecovery(t *testing.T) {
 		t.Errorf("fallback result = %q, want %q", fbResult, "fallback:during-crash")
 	}
 
-	// Step 4: The needsRestart flag should be set. A direct Query call should
-	// trigger restart and succeed through the daemon again.
-	if !d.needsRestart {
-		t.Fatal("expected needsRestart to be true after crash")
-	}
-
-	// Restore real InvokeFunc so we can tell if the daemon path is used.
+	// Step 4: A direct Query call should trigger restart and succeed through
+	// the daemon again (verifying needsRestart was set without reading the
+	// field directly, which would race under -race).
 	InvokeFunc = origInvoke
 
 	result, err = d.Query(ctx, "after-restart")
