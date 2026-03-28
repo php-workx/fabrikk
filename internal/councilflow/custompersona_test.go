@@ -250,6 +250,60 @@ func TestSplitPersonaFrontmatter_NoFrontmatter(t *testing.T) {
 	}
 }
 
+func TestLoadCustomPersona_MissingDisplayName(t *testing.T) {
+	content := `---
+persona_id: no-name
+perspective: "Has perspective but no name"
+---
+Instructions here.
+`
+	path := writePersonaFile(t, "noname.md", content)
+
+	_, err := LoadCustomPersona(path)
+	if err == nil {
+		t.Fatal("expected error for missing display_name")
+	}
+	if !strings.Contains(err.Error(), "display_name is required") {
+		t.Errorf("error = %v, want display_name required", err)
+	}
+}
+
+func TestLoadCustomPersona_MissingPerspective(t *testing.T) {
+	content := `---
+persona_id: no-perspective
+display_name: No Perspective
+---
+Instructions here.
+`
+	path := writePersonaFile(t, "nopersp.md", content)
+
+	_, err := LoadCustomPersona(path)
+	if err == nil {
+		t.Fatal("expected error for missing perspective")
+	}
+	if !strings.Contains(err.Error(), "perspective is required") {
+		t.Errorf("error = %v, want perspective required", err)
+	}
+}
+
+func TestLoadCustomPersona_FileNotFound(t *testing.T) {
+	_, err := LoadCustomPersona("/nonexistent/path/persona.md")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestSplitPersonaFrontmatter_MissingClosingDelimiter(t *testing.T) {
+	data := []byte("---\npersona_id: test\nNo closing delimiter here.")
+	_, _, err := splitPersonaFrontmatter(data)
+	if err == nil {
+		t.Fatal("expected error for missing closing ---")
+	}
+	if !strings.Contains(err.Error(), "closing ---") {
+		t.Errorf("error = %v, want 'closing ---'", err)
+	}
+}
+
 func writePersonaFile(t *testing.T, name, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
