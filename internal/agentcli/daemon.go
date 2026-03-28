@@ -412,6 +412,7 @@ func buildDaemonArgs(cfg DaemonConfig) []string {
 	}
 	return []string{
 		"--print",
+		"--verbose",
 		"--model", model,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
