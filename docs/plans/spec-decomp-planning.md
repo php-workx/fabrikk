@@ -145,28 +145,84 @@ This increases parallelism by removing artificial serialization from the current
 
 **Currently:** `DraftExecutionPlan` calls `compiler.Compile(artifact)` which works from raw requirement text. No codebase exploration.
 
-**Change:** Add an LLM agent exploration step before plan drafting. The engine dispatches a CLI agent (via `agentcli`) with a structured prompt containing the requirements and project root. The agent explores the codebase using its native tools (Grep, Glob, Read) and returns structured JSON with concrete file paths, function signatures, and reuse points.
+**Change:** Add a two-phase exploration step before plan drafting: deterministic structural analysis first, then LLM interpretation.
 
-#### Why LLM agent, not AST parsing
+#### Hybrid approach: deterministic analysis + LLM interpretation
 
-1. **Language-agnostic immediately** — works on Go, Python, TypeScript, Rust, PHP, or any language the target project uses. No per-language extractors to write or maintain.
-2. **Zero extraction code** — the agent uses Grep/Glob/Read to discover symbols. No `go/parser`, tree-sitter, or AST bindings needed in fabrikk.
-3. **No additional cost** — users run local CLI tools (Claude, Codex) on existing subscriptions. The same pipeline already pays for council review.
-4. **Richer understanding** — an LLM can identify reuse points, infer intent from naming conventions, and understand cross-file relationships that pure AST parsing misses.
+**Phase 1 — Deterministic structural analysis** (fast, cached, no LLM tokens):
 
-#### Exploration prompt
+Shell out to `code_intel.py` from the codereview skill (`~/workspaces/skill-codereview/scripts/code_intel.py`) which provides:
+- **Tree-sitter AST extraction** (8 languages, regex fallback) — function signatures, imports, exports with line ranges and visibility
+- **Semantic similarity** — all-MiniLM-L6-v2 ONNX embeddings find related functions across files
+- **Dependency graph** — import edges + cross-file call edges + semantic similarity scores
+- **Complexity hotspots** — gocyclo/radon with tree-sitter fallback
+
+All output as JSON. Tree-sitter is optional (graceful regex fallback). Results are cached by file mtime — subsequent runs only re-analyze changed files.
+
+When `code_intel.py` is not available (e.g., no Python in PATH), fall back to pure LLM exploration.
+
+**Phase 2 — LLM interpretation** (uses structural data as context):
+
+Dispatch a CLI agent (via `agentcli`) with:
+- The normalized requirements from the `RunArtifact`
+- The structural analysis JSON from Phase 1 (symbols, dependency graph, semantic clusters)
+- Instructions to map requirements to code locations and return `ExplorationResult`
+
+The LLM doesn't waste tokens rediscovering file structure — it interprets requirements against the structural data:
+1. **Map requirements to symbols** — which existing functions/types each requirement touches
+2. **Identify reuse points** — semantic similarity suggests related code the plan should build on
+3. **Flag gaps** — requirements that don't map to any existing symbol need new files
+4. **Suggest task grouping** — dependency graph edges inform wave computation
+
+#### Why hybrid, not pure LLM or pure AST
+
+- Pure LLM: wastes tokens on Grep/Read to rediscover what AST parsing finds instantly
+- Pure AST: can't match requirements to code by intent, only by name
+- Hybrid: deterministic analysis provides the facts, LLM provides the judgment
+
+The codereview skill is being migrated to Go — once complete, the extraction becomes a native fabrikk library instead of a subprocess call.
+
+#### Structural analysis dispatch
+
+```go
+func (e *Engine) runStructuralAnalysis(ctx context.Context) (*StructuralAnalysis, error) {
+    // Try code_intel.py if available.
+    codeIntelPath := resolveCodeIntel() // checks PATH, common install locations
+    if codeIntelPath == "" {
+        return nil, nil // not available — caller falls back to pure LLM
+    }
+
+    cmd := exec.CommandContext(ctx, "python3", codeIntelPath, "graph",
+        "--root", e.WorkDir,
+        "--json",
+    )
+    out, err := cmd.Output()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "  code_intel: %v (falling back to LLM exploration)\n", err)
+        return nil, nil
+    }
+
+    var analysis StructuralAnalysis
+    if err := json.Unmarshal(out, &analysis); err != nil {
+        return nil, nil
+    }
+    return &analysis, nil
+}
+```
+
+#### LLM exploration prompt
 
 The engine builds a structured prompt containing:
 - The normalized requirements from the `RunArtifact`
-- The project root path
+- The structural analysis JSON (if available) — symbols, dependency graph, semantic edges
 - Instructions to return a JSON response matching the `ExplorationResult` schema
 
 The agent is instructed to:
-1. **Discover project structure** — identify source directories, languages, build system
+1. **Map requirements to code** — using the structural data, identify which symbols each requirement modifies
 2. **Find relevant files** — for each requirement, locate files likely to be modified or created
-3. **Extract symbols** — function signatures, type definitions, interfaces at the modification points
+3. **Identify reuse points** — semantic similarity edges + existing implementations the plan should build on
 4. **Find existing tests** — test files and test function names covering the relevant code
-5. **Identify reuse points** — existing implementations the plan should build on, with `file:line` references
+5. **Flag new code** — requirements that don't map to existing symbols need new files/functions
 
 #### ExplorationResult type
 
@@ -231,13 +287,16 @@ The prompt requests JSON output matching the `ExplorationResult` schema. Respons
 - Results populate a new `ExecutionSlice.ImplementationDetail` field (symbol-level specs)
 - The exploration result is persisted to the run directory for the council review to reference
 
-#### Future: optional accelerators
+#### Future: native Go integration
 
-When available, external tools can provide faster or deeper exploration:
-- **Roam** (`roam-code`) — if `roam` is in PATH, use `roam search` / `roam context` / `roam impact` for pre-indexed structural analysis. Avoids LLM token cost for exploration.
-- **Deterministic AST** — for Go-only projects, `go/parser` + `go/ast` can provide symbol extraction without LLM invocation. Useful for air-gapped or cost-sensitive environments.
+The codereview skill is being migrated from Python to Go. Once complete:
+- `code_intel.py` subprocess call becomes a native Go library import
+- No Python dependency needed
+- Tighter integration with the compiler — structural analysis feeds directly into task compilation
 
-These are additive optimizations, not blockers for the initial implementation.
+Additional optional accelerators:
+- **Roam** (`roam-code`) — if `roam` is in PATH, use `roam search` / `roam context` / `roam impact` for pre-indexed structural analysis with 27-language support
+- When neither `code_intel.py` nor Roam is available, pure LLM exploration via `agentcli.Invoke` remains the fallback
 
 ### 2.4 Conformance Checks Per Task
 
