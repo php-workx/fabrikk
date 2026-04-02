@@ -62,38 +62,44 @@ type learnAddOpts struct {
 func parseLearnAddArgs(args []string) learnAddOpts {
 	opts := learnAddOpts{content: args[0]}
 	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case flagTag:
-			if i+1 < len(args) {
-				opts.tags = append(opts.tags, strings.Split(args[i+1], ",")...)
-				i++
-			}
-		case "--category":
-			if i+1 < len(args) {
-				opts.category = learning.Category(args[i+1])
-				i++
-			}
-		case "--path":
-			if i+1 < len(args) {
-				opts.paths = append(opts.paths, args[i+1])
-				i++
-			}
-		case "--source-task":
-			if i+1 < len(args) {
-				opts.sourceTask = args[i+1]
-				i++
-			}
-		case "--source-run":
-			if i+1 < len(args) {
-				opts.sourceRun = args[i+1]
-				i++
-			}
-		}
+		i = parseLearnAddArg(&opts, args, i)
 	}
 	if opts.category == "" {
 		opts.category = learning.CategoryCodebase
 	}
 	return opts
+}
+
+// parseLearnAddArg processes a single argument for learn-add and returns the (possibly advanced) index.
+func parseLearnAddArg(opts *learnAddOpts, args []string, i int) int {
+	switch args[i] {
+	case flagTag:
+		if i+1 < len(args) {
+			opts.tags = append(opts.tags, strings.Split(args[i+1], ",")...)
+			i++
+		}
+	case "--category":
+		if i+1 < len(args) {
+			opts.category = learning.Category(args[i+1])
+			i++
+		}
+	case "--path":
+		if i+1 < len(args) {
+			opts.paths = append(opts.paths, args[i+1])
+			i++
+		}
+	case "--source-task":
+		if i+1 < len(args) {
+			opts.sourceTask = args[i+1]
+			i++
+		}
+	case "--source-run":
+		if i+1 < len(args) {
+			opts.sourceRun = args[i+1]
+			i++
+		}
+	}
+	return i
 }
 
 // toRepoRelativePaths converts paths to repo-relative form.
@@ -217,45 +223,51 @@ func cmdLearnSearch(store *learning.Store, args []string) error {
 func parseQueryArgs(args []string) learning.QueryOpts {
 	opts := learning.QueryOpts{SortBy: "effectiveness"}
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case flagTag:
-			if i+1 < len(args) {
-				opts.Tags = append(opts.Tags, strings.Split(args[i+1], ",")...)
-				i++
-			}
-		case "--category":
-			if i+1 < len(args) {
-				opts.Category = learning.Category(args[i+1])
-				i++
-			}
-		case "--path":
-			if i+1 < len(args) {
-				opts.Paths = append(opts.Paths, args[i+1])
-				i++
-			}
-		case "--search":
-			if i+1 < len(args) {
-				opts.SearchText = args[i+1]
-				i++
-			}
-		case "--min-effectiveness":
-			if i+1 < len(args) {
-				_, _ = fmt.Sscanf(args[i+1], "%f", &opts.MinEffectiveness)
-				i++
-			}
-		case flagLimit:
-			if i+1 < len(args) {
-				_, _ = fmt.Sscanf(args[i+1], "%d", &opts.Limit)
-				i++
-			}
-		case "--sort":
-			if i+1 < len(args) {
-				opts.SortBy = args[i+1]
-				i++
-			}
-		}
+		i = parseQueryArg(&opts, args, i)
 	}
 	return opts
+}
+
+// parseQueryArg processes a single argument for learn-query and returns the (possibly advanced) index.
+func parseQueryArg(opts *learning.QueryOpts, args []string, i int) int {
+	switch args[i] {
+	case flagTag:
+		if i+1 < len(args) {
+			opts.Tags = append(opts.Tags, strings.Split(args[i+1], ",")...)
+			i++
+		}
+	case "--category":
+		if i+1 < len(args) {
+			opts.Category = learning.Category(args[i+1])
+			i++
+		}
+	case "--path":
+		if i+1 < len(args) {
+			opts.Paths = append(opts.Paths, args[i+1])
+			i++
+		}
+	case "--search":
+		if i+1 < len(args) {
+			opts.SearchText = args[i+1]
+			i++
+		}
+	case "--min-effectiveness":
+		if i+1 < len(args) {
+			_, _ = fmt.Sscanf(args[i+1], "%f", &opts.MinEffectiveness)
+			i++
+		}
+	case flagLimit:
+		if i+1 < len(args) {
+			_, _ = fmt.Sscanf(args[i+1], "%d", &opts.Limit)
+			i++
+		}
+	case "--sort":
+		if i+1 < len(args) {
+			opts.SortBy = args[i+1]
+			i++
+		}
+	}
+	return i
 }
 
 func cmdLearnQuery(store *learning.Store, args []string) error {
@@ -296,38 +308,49 @@ func cmdLearnQuery(store *learning.Store, args []string) error {
 	return nil
 }
 
-func cmdLearnHandoff(store *learning.Store, args []string) error {
+// parseHandoffArgs parses handoff command arguments into a SessionHandoff struct.
+func parseHandoffArgs(args []string) *learning.SessionHandoff {
 	h := &learning.SessionHandoff{}
-
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--run":
-			if i+1 < len(args) {
-				h.RunID = args[i+1]
-				i++
-			}
-		case "--task":
-			if i+1 < len(args) {
-				h.TaskID = args[i+1]
-				i++
-			}
-		case "--summary":
-			if i+1 < len(args) {
-				h.Summary = args[i+1]
-				i++
-			}
-		case "--next":
-			if i+1 < len(args) {
-				h.NextSteps = append(h.NextSteps, args[i+1])
-				i++
-			}
-		case "--question":
-			if i+1 < len(args) {
-				h.OpenQuestions = append(h.OpenQuestions, args[i+1])
-				i++
-			}
+		i = parseHandoffArg(h, args, i)
+	}
+	return h
+}
+
+// parseHandoffArg processes a single argument for the handoff command.
+func parseHandoffArg(h *learning.SessionHandoff, args []string, i int) int {
+	switch args[i] {
+	case "--run":
+		if i+1 < len(args) {
+			h.RunID = args[i+1]
+			i++
+		}
+	case "--task":
+		if i+1 < len(args) {
+			h.TaskID = args[i+1]
+			i++
+		}
+	case "--summary":
+		if i+1 < len(args) {
+			h.Summary = args[i+1]
+			i++
+		}
+	case "--next":
+		if i+1 < len(args) {
+			h.NextSteps = append(h.NextSteps, args[i+1])
+			i++
+		}
+	case "--question":
+		if i+1 < len(args) {
+			h.OpenQuestions = append(h.OpenQuestions, args[i+1])
+			i++
 		}
 	}
+	return i
+}
+
+func cmdLearnHandoff(store *learning.Store, args []string) error {
+	h := parseHandoffArgs(args)
 
 	if h.Summary == "" {
 		return fmt.Errorf("usage: fabrikk learn handoff --summary \"...\" [--next \"...\"] [--run X] [--task X]")
@@ -417,45 +440,72 @@ func cmdLearnRepair(store *learning.Store) error {
 
 func printContextBundle(bundle *learning.ContextBundle) {
 	fmt.Printf("Context for %s (tokens: %d/%d):\n\n", bundle.TaskID, bundle.TokensUsed, bundle.TokenBudget)
-	if len(bundle.Learnings) > 0 {
-		fmt.Printf("Learnings (%d):\n", len(bundle.Learnings))
-		for i := range bundle.Learnings {
-			l := &bundle.Learnings[i]
-			fmt.Printf("  [%s] (%s, eff=%.2f): %s\n", l.ID, l.Category, l.Effectiveness(), l.Summary)
-			if l.Source != "" && l.Source != "manual" {
-				fmt.Printf("         source: %s", l.Source)
-				if l.SourceFinding != "" {
-					fmt.Printf(", finding %s", l.SourceFinding)
-				}
-				if l.SourceRun != "" {
-					fmt.Printf(", %s", l.SourceRun)
-				}
-				fmt.Println()
-			}
-		}
-	} else {
+	printBundleLearnings(bundle.Learnings)
+	printBundlePreventionChecks(bundle.PreventionChecks)
+	printBundleHandoff(bundle.Handoff)
+}
+
+// printBundleLearnings prints the learnings section of a context bundle.
+func printBundleLearnings(learnings []learning.Learning) {
+	if len(learnings) == 0 {
 		fmt.Println("No matching learnings.")
+		return
 	}
-
-	if len(bundle.PreventionChecks) > 0 {
-		fmt.Printf("\nPrevention checks (%d):\n", len(bundle.PreventionChecks))
-		for _, check := range bundle.PreventionChecks {
-			// Show first line (the header) of each check.
-			if idx := strings.Index(check, "\n# "); idx >= 0 {
-				end := strings.Index(check[idx+3:], "\n")
-				if end > 0 {
-					fmt.Printf("  %s\n", check[idx+3:idx+3+end])
-				}
-			}
-		}
+	fmt.Printf("Learnings (%d):\n", len(learnings))
+	for i := range learnings {
+		l := &learnings[i]
+		fmt.Printf("  [%s] (%s, eff=%.2f): %s\n", l.ID, l.Category, l.Effectiveness(), l.Summary)
+		printLearningSource(l)
 	}
+}
 
-	if bundle.Handoff != nil {
-		fmt.Printf("\nSession handoff (%s ago):\n  %s\n",
-			time.Since(bundle.Handoff.CreatedAt).Truncate(time.Minute), bundle.Handoff.Summary)
-		for _, s := range bundle.Handoff.NextSteps {
-			fmt.Printf("  Next: %s\n", s)
-		}
+// printLearningSource prints the provenance line for a non-manual learning.
+func printLearningSource(l *learning.Learning) {
+	if l.Source == "" || l.Source == "manual" {
+		return
+	}
+	fmt.Printf("         source: %s", l.Source)
+	if l.SourceFinding != "" {
+		fmt.Printf(", finding %s", l.SourceFinding)
+	}
+	if l.SourceRun != "" {
+		fmt.Printf(", %s", l.SourceRun)
+	}
+	fmt.Println()
+}
+
+// printBundlePreventionChecks prints the prevention checks section.
+func printBundlePreventionChecks(checks []string) {
+	if len(checks) == 0 {
+		return
+	}
+	fmt.Printf("\nPrevention checks (%d):\n", len(checks))
+	for _, check := range checks {
+		printPreventionCheckHeader(check)
+	}
+}
+
+// printPreventionCheckHeader extracts and prints the header line from a prevention check.
+func printPreventionCheckHeader(check string) {
+	idx := strings.Index(check, "\n# ")
+	if idx < 0 {
+		return
+	}
+	end := strings.Index(check[idx+3:], "\n")
+	if end > 0 {
+		fmt.Printf("  %s\n", check[idx+3:idx+3+end])
+	}
+}
+
+// printBundleHandoff prints the session handoff section.
+func printBundleHandoff(h *learning.SessionHandoff) {
+	if h == nil {
+		return
+	}
+	fmt.Printf("\nSession handoff (%s ago):\n  %s\n",
+		time.Since(h.CreatedAt).Truncate(time.Minute), h.Summary)
+	for _, s := range h.NextSteps {
+		fmt.Printf("  Next: %s\n", s)
 	}
 }
 

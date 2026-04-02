@@ -8,7 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Backend name constants for CLI tool routing.
@@ -64,12 +67,12 @@ func ResolveCommand(name string) string {
 }
 
 // BackendFor returns the CLI backend for a persona with a given backend name and model preference.
-// If the backend name is unknown, it defaults to Claude.
+// If the backend name is unknown or disabled via FABRIKK_DISABLED_BACKENDS, it defaults to Claude.
 func BackendFor(backendName, modelPref string) CLIBackend {
 	base, ok := KnownBackends[backendName]
-	if !ok {
-		// Unknown backend: fall back to Claude with its default model.
-		// Don't apply modelPref — it was intended for the unknown backend
+	if !ok || isBackendDisabled(backendName) {
+		// Unknown or disabled backend: fall back to Claude with its default model.
+		// Don't apply modelPref — it was intended for the other backend
 		// and may be incompatible with Claude (e.g., "gpt-5.4").
 		return KnownBackends[BackendClaude]
 	}
@@ -106,6 +109,68 @@ func replaceArgValue(args []string, flag, value string) []string {
 		}
 	}
 	return append(args, flag, value)
+}
+
+// disabledBackendsOnce caches the disabled backends list for the process lifetime.
+var (
+	disabledBackendsOnce   sync.Once
+	disabledBackendsCached []string
+)
+
+// isBackendDisabled checks if a backend is disabled via:
+// 1. FABRIKK_DISABLED_BACKENDS env var (comma-separated, e.g., "gemini,codex")
+// 2. fabrikk.yaml disabled_backends list in the working directory
+// Env var takes precedence when set (even if empty — empty clears all restrictions).
+// The result is cached for the process lifetime via sync.Once.
+func isBackendDisabled(name string) bool {
+	disabledBackendsOnce.Do(func() {
+		disabledBackendsCached = resolveDisabledBackends()
+	})
+	for _, d := range disabledBackendsCached {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDisabledBackends loads the disabled backends list from env or config file.
+// Uses os.LookupEnv to distinguish "not set" from "set to empty" — an empty
+// env var clears config-file restrictions (returns nil, not fallthrough).
+func resolveDisabledBackends() []string {
+	// Env var takes precedence when set (including empty = no restrictions).
+	if env, present := os.LookupEnv("FABRIKK_DISABLED_BACKENDS"); present {
+		var result []string
+		for _, d := range strings.Split(env, ",") {
+			if s := strings.TrimSpace(d); s != "" {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+
+	// Fall back to config file.
+	return loadDisabledBackendsFromConfig()
+}
+
+// configDisabledBackends is the YAML structure for fabrikk.yaml.
+type configDisabledBackends struct {
+	DisabledBackends []string `yaml:"disabled_backends"`
+}
+
+// loadDisabledBackendsFromConfig reads fabrikk.yaml from the working directory.
+// Returns nil if the file doesn't exist or can't be parsed.
+func loadDisabledBackendsFromConfig() []string {
+	data, err := os.ReadFile("fabrikk.yaml")
+	if err != nil {
+		return nil
+	}
+	var cfg configDisabledBackends
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: fabrikk.yaml parse error: %v\n", err)
+		return nil
+	}
+	return cfg.DisabledBackends
 }
 
 // InvokeFn is the function signature for invoking a CLI backend.
@@ -187,10 +252,15 @@ func ExtractJSONBlock(s string, idx int) string {
 	if open == '[' {
 		closeCh = ']'
 	}
+	return scanBalanced(s, idx, open, closeCh)
+}
+
+// scanBalanced scans for a balanced pair of open/close delimiters, respecting JSON strings.
+func scanBalanced(s string, start int, open, closeCh byte) string {
 	depth := 0
 	inStr := false
 	esc := false
-	for i := idx; i < len(s); i++ {
+	for i := start; i < len(s); i++ {
 		ch := s[i]
 		if esc {
 			esc = false
@@ -213,7 +283,7 @@ func ExtractJSONBlock(s string, idx int) string {
 		case closeCh:
 			depth--
 			if depth == 0 {
-				return s[idx : i+1]
+				return s[start : i+1]
 			}
 		}
 	}

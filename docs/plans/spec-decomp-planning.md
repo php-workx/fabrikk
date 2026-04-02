@@ -145,16 +145,28 @@ This increases parallelism by removing artificial serialization from the current
 
 **Currently:** `DraftExecutionPlan` calls `compiler.Compile(artifact)` which works from raw requirement text. No codebase exploration.
 
-**Change:** Add an optional exploration step before plan drafting. When the engine has access to the working directory, it scans the codebase to produce concrete file paths, function signatures, and reuse points.
+**Change:** Add an LLM agent exploration step before plan drafting. The engine dispatches a CLI agent (via `agentcli`) with a structured prompt containing the requirements and project root. The agent explores the codebase using its native tools (Grep, Glob, Read) and returns structured JSON with concrete file paths, function signatures, and reuse points.
 
-#### Exploration scope
+#### Why LLM agent, not AST parsing
 
-The exploration is **deterministic** (no LLM) and uses `grep`, `go doc`, and AST-level analysis:
+1. **Language-agnostic immediately** — works on Go, Python, TypeScript, Rust, PHP, or any language the target project uses. No per-language extractors to write or maintain.
+2. **Zero extraction code** — the agent uses Grep/Glob/Read to discover symbols. No `go/parser`, tree-sitter, or AST bindings needed in fabrikk.
+3. **No additional cost** — users run local CLI tools (Claude, Codex) on existing subscriptions. The same pipeline already pays for council review.
+4. **Richer understanding** — an LLM can identify reuse points, infer intent from naming conventions, and understand cross-file relationships that pure AST parsing misses.
 
-1. **File discovery:** For each inferred `OwnedPaths`, verify the directory exists and list Go files
-2. **Symbol extraction:** Parse Go files to extract exported function signatures and type definitions
-3. **Test discovery:** Find existing test files and extract test function names
-4. **Reuse point identification:** For each requirement keyword, grep for existing implementations
+#### Exploration prompt
+
+The engine builds a structured prompt containing:
+- The normalized requirements from the `RunArtifact`
+- The project root path
+- Instructions to return a JSON response matching the `ExplorationResult` schema
+
+The agent is instructed to:
+1. **Discover project structure** — identify source directories, languages, build system
+2. **Find relevant files** — for each requirement, locate files likely to be modified or created
+3. **Extract symbols** — function signatures, type definitions, interfaces at the modification points
+4. **Find existing tests** — test files and test function names covering the relevant code
+5. **Identify reuse points** — existing implementations the plan should build on, with `file:line` references
 
 #### ExplorationResult type
 
@@ -163,20 +175,21 @@ type ExplorationResult struct {
     FileInventory []FileInfo     // actual files found
     Symbols       []SymbolInfo   // functions, types, interfaces
     TestFiles     []TestFileInfo // existing tests
-    ReusePpoints  []ReusePoint   // existing code to build on
+    ReusePoints   []ReusePoint   // existing code to build on
 }
 
 type FileInfo struct {
-    Path     string
-    Exists   bool
-    IsNew    bool   // needs to be created
+    Path      string
+    Exists    bool
+    IsNew     bool   // needs to be created
     LineCount int
+    Language  string // detected language (go, python, typescript, etc.)
 }
 
 type SymbolInfo struct {
     FilePath  string
     Line      int
-    Kind      string // "func", "type", "interface", "method"
+    Kind      string // "func", "type", "interface", "method", "class", "trait"
     Signature string // e.g., "func (s *Store) Add(l *Learning) error"
 }
 
@@ -188,17 +201,43 @@ type ReusePoint struct {
 }
 ```
 
+#### Agent dispatch
+
+```go
+func (e *Engine) ExploreForPlan(ctx context.Context, artifact *state.RunArtifact) (*ExplorationResult, error) {
+    prompt := buildExplorationPrompt(artifact)
+    backend := agentcli.BackendFor(agentcli.BackendClaude, "")
+
+    raw, err := agentcli.InvokeFunc(ctx, &backend, prompt, 120)
+    if err != nil {
+        return nil, fmt.Errorf("explore: %w", err)
+    }
+
+    var result ExplorationResult
+    if err := json.Unmarshal(extractJSON(raw), &result); err != nil {
+        return nil, fmt.Errorf("parse exploration result: %w", err)
+    }
+    return &result, nil
+}
+```
+
+The prompt requests JSON output matching the `ExplorationResult` schema. Response parsing uses `agentcli.ExtractJSONBlock` to handle markdown-wrapped responses.
+
 #### Integration
 
-- New engine method: `ExploreForPlan(ctx context.Context) (*ExplorationResult, error)`
+- New engine method: `ExploreForPlan(ctx context.Context, artifact *state.RunArtifact) (*ExplorationResult, error)`
 - Called from `DraftExecutionPlan` before compilation
 - Results populate `ExecutionSlice.FilesLikelyTouched` with verified paths
 - Results populate a new `ExecutionSlice.ImplementationDetail` field (symbol-level specs)
 - The exploration result is persisted to the run directory for the council review to reference
 
-#### What we skip from AgentOps
+#### Future: optional accelerators
 
-AgentOps dispatches an LLM-powered Explore agent. We use deterministic Go AST parsing and grep instead. This keeps the compiler pure while still producing concrete symbol-level detail. The LLM-based exploration can be added as an optional flag (`--deep-explore`) for complex specs.
+When available, external tools can provide faster or deeper exploration:
+- **Roam** (`roam-code`) — if `roam` is in PATH, use `roam search` / `roam context` / `roam impact` for pre-indexed structural analysis. Avoids LLM token cost for exploration.
+- **Deterministic AST** — for Go-only projects, `go/parser` + `go/ast` can provide symbol extraction without LLM invocation. Useful for air-gapped or cost-sensitive environments.
+
+These are additive optimizations, not blockers for the initial implementation.
 
 ### 2.4 Conformance Checks Per Task
 
@@ -324,15 +363,15 @@ type FileChange struct {
 |------|--------|-----------|
 | `internal/compiler/compiler.go` | Change `maxGroupSize` to 1, add `ComputeWaves`, `detectFileConflicts`, `resolveConflicts`, false dep removal | +120 |
 | `internal/compiler/compiler_test.go` | Tests for wave computation, conflict detection, single-requirement tasks | +150 |
-| `internal/compiler/explore.go` | **NEW** — Deterministic codebase exploration (file discovery, symbol extraction, test discovery) | ~200 |
-| `internal/compiler/explore_test.go` | **NEW** — Exploration tests | ~100 |
+| `internal/engine/explore.go` | **NEW** — LLM agent-based codebase exploration (prompt building, agent dispatch, response parsing) | ~150 |
+| `internal/engine/explore_test.go` | **NEW** — Exploration tests (stubbed agent responses) | ~100 |
 | `internal/state/types.go` | Add `Wave`, `FileConflict`, `ValidationCheck`, `Boundaries`, `ImplementationDetail`, `FileChange` types. Add `Wave` field to `ExecutionSlice`. Add `ValidationChecks` to `Task`. Add `Boundaries` to `RunArtifact`. | +50 |
 | `internal/engine/plan.go` | Add `ExploreForPlan`, `CouncilReviewExecutionPlan`. Update `DraftExecutionPlan` to call exploration + wave computation. Update `ReviewExecutionPlan` to validate waves and run optional council. | +150 |
 | `internal/engine/plan_test.go` | Tests for exploration integration, council review wiring, wave validation | +100 |
 | `internal/ticket/format.go` | Render `ValidationChecks` and `ImplementationDetail` in ticket body | +30 |
 | `cmd/attest/main.go` | Add `--council` flag to `plan review`, add `boundaries` command | +20 |
 
-**Estimated total:** ~920 new/modified lines.
+**Estimated total:** ~870 new/modified lines.
 
 ## 4. Implementation Order
 
@@ -354,7 +393,7 @@ type FileChange struct {
 
 ### Wave 3: Exploration (depends on Wave 1)
 
-7. **Codebase exploration** — Implement `ExploreForPlan` in `compiler/explore.go`. Go AST parsing for symbol extraction. File discovery and test file scanning.
+7. **Codebase exploration** — Implement `ExploreForPlan` in `engine/explore.go`. Build structured exploration prompt from requirements. Dispatch via `agentcli.Invoke`. Parse JSON response into `ExplorationResult`.
 
 8. **Implementation detail** — Add `ImplementationDetail` to `ExecutionSlice`. Populate from exploration results. Render in ticket body.
 
@@ -374,9 +413,9 @@ type FileChange struct {
 
 ## 5. Design Decisions
 
-### Deterministic exploration, not LLM-based
+### LLM agent exploration, not AST parsing
 
-AgentOps dispatches an LLM Explore agent for codebase understanding. We use Go's `go/parser` and `go/ast` packages for symbol extraction, plus `filepath.Walk` and `grep` for file discovery. This keeps the compiler deterministic and avoids LLM costs during planning. An LLM-based `--deep-explore` flag can be added later for complex multi-language projects.
+We dispatch a CLI agent (Claude/Codex) to explore the codebase before planning. This is language-agnostic by construction — the agent understands any language and uses Grep/Glob/Read to discover symbols. No per-language AST extractors to write or maintain. The cost is covered by existing user subscriptions since we use local CLI tools. Deterministic accelerators (Roam, Go AST) can be layered in later as optional optimizations for indexed or Go-only projects.
 
 ### Wave computation at planning time, not execution time
 
@@ -399,7 +438,7 @@ Following user preference: MVP mode with a single review round and auto-approved
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Single-requirement tasks produce too many tasks | Task queue is large, overhead per task | Task count increases but each task is faster to complete. Net time is similar or better due to parallelism. |
-| Go AST exploration doesn't work for non-Go projects | Exploration produces no symbols for Python/JS/etc. | Exploration is optional — falls back to keyword-inferred paths. `--deep-explore` flag can dispatch LLM for other languages. |
+| LLM exploration produces inconsistent results | Agent may miss symbols or hallucinate file paths | Response schema is strict; results are validated against filesystem before use. Exploration is advisory — the compiler still produces valid tasks without it. |
 | Wave computation is NP-hard in worst case | Conflict resolution takes too long | Practical task graphs are sparse DAGs. Greedy conflict resolution (move later task to next wave) is O(n²) worst case, fast in practice. |
 | Council review adds latency to planning | Slower plan cycle | MVP mode (1 round) takes ~3-5 minutes. Structural review alone takes <1 second. User chooses when to invest in council review. |
 | False dependency removal breaks execution ordering | Tasks execute in wrong order | Only remove deps where no file overlap exists. Conservative: if uncertain, keep the dependency. |

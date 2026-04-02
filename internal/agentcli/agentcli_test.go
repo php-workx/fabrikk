@@ -1,7 +1,10 @@
 package agentcli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -40,6 +43,87 @@ func TestExtractFromCodeFence_Variants(t *testing.T) {
 				t.Errorf("ExtractFromCodeFence() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// resetDisabledBackendsCache resets the sync.Once cache so tests can set
+// different env vars and see the effect. Must be called before each test that
+// changes FABRIKK_DISABLED_BACKENDS.
+func resetDisabledBackendsCache() {
+	disabledBackendsOnce = sync.Once{}
+	disabledBackendsCached = nil
+}
+
+func TestBackendFor_DisabledFallsBackToClaude(t *testing.T) {
+	resetDisabledBackendsCache()
+	t.Setenv("FABRIKK_DISABLED_BACKENDS", "gemini")
+
+	got := BackendFor(BackendGemini, "")
+	want := KnownBackends[BackendClaude]
+	if got.Command != want.Command {
+		t.Errorf("disabled gemini: got command %q, want %q (claude fallback)", got.Command, want.Command)
+	}
+
+	// Claude itself should NOT be affected.
+	gotClaude := BackendFor(BackendClaude, "")
+	if gotClaude.Command != want.Command {
+		t.Errorf("claude should not be disabled: got %q", gotClaude.Command)
+	}
+}
+
+func TestBackendFor_MultipleDisabled(t *testing.T) {
+	resetDisabledBackendsCache()
+	t.Setenv("FABRIKK_DISABLED_BACKENDS", "gemini,codex")
+
+	gotGemini := BackendFor(BackendGemini, "")
+	gotCodex := BackendFor(BackendCodex, "")
+	wantClaude := KnownBackends[BackendClaude]
+
+	if gotGemini.Command != wantClaude.Command {
+		t.Errorf("disabled gemini: got %q, want claude", gotGemini.Command)
+	}
+	if gotCodex.Command != wantClaude.Command {
+		t.Errorf("disabled codex: got %q, want claude", gotCodex.Command)
+	}
+}
+
+func TestBackendFor_NoneDisabled(t *testing.T) {
+	resetDisabledBackendsCache()
+	t.Setenv("FABRIKK_DISABLED_BACKENDS", "")
+
+	got := BackendFor(BackendGemini, "")
+	want := KnownBackends[BackendGemini]
+	if got.Command != want.Command {
+		t.Errorf("no disabled backends: gemini should work, got %q", got.Command)
+	}
+}
+
+func TestBackendFor_DisabledViaConfigFile(t *testing.T) {
+	resetDisabledBackendsCache()
+
+	// Create a temp dir with fabrikk.yaml and chdir into it.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fabrikk.yaml"), []byte("disabled_backends:\n  - gemini\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir) //nolint:errcheck // best-effort restore
+
+	got := BackendFor(BackendGemini, "")
+	wantClaude := KnownBackends[BackendClaude]
+	if got.Command != wantClaude.Command {
+		t.Errorf("config-disabled gemini: got %q, want %q", got.Command, wantClaude.Command)
+	}
+
+	// Codex should still work (not in config).
+	gotCodex := BackendFor(BackendCodex, "")
+	wantCodex := KnownBackends[BackendCodex]
+	if gotCodex.Command != wantCodex.Command {
+		t.Errorf("codex should not be disabled: got %q", gotCodex.Command)
 	}
 }
 

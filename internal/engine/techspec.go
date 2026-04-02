@@ -129,7 +129,7 @@ func (e *Engine) ReviewTechnicalSpec(ctx context.Context) (*state.TechnicalSpecR
 
 	data, err := e.RunDir.ReadTechnicalSpec()
 	if err != nil {
-		return nil, fmt.Errorf("read technical spec: %w", err)
+		return nil, fmt.Errorf(readTechSpecErrFmt, err)
 	}
 
 	text := strings.ToLower(string(data))
@@ -179,7 +179,7 @@ func (e *Engine) ReviewTechnicalSpec(ctx context.Context) (*state.TechnicalSpecR
 func (e *Engine) CouncilReviewTechnicalSpec(ctx context.Context, cfg councilflow.CouncilConfig) (*councilflow.CouncilResult, error) {
 	data, err := e.RunDir.ReadTechnicalSpec()
 	if err != nil {
-		return nil, fmt.Errorf("read technical spec: %w", err)
+		return nil, fmt.Errorf(readTechSpecErrFmt, err)
 	}
 
 	// Set spec path so reviewers can read from file instead of inline content.
@@ -228,7 +228,7 @@ func (e *Engine) ApproveTechnicalSpec(ctx context.Context, approvedBy string) (*
 
 	data, err := e.RunDir.ReadTechnicalSpec()
 	if err != nil {
-		return nil, fmt.Errorf("read technical spec: %w", err)
+		return nil, fmt.Errorf(readTechSpecErrFmt, err)
 	}
 	currentHash := sha256Prefix + state.SHA256Bytes(data)
 	if review.TechnicalSpecHash != currentHash {

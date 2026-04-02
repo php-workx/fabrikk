@@ -13,6 +13,7 @@ type PersonaType string
 const (
 	PersonaFixed   PersonaType = "fixed"
 	PersonaDynamic PersonaType = "dynamic"
+	PersonaCustom  PersonaType = "custom"
 )
 
 // Verdict represents the council review outcome.

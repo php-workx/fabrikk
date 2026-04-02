@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/php-workx/fabrikk/internal/agentcli"
 	"github.com/php-workx/fabrikk/internal/compiler"
 	"github.com/php-workx/fabrikk/internal/state"
 	"github.com/php-workx/fabrikk/internal/verifier"
@@ -31,6 +32,7 @@ type Engine struct {
 	WorkDir          string                 // repository root
 	TaskStore        state.TaskStore        // nil = fall back to RunDir
 	LearningEnricher state.LearningEnricher // nil = skip learning enrichment
+	InvokeFn         agentcli.InvokeFn      // nil = use agentcli.InvokeFunc; daemon-bound for orchestrator queries
 }
 
 // taskStore returns the configured TaskStore or falls back to RunDir.
@@ -241,23 +243,11 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		return nil, fmt.Errorf("verify: %w", err)
 	}
 
-	// Write verifier result to the attempt-scoped report directory.
-	reportDir := e.RunDir.ReportDir(task.TaskID, report.AttemptID)
-	if err := state.WriteJSON(fmt.Sprintf("%s/verifier-result.json", reportDir), result); err != nil {
-		return nil, fmt.Errorf("write verifier result: %w", err)
+	if err := e.writeVerifierResult(task, report, result); err != nil {
+		return nil, err
 	}
-
-	taskStatus := state.TaskDone
-	statusReason := ""
-	if !result.Pass {
-		taskStatus = state.TaskBlocked
-		statusReason = summarizeFindings(result.BlockingFindings)
-	}
-	if err := e.persistVerifiedTask(task, taskStatus, statusReason); err != nil {
-		return nil, fmt.Errorf("persist task verification outcome: %w", err)
-	}
-	if err := e.syncCoverageFromTasks(); err != nil {
-		return nil, fmt.Errorf(errSyncCoverage, err)
+	if err := e.persistVerificationOutcome(task, result); err != nil {
+		return nil, err
 	}
 
 	_ = e.RunDir.AppendEvent(state.Event{
@@ -268,32 +258,68 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		Detail:    fmt.Sprintf("pass=%v findings=%d", result.Pass, len(result.BlockingFindings)),
 	})
 
-	// Record verification outcome for learning effectiveness tracking.
-	if e.LearningEnricher != nil && len(task.LearningIDs) > 0 {
-		if outErr := e.LearningEnricher.RecordOutcome(task.LearningIDs, result.Pass); outErr != nil {
-			_ = e.RunDir.AppendEvent(state.Event{
-				Timestamp: time.Now(),
-				Type:      "learning_outcome_failed",
-				RunID:     artifact.RunID,
-				TaskID:    task.TaskID,
-				Detail:    outErr.Error(),
-			})
-		}
-	}
+	e.recordLearningOutcome(artifact.RunID, task, result.Pass)
 
-	nextState := state.RunRunning
-	var blockers []string
-	if !result.Pass {
-		nextState = state.RunBlocked
-		for _, finding := range result.BlockingFindings {
-			blockers = append(blockers, fmt.Sprintf("%s: %s", task.TaskID, finding.Summary))
-		}
-	}
+	nextState, blockers := verificationRunState(task.TaskID, result)
 	if err := e.refreshRunStatus(nextState, "verification", blockers); err != nil {
 		return nil, fmt.Errorf(errRefreshStatus, err)
 	}
 
 	return result, nil
+}
+
+// writeVerifierResult persists the verifier result to the attempt-scoped report directory.
+func (e *Engine) writeVerifierResult(task *state.Task, report *state.CompletionReport, result *state.VerifierResult) error {
+	reportDir := e.RunDir.ReportDir(task.TaskID, report.AttemptID)
+	if err := state.WriteJSON(fmt.Sprintf("%s/verifier-result.json", reportDir), result); err != nil {
+		return fmt.Errorf("write verifier result: %w", err)
+	}
+	return nil
+}
+
+// persistVerificationOutcome updates the task status and syncs coverage based on the verifier result.
+func (e *Engine) persistVerificationOutcome(task *state.Task, result *state.VerifierResult) error {
+	taskStatus := state.TaskDone
+	statusReason := ""
+	if !result.Pass {
+		taskStatus = state.TaskBlocked
+		statusReason = summarizeFindings(result.BlockingFindings)
+	}
+	if err := e.persistVerifiedTask(task, taskStatus, statusReason); err != nil {
+		return fmt.Errorf("persist task verification outcome: %w", err)
+	}
+	if err := e.syncCoverageFromTasks(); err != nil {
+		return fmt.Errorf(errSyncCoverage, err)
+	}
+	return nil
+}
+
+// recordLearningOutcome records verification outcomes for learning effectiveness tracking.
+func (e *Engine) recordLearningOutcome(runID string, task *state.Task, pass bool) {
+	if e.LearningEnricher == nil || len(task.LearningIDs) == 0 {
+		return
+	}
+	if outErr := e.LearningEnricher.RecordOutcome(task.LearningIDs, pass); outErr != nil {
+		_ = e.RunDir.AppendEvent(state.Event{
+			Timestamp: time.Now(),
+			Type:      "learning_outcome_failed",
+			RunID:     runID,
+			TaskID:    task.TaskID,
+			Detail:    outErr.Error(),
+		})
+	}
+}
+
+// verificationRunState determines the run state and blockers from a verifier result.
+func verificationRunState(taskID string, result *state.VerifierResult) (runState state.RunState, blockers []string) {
+	if result.Pass {
+		return state.RunRunning, nil
+	}
+	blockers = make([]string, 0, len(result.BlockingFindings))
+	for _, finding := range result.BlockingFindings {
+		blockers = append(blockers, fmt.Sprintf("%s: %s", taskID, finding.Summary))
+	}
+	return state.RunBlocked, blockers
 }
 
 // RetryTask clears a blocked task for another manual attempt.
@@ -477,15 +503,9 @@ func (e *Engine) SweepExpiredClaims() ([]string, error) {
 }
 
 func (e *Engine) refreshRunStatus(nextState state.RunState, currentGate string, openBlockers []string) error {
-	status, err := e.RunDir.ReadStatus()
+	status, err := e.readOrInitStatus()
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		status = &state.RunStatus{
-			RunID:             filepathBase(e.RunDir.Root),
-			TaskCountsByState: map[string]int{},
-		}
+		return err
 	}
 
 	status.State = nextState
@@ -495,13 +515,45 @@ func (e *Engine) refreshRunStatus(nextState state.RunState, currentGate string, 
 	status.TaskCountsByState = map[string]int{}
 	status.TaskDetails = nil
 
-	var tasks []state.Task
-	if tasks, err = e.taskStore().ReadTasks(e.runID()); err == nil || errors.Is(err, state.ErrPartialRead) {
-		for i := range tasks {
-			status.TaskCountsByState[string(tasks[i].Status)]++
-			if tasks[i].StatusReason == "" {
-				continue
-			}
+	tasks, err := e.populateTaskCounts(status, currentGate)
+	if err != nil {
+		return err
+	}
+
+	if err := e.populateUncoveredCount(status); err != nil {
+		return err
+	}
+
+	applyCompletionOverride(status, len(tasks))
+
+	return e.RunDir.WriteStatus(status)
+}
+
+// readOrInitStatus reads existing run status or creates a fresh one if missing.
+func (e *Engine) readOrInitStatus() (*state.RunStatus, error) {
+	status, err := e.RunDir.ReadStatus()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return &state.RunStatus{
+			RunID:             filepathBase(e.RunDir.Root),
+			TaskCountsByState: map[string]int{},
+		}, nil
+	}
+	return status, nil
+}
+
+// populateTaskCounts fills task counts and details on the status from the current tasks.
+func (e *Engine) populateTaskCounts(status *state.RunStatus, currentGate string) ([]state.Task, error) {
+	tasks, err := e.taskStore().ReadTasks(e.runID())
+	if err != nil && !errors.Is(err, state.ErrPartialRead) && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	for i := range tasks {
+		status.TaskCountsByState[string(tasks[i].Status)]++
+		if tasks[i].StatusReason != "" {
 			status.TaskDetails = append(status.TaskDetails, state.TaskDetail{
 				TaskID:                 tasks[i].TaskID,
 				CurrentGate:            currentGate,
@@ -509,30 +561,36 @@ func (e *Engine) refreshRunStatus(nextState state.RunState, currentGate string, 
 				HumanInputRequired:     tasks[i].Status == state.TaskBlocked,
 			})
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
+	return tasks, nil
+}
 
-	if coverage, err := e.RunDir.ReadCoverage(); err == nil {
-		status.UncoveredRequirementCount = 0
-		for _, item := range coverage {
-			if len(item.CoveringTaskIDs) == 0 && !item.Deferred {
-				status.UncoveredRequirementCount++
-			}
+// populateUncoveredCount sets the uncovered requirement count on the status.
+func (e *Engine) populateUncoveredCount(status *state.RunStatus) error {
+	coverage, err := e.RunDir.ReadCoverage()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	status.UncoveredRequirementCount = 0
+	for _, item := range coverage {
+		if len(item.CoveringTaskIDs) == 0 && !item.Deferred {
+			status.UncoveredRequirementCount++
+		}
+	}
+	return nil
+}
 
-	totalTasks := len(tasks)
+// applyCompletionOverride marks the run as completed if all tasks are done.
+func applyCompletionOverride(status *state.RunStatus, totalTasks int) {
 	doneTasks := status.TaskCountsByState[string(state.TaskDone)]
 	if totalTasks > 0 && doneTasks == totalTasks {
 		status.State = state.RunCompleted
 		status.CurrentGate = "completed"
 		status.OpenBlockers = nil
 	}
-
-	return e.RunDir.WriteStatus(status)
 }
 
 func filepathBase(path string) string {

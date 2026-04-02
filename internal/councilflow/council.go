@@ -16,16 +16,18 @@ import (
 
 // CouncilConfig controls the council review pipeline.
 type CouncilConfig struct {
-	Rounds          int        // number of review rounds (default: 2)
-	Mode            ReviewMode // review tone and strictness (default: standard)
-	SpecPath        string     // absolute path to spec file (reviewers read from file instead of inline)
-	CodebaseContext string     // optional codebase context for reviewers
-	DryRun          bool       // generate prompts without executing
-	Force           bool       // re-run all reviewers even if cached results exist
-	SkipJudge       bool       // skip judge consolidation (review-only mode)
-	SkipDynPersonas bool       // skip dynamic persona generation (fixed personas only)
-	SkipApproval    bool       // skip interactive persona approval
-	StaggerDelay    int        // seconds between launching parallel reviewers/judges (default: 15)
+	Rounds          int               // number of review rounds (default: 2)
+	Mode            ReviewMode        // review tone and strictness (default: standard)
+	SpecPath        string            // absolute path to spec file (reviewers read from file instead of inline)
+	CodebaseContext string            // optional codebase context for reviewers
+	DryRun          bool              // generate prompts without executing
+	Force           bool              // re-run all reviewers even if cached results exist
+	SkipJudge       bool              // skip judge consolidation (review-only mode)
+	SkipDynPersonas bool              // skip dynamic persona generation (fixed personas only)
+	SkipApproval    bool              // skip interactive persona approval
+	StaggerDelay    int               // seconds between launching parallel reviewers/judges (default: 15)
+	JudgeInvokeFn   agentcli.InvokeFn // daemon-bound invoke for consolidated judge queries; nil = default
+	CustomPersonas  []Persona         // custom personas loaded from --persona prompt files
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -101,11 +103,33 @@ func RunCouncil(ctx context.Context, spec, outputBaseDir string, cfg CouncilConf
 }
 
 func executeRound(ctx context.Context, round int, roundDir, spec string, priorFindings []ReviewOutput, cfg CouncilConfig, result *CouncilResult) (updatedSpec string, err error) {
-	// Stage: persona generation.
+	personas, err := executePersonaStage(ctx, round, roundDir, spec, cfg, result)
+	if err != nil {
+		return "", err
+	}
+
+	if cfg.DryRun {
+		return "", writeDryRunPrompts(roundDir, spec, round, personas, priorFindings, cfg.CodebaseContext, cfg.SpecPath, cfg.Mode)
+	}
+
+	roundResult, totalFindings, err := executeReviewStage(ctx, round, roundDir, spec, personas, priorFindings, cfg, result)
+	if err != nil {
+		return "", err
+	}
+
+	if cfg.SkipJudge || totalFindings == 0 {
+		return "", nil
+	}
+
+	return executeJudgeStage(ctx, round, roundDir, spec, roundResult.Reviews, cfg, result)
+}
+
+// executePersonaStage generates and optionally approves personas for a round.
+func executePersonaStage(ctx context.Context, round int, roundDir, spec string, cfg CouncilConfig, result *CouncilResult) ([]Persona, error) {
 	t0 := time.Now()
 	personas, err := buildPersonaSet(ctx, spec, roundDir, cfg)
 	if err != nil {
-		return "", fmt.Errorf("round %d: %w", round, err)
+		return nil, fmt.Errorf("round %d: %w", round, err)
 	}
 	personaDur := time.Since(t0)
 	result.Timings = append(result.Timings, StageTiming{
@@ -113,11 +137,10 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	})
 	fmt.Printf("  [timing] persona generation: %s\n", personaDur.Round(time.Millisecond))
 
-	// Stage: persona approval.
 	t0 = time.Now()
 	personas, err = maybeApprovePersonas(personas, cfg)
 	if err != nil {
-		return "", fmt.Errorf("round %d: %w", round, err)
+		return nil, fmt.Errorf("round %d: %w", round, err)
 	}
 	approvalDur := time.Since(t0)
 	if approvalDur > time.Second {
@@ -125,22 +148,21 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 			Stage: fmt.Sprintf("round-%d/approval", round), Duration: approvalDur,
 		})
 	}
+	return personas, nil
+}
 
+// executeReviewStage runs all reviewers and collects their findings.
+func executeReviewStage(ctx context.Context, round int, roundDir, spec string, personas []Persona, priorFindings []ReviewOutput, cfg CouncilConfig, result *CouncilResult) (*RoundResult, int, error) {
 	runner := NewRunner(roundDir)
 	runner.Force = cfg.Force
 	runner.Mode = cfg.Mode
 	runner.SpecPath = cfg.SpecPath
 	runner.StaggerSec = cfg.StaggerDelay
 
-	if cfg.DryRun {
-		return "", writeDryRunPrompts(roundDir, spec, round, personas, priorFindings, cfg.CodebaseContext, cfg.SpecPath, cfg.Mode)
-	}
-
-	// Stage: reviews.
-	t0 = time.Now()
+	t0 := time.Now()
 	roundResult, err := runner.RunRound(ctx, spec, round, personas, priorFindings, cfg.CodebaseContext)
 	if err != nil {
-		return "", fmt.Errorf("round %d reviews: %w", round, err)
+		return nil, 0, fmt.Errorf("round %d reviews: %w", round, err)
 	}
 	reviewDur := time.Since(t0)
 	result.Timings = append(result.Timings, StageTiming{
@@ -148,7 +170,7 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	})
 
 	if len(roundResult.Reviews) == 0 {
-		return "", fmt.Errorf("round %d: %w: all reviewers failed", round, ErrEmptyReview)
+		return nil, 0, fmt.Errorf("round %d: %w: all reviewers failed", round, ErrEmptyReview)
 	}
 
 	result.Rounds = append(result.Rounds, *roundResult)
@@ -160,33 +182,24 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	fmt.Printf("  [timing] reviews: %s (%d findings from %d reviewers)\n",
 		reviewDur.Round(time.Millisecond), totalFindings, len(roundResult.Reviews))
 
-	// Stage: judge consolidation.
-	if cfg.SkipJudge || totalFindings == 0 {
-		return "", nil
-	}
+	return roundResult, totalFindings, nil
+}
 
+// executeJudgeStage runs the judge consolidation, handling caching and drift detection.
+func executeJudgeStage(ctx context.Context, round int, roundDir, spec string, reviews []ReviewOutput, cfg CouncilConfig, result *CouncilResult) (string, error) {
 	// Check for cached judge output.
-	consolidationPath := filepath.Join(roundDir, "consolidation.json")
 	if !cfg.Force {
-		if cached, cErr := loadCachedConsolidation(consolidationPath); cErr == nil {
-			result.Consolidations = append(result.Consolidations, *cached)
-			fmt.Printf("  [timing] judge: cached (%d applied, %d rejected)\n", cached.AppliedCount, cached.RejectedCount)
-
-			if cached.UpdatedSpec != "" {
-				specPath := filepath.Join(filepath.Dir(roundDir), fmt.Sprintf("technical-spec-v%d.md", round))
-				result.FinalSpecPath = specPath
-				result.FinalSpec = cached.UpdatedSpec
-				return cached.UpdatedSpec, nil
-			}
-			return "", nil
+		if updatedSpec, ok := loadCachedJudge(round, roundDir, result); ok {
+			return updatedSpec, nil
 		}
 	}
 
-	t0 = time.Now()
+	t0 := time.Now()
 	judgeCfg := DefaultJudgeConfig()
 	judgeCfg.Mode = cfg.Mode
 	judgeCfg.StaggerSec = cfg.StaggerDelay
-	consolidation, judgeErr := RunJudge(ctx, spec, round, roundResult.Reviews, roundDir, judgeCfg)
+	judgeCfg.ConsolidateInvokeFn = cfg.JudgeInvokeFn
+	consolidation, judgeErr := RunJudge(ctx, spec, round, reviews, roundDir, judgeCfg)
 	if judgeErr != nil {
 		return "", fmt.Errorf("round %d judge: %w", round, judgeErr)
 	}
@@ -217,6 +230,26 @@ func executeRound(ctx context.Context, round int, roundDir, spec string, priorFi
 	result.FinalSpec = consolidation.UpdatedSpec
 
 	return consolidation.UpdatedSpec, nil
+}
+
+// loadCachedJudge checks for a cached consolidation result and applies it.
+// Returns the updated spec and true if a valid cache was found.
+func loadCachedJudge(round int, roundDir string, result *CouncilResult) (string, bool) {
+	consolidationPath := filepath.Join(roundDir, "consolidation.json")
+	cached, cErr := loadCachedConsolidation(consolidationPath)
+	if cErr != nil {
+		return "", false
+	}
+	result.Consolidations = append(result.Consolidations, *cached)
+	fmt.Printf("  [timing] judge: cached (%d applied, %d rejected)\n", cached.AppliedCount, cached.RejectedCount)
+
+	if cached.UpdatedSpec != "" {
+		specPath := filepath.Join(filepath.Dir(roundDir), fmt.Sprintf("technical-spec-v%d.md", round))
+		result.FinalSpecPath = specPath
+		result.FinalSpec = cached.UpdatedSpec
+		return cached.UpdatedSpec, true
+	}
+	return "", true
 }
 
 func writeChangelog(outputBaseDir string, result *CouncilResult) error {
@@ -346,47 +379,62 @@ func writeChangelogTiming(b *strings.Builder, result *CouncilResult) {
 func printFinalSummary(result *CouncilResult, outputBaseDir string) {
 	fmt.Printf("\n=== Review Summary ===\n\n")
 
-	// Output files.
 	if result.FinalSpecPath != "" {
 		fmt.Printf("  Updated spec:  %s\n", result.FinalSpecPath)
 	}
 	fmt.Printf("  Changelog:     %s\n", filepath.Join(outputBaseDir, "changelog.md"))
 
-	// Changelog — what was changed and why.
-	totalApplied := 0
-	totalRejected := 0
-	for i := range result.Consolidations {
-		c := &result.Consolidations[i]
+	totalApplied, totalRejected := printConsolidationSummaries(result.Consolidations)
+
+	fmt.Printf("\n  Totals: %d applied, %d rejected, verdict: %s\n", totalApplied, totalRejected, result.OverallVerdict)
+	printTimingSummary(result)
+}
+
+// printConsolidationSummaries prints per-round applied, rejected, and failed edits.
+// Returns the total applied and rejected counts.
+func printConsolidationSummaries(consolidations []ConsolidationResult) (totalApplied, totalRejected int) {
+	totalApplied = 0
+	totalRejected = 0
+	for i := range consolidations {
+		c := &consolidations[i]
 		totalApplied += c.AppliedCount
 		totalRejected += c.RejectedCount
-
-		if len(c.AppliedEdits) > 0 {
-			fmt.Printf("\n  Changes applied (round %d):\n", c.Round)
-			for j := range c.AppliedEdits {
-				edit := &c.AppliedEdits[j]
-				section := edit.Section
-				if section == "" {
-					section = "(unspecified)"
-				}
-				fmt.Printf("    %d. [%s] %s — %s\n", j+1, edit.FindingID, section, edit.Action)
-			}
-		}
-		if c.RejectedCount > 0 {
-			fmt.Printf("\n  Rejected findings (round %d): %d\n", c.Round, c.RejectedCount)
-			for j := range c.RejectionLog.Rejections {
-				r := &c.RejectionLog.Rejections[j]
-				fmt.Printf("    - [%s] %s\n", r.FindingID, r.RejectionReason)
-			}
-		}
+		printRoundAppliedEdits(c)
+		printRoundRejections(c)
 		if len(c.FailedEdits) > 0 {
 			fmt.Printf("\n  Failed edits (round %d): %d\n", c.Round, len(c.FailedEdits))
 		}
 	}
+	return totalApplied, totalRejected
+}
 
-	// Totals.
-	fmt.Printf("\n  Totals: %d applied, %d rejected, verdict: %s\n", totalApplied, totalRejected, result.OverallVerdict)
+func printRoundAppliedEdits(c *ConsolidationResult) {
+	if len(c.AppliedEdits) == 0 {
+		return
+	}
+	fmt.Printf("\n  Changes applied (round %d):\n", c.Round)
+	for j := range c.AppliedEdits {
+		edit := &c.AppliedEdits[j]
+		section := edit.Section
+		if section == "" {
+			section = "(unspecified)"
+		}
+		fmt.Printf("    %d. [%s] %s — %s\n", j+1, edit.FindingID, section, edit.Action)
+	}
+}
 
-	// Timing.
+func printRoundRejections(c *ConsolidationResult) {
+	if c.RejectedCount == 0 {
+		return
+	}
+	fmt.Printf("\n  Rejected findings (round %d): %d\n", c.Round, c.RejectedCount)
+	for j := range c.RejectionLog.Rejections {
+		r := &c.RejectionLog.Rejections[j]
+		fmt.Printf("    - [%s] %s\n", r.FindingID, r.RejectionReason)
+	}
+}
+
+func printTimingSummary(result *CouncilResult) {
 	fmt.Printf("\n  Timing:\n")
 	for _, t := range result.Timings {
 		fmt.Printf("    %-28s %s\n", t.Stage, t.Duration.Round(time.Millisecond))
@@ -419,6 +467,7 @@ func maybeApprovePersonas(personas []Persona, cfg CouncilConfig) ([]Persona, err
 
 func buildPersonaSet(ctx context.Context, spec, roundDir string, cfg CouncilConfig) ([]Persona, error) {
 	personas := FixedPersonas()
+	personas = append(personas, cfg.CustomPersonas...)
 	if cfg.SkipDynPersonas || cfg.DryRun {
 		return personas, nil
 	}

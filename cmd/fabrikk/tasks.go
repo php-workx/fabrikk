@@ -38,55 +38,64 @@ type taskFilter struct {
 
 func parseTaskFilter(args []string) (runID string, f taskFilter) {
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--status":
-			if i+1 < len(args) {
-				f.status = args[i+1]
-				i++
-			}
-		case "--task-type":
-			if i+1 < len(args) {
-				f.taskType = args[i+1]
-				i++
-			}
-		case "--tag":
-			if i+1 < len(args) {
-				f.tag = args[i+1]
-				i++
-			}
-		case "--requirement-id":
-			if i+1 < len(args) {
-				f.requirementID = args[i+1]
-				i++
-			}
-		case "--wave":
-			if i+1 < len(args) {
-				f.wave = args[i+1]
-				i++
-			}
-		case flagLimit:
-			if i+1 < len(args) {
-				_, _ = fmt.Sscanf(args[i+1], "%d", &f.limit)
-				i++
-			}
-		case "--priority":
-			if i+1 < len(args) {
-				_, _ = fmt.Sscanf(args[i+1], "%d", &f.priority)
-				i++
-			}
-		case "--ready":
-			f.ready = true
-		case "--blocked":
-			f.blocked = true
-		case "--json":
-			f.jsonOutput = true
-		default:
-			if runID == "" {
-				runID = args[i]
-			}
+		var consumed string
+		i, consumed = parseTaskFilterArg(&f, args, i)
+		if consumed != "" && runID == "" {
+			runID = consumed
 		}
 	}
 	return runID, f
+}
+
+// parseTaskFilterArg processes a single argument for task filtering.
+// Returns the (possibly advanced) index and a non-empty positional arg if one was consumed.
+func parseTaskFilterArg(f *taskFilter, args []string, i int) (nextIdx int, positional string) {
+	switch args[i] {
+	case "--status":
+		if i+1 < len(args) {
+			f.status = args[i+1]
+			i++
+		}
+	case "--task-type":
+		if i+1 < len(args) {
+			f.taskType = args[i+1]
+			i++
+		}
+	case "--tag":
+		if i+1 < len(args) {
+			f.tag = args[i+1]
+			i++
+		}
+	case "--requirement-id":
+		if i+1 < len(args) {
+			f.requirementID = args[i+1]
+			i++
+		}
+	case "--wave":
+		if i+1 < len(args) {
+			f.wave = args[i+1]
+			i++
+		}
+	case flagLimit:
+		if i+1 < len(args) {
+			_, _ = fmt.Sscanf(args[i+1], "%d", &f.limit)
+			i++
+		}
+	case "--priority":
+		if i+1 < len(args) {
+			_, _ = fmt.Sscanf(args[i+1], "%d", &f.priority)
+			i++
+		}
+	case "--ready":
+		f.ready = true
+	case "--blocked":
+		f.blocked = true
+	case "--json":
+		f.jsonOutput = true
+	default:
+		return i, args[i]
+	}
+	return i, ""
 }
 
 func (f taskFilter) matches(t *state.Task, doneStates map[string]state.TaskStatus) bool {
@@ -282,6 +291,59 @@ func cmdBlocked(args []string) error {
 	return nil
 }
 
+// readyTasksByPriority returns ready tasks sorted by priority then order.
+func readyTasksByPriority(tasks []state.Task, taskStates map[string]state.TaskStatus) []state.Task {
+	var ready []state.Task
+	for i := range tasks {
+		if tasks[i].Status == state.TaskPending && depsReady(&tasks[i], taskStates) {
+			ready = append(ready, tasks[i])
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].Priority != ready[j].Priority {
+			return ready[i].Priority < ready[j].Priority
+		}
+		return ready[i].Order < ready[j].Order
+	})
+	return ready
+}
+
+// blockedTasksByPriority returns blocked tasks sorted by priority.
+func blockedTasksByPriority(tasks []state.Task) []state.Task {
+	var blocked []state.Task
+	for i := range tasks {
+		if tasks[i].Status == state.TaskBlocked {
+			blocked = append(blocked, tasks[i])
+		}
+	}
+	sort.Slice(blocked, func(i, j int) bool {
+		return blocked[i].Priority < blocked[j].Priority
+	})
+	return blocked
+}
+
+// showNextReady displays the next ready task.
+func showNextReady(ready []state.Task, jsonOutput bool, wd, runID string) {
+	if jsonOutput {
+		outputTasks(ready[:1], true)
+	} else {
+		fmt.Println("Next task:")
+		outputTasks(ready[:1], false)
+		showLatestHandoff(wd, runID)
+	}
+}
+
+// showNextBlocker displays the highest-impact blocker when no tasks are ready.
+func showNextBlocker(blocked []state.Task, jsonOutput bool) {
+	if jsonOutput {
+		outputTasks(blocked[:1], true)
+	} else {
+		fmt.Println("No ready tasks. Highest-impact blocker:")
+		outputTasks(blocked[:1], false)
+		fmt.Printf("  Reason: %s\n", blocked[0].StatusReason)
+	}
+}
+
 // cmdNext implements `fabrikk next` (spec section 5.2).
 func cmdNext(args []string) error {
 	runID, f := parseTaskFilter(args)
@@ -302,49 +364,13 @@ func cmdNext(args []string) error {
 
 	taskStates := buildTaskStates(tasks)
 
-	// Find ready tasks sorted by priority.
-	var ready []state.Task
-	for i := range tasks {
-		if tasks[i].Status == state.TaskPending && depsReady(&tasks[i], taskStates) {
-			ready = append(ready, tasks[i])
-		}
-	}
-	sort.Slice(ready, func(i, j int) bool {
-		if ready[i].Priority != ready[j].Priority {
-			return ready[i].Priority < ready[j].Priority
-		}
-		return ready[i].Order < ready[j].Order
-	})
-
-	if len(ready) > 0 {
-		if f.jsonOutput {
-			outputTasks(ready[:1], true)
-		} else {
-			fmt.Println("Next task:")
-			outputTasks(ready[:1], false)
-			showLatestHandoff(wd, runID)
-		}
+	if ready := readyTasksByPriority(tasks, taskStates); len(ready) > 0 {
+		showNextReady(ready, f.jsonOutput, wd, runID)
 		return nil
 	}
 
-	// No ready task — point to highest-impact blocker (spec section 5.2).
-	var blocked []state.Task
-	for i := range tasks {
-		if tasks[i].Status == state.TaskBlocked {
-			blocked = append(blocked, tasks[i])
-		}
-	}
-	if len(blocked) > 0 {
-		sort.Slice(blocked, func(i, j int) bool {
-			return blocked[i].Priority < blocked[j].Priority
-		})
-		if f.jsonOutput {
-			outputTasks(blocked[:1], true)
-		} else {
-			fmt.Println("No ready tasks. Highest-impact blocker:")
-			outputTasks(blocked[:1], false)
-			fmt.Printf("  Reason: %s\n", blocked[0].StatusReason)
-		}
+	if blocked := blockedTasksByPriority(tasks); len(blocked) > 0 {
+		showNextBlocker(blocked, f.jsonOutput)
 		return nil
 	}
 
@@ -353,8 +379,6 @@ func cmdNext(args []string) error {
 		return nil
 	}
 	fmt.Println("No ready or blocked tasks.")
-
-	// Show handoff if recent.
 	showLatestHandoff(wd, runID)
 	return nil
 }

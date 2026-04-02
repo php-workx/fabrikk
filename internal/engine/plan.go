@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	sha256Prefix      = "sha256:"
-	graphFindingFmtID = "epr-graph-%03d"
+	sha256Prefix       = "sha256:"
+	graphFindingFmtID  = "epr-graph-%03d"
+	waveWarningIDFmt   = "epr-w-%03d"
+	readTechSpecErrFmt = "read technical spec: %w"
 )
 
 // DraftExecutionPlan derives a run-scoped execution plan from an approved technical spec.
@@ -297,57 +299,76 @@ func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, rev
 }
 
 func detectSliceCycles(slices []state.ExecutionSlice, adj map[string][]string, review *state.ExecutionPlanReview) {
-	const (
-		colorWhite = 0 // unvisited
-		colorGray  = 1 // in current path
-		colorBlack = 2 // fully explored
-	)
-	color := make(map[string]int, len(slices))
-	var cycleNode string
-
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
-		color[node] = colorGray
-		for _, dep := range adj[node] {
-			switch color[dep] {
-			case colorGray:
-				cycleNode = dep
-				return true
-			case colorWhite:
-				if dfs(dep) {
-					return true
-				}
-			default:
-				// colorBlack — already fully explored, skip.
-			}
-		}
-		color[node] = colorBlack
-		return false
+	cycleNode, found := findCycleInGraph(slices, adj)
+	if !found {
+		return
 	}
+	review.Status = state.ReviewFail
+	review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
+		FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
+		Severity:        "high",
+		Category:        "dependency_cycle",
+		SliceID:         cycleNode,
+		Summary:         fmt.Sprintf("dependency cycle detected involving slice %q", cycleNode),
+		SuggestedRepair: "Break the dependency cycle so the graph is a DAG.",
+	})
+}
 
+// findCycleInGraph uses DFS three-color marking to find a cycle in the slice dependency graph.
+// Returns the node involved in the cycle and true if found, or ("", false) if acyclic.
+func findCycleInGraph(slices []state.ExecutionSlice, adj map[string][]string) (string, bool) {
+	cs := &cycleSearcher{
+		color: make(map[string]int, len(slices)),
+		adj:   adj,
+	}
 	for i := range slices {
 		id := slices[i].SliceID
-		if id != "" && color[id] == colorWhite {
-			if dfs(id) {
-				review.Status = state.ReviewFail
-				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
-					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
-					Severity:        "high",
-					Category:        "dependency_cycle",
-					SliceID:         cycleNode,
-					Summary:         fmt.Sprintf("dependency cycle detected involving slice %q", cycleNode),
-					SuggestedRepair: "Break the dependency cycle so the graph is a DAG.",
-				})
-				return // one cycle finding is sufficient
+		if id != "" && cs.color[id] == colorWhite {
+			if cs.dfs(id) {
+				return cs.cycleNode, true
 			}
 		}
 	}
+	return "", false
 }
 
 var (
 	validRisks = map[string]bool{"low": true, "medium": true, "high": true}
 	validSizes = map[string]bool{"small": true, "medium": true, "large": true}
 )
+
+// DFS three-color constants for cycle detection.
+const (
+	colorWhite = 0 // unvisited
+	colorGray  = 1 // in current path
+	colorBlack = 2 // fully explored
+)
+
+// cycleSearcher holds state for DFS-based cycle detection.
+type cycleSearcher struct {
+	color     map[string]int
+	adj       map[string][]string
+	cycleNode string
+}
+
+func (cs *cycleSearcher) dfs(node string) bool {
+	cs.color[node] = colorGray
+	for _, dep := range cs.adj[node] {
+		switch cs.color[dep] {
+		case colorGray:
+			cs.cycleNode = dep
+			return true
+		case colorWhite:
+			if cs.dfs(dep) {
+				return true
+			}
+		default:
+			// colorBlack — already fully explored, skip.
+		}
+	}
+	cs.color[node] = colorBlack
+	return false
+}
 
 func isValidRisk(v string) bool { return validRisks[v] }
 func isValidSize(v string) bool { return validSizes[v] }
@@ -386,14 +407,14 @@ func reviewSlice(slice *state.ExecutionSlice, review *state.ExecutionPlanReview)
 
 	if len(slice.RequirementIDs) > 4 {
 		review.Warnings = append(review.Warnings, state.ReviewWarning{
-			WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 			SliceID:   slice.SliceID,
 			Summary:   "slice covers more than four requirements; consider splitting if execution drifts",
 		})
 	}
 	if len(slice.FilesLikelyTouched) == 0 {
 		review.Warnings = append(review.Warnings, state.ReviewWarning{
-			WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 			SliceID:   slice.SliceID,
 			Summary:   "slice is missing likely file touch points",
 		})
@@ -408,7 +429,13 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 		return
 	}
 
-	// Build coverage map: requirement ID → unique covering slice IDs.
+	covered := buildCoverageMap(slices)
+	flagUncoveredRequirements(artifact, covered, review)
+	warnMultiSliceCoverage(covered, review)
+}
+
+// buildCoverageMap builds a map of requirement ID to the set of covering slice IDs.
+func buildCoverageMap(slices []state.ExecutionSlice) map[string]map[string]struct{} {
 	covered := make(map[string]map[string]struct{}, len(slices))
 	for i := range slices {
 		for _, reqID := range slices[i].RequirementIDs {
@@ -418,8 +445,11 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 			covered[reqID][slices[i].SliceID] = struct{}{}
 		}
 	}
+	return covered
+}
 
-	// Check for dropped requirements.
+// flagUncoveredRequirements adds blocking findings for requirements not covered by any slice.
+func flagUncoveredRequirements(artifact *state.RunArtifact, covered map[string]map[string]struct{}, review *state.ExecutionPlanReview) {
 	for i := range artifact.Requirements {
 		reqID := artifact.Requirements[i].ID
 		if len(covered[reqID]) == 0 {
@@ -434,8 +464,10 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 			})
 		}
 	}
+}
 
-	// Warn on requirements covered by multiple slices (deterministic order).
+// warnMultiSliceCoverage adds warnings for requirements covered by more than one slice.
+func warnMultiSliceCoverage(covered map[string]map[string]struct{}, review *state.ExecutionPlanReview) {
 	reqIDs := make([]string, 0, len(covered))
 	for reqID := range covered {
 		reqIDs = append(reqIDs, reqID)
@@ -443,17 +475,18 @@ func validateRequirementCoverage(artifact *state.RunArtifact, slices []state.Exe
 	sort.Strings(reqIDs)
 	for _, reqID := range reqIDs {
 		sliceSet := covered[reqID]
-		if len(sliceSet) > 1 {
-			sliceIDs := make([]string, 0, len(sliceSet))
-			for sid := range sliceSet {
-				sliceIDs = append(sliceIDs, sid)
-			}
-			sort.Strings(sliceIDs)
-			review.Warnings = append(review.Warnings, state.ReviewWarning{
-				WarningID: fmt.Sprintf("epr-w-%03d", len(review.Warnings)+1),
-				Summary:   fmt.Sprintf("requirement %s is covered by %d slices (%s); verify this is intentional", reqID, len(sliceIDs), strings.Join(sliceIDs, ", ")),
-			})
+		if len(sliceSet) <= 1 {
+			continue
 		}
+		sliceIDs := make([]string, 0, len(sliceSet))
+		for sid := range sliceSet {
+			sliceIDs = append(sliceIDs, sid)
+		}
+		sort.Strings(sliceIDs)
+		review.Warnings = append(review.Warnings, state.ReviewWarning{
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
+			Summary:   fmt.Sprintf("requirement %s is covered by %d slices (%s); verify this is intentional", reqID, len(sliceIDs), strings.Join(sliceIDs, ", ")),
+		})
 	}
 }
 

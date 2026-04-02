@@ -27,10 +27,20 @@ type ConsolidationResult struct {
 
 // JudgeConfig controls the judge/editor behavior.
 type JudgeConfig struct {
-	Backend    agentcli.CLIBackend
-	TimeoutSec int
-	Mode       ReviewMode
-	StaggerSec int
+	Backend             agentcli.CLIBackend
+	TimeoutSec          int
+	Mode                ReviewMode
+	StaggerSec          int
+	ConsolidateInvokeFn agentcli.InvokeFn // daemon-bound invoke for consolidated queries; nil = use InvokeFunc
+}
+
+// consolidateInvoke returns the configured invoke function for consolidated judge queries,
+// falling back to the package-level InvokeFunc.
+func consolidateInvoke(cfg *JudgeConfig) agentcli.InvokeFn {
+	if cfg.ConsolidateInvokeFn != nil {
+		return cfg.ConsolidateInvokeFn
+	}
+	return agentcli.InvokeFunc
 }
 
 // DefaultJudgeConfig returns a config targeting Claude Opus with extended thinking.
@@ -55,16 +65,40 @@ type judgeDecision struct {
 // RunJudge executes the judge/editor consolidation for one round.
 // Phase 1: Parallel Opus instances judge each reviewer's findings independently.
 // Phase 2: Apply all accepted edits to the spec (pure string ops, no LLM).
+// Phase 3: Conflict resolution for failed edits.
 func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutput, outputDir string, cfg JudgeConfig) (*ConsolidationResult, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
 	judgeable := filterJudgeableReviews(reviews, round)
-
 	fmt.Printf("  [round %d] judge: %d reviewers to process (parallel) ...\n", round, len(judgeable))
 
-	// Phase 1: Parallel judgment — each reviewer's findings judged independently.
+	// Phase 1: Parallel judgment.
+	allEdits, allRejections := judgeAllReviews(ctx, spec, round, judgeable, outputDir, &cfg)
+
+	// Phase 2: Apply edits.
+	updatedSpec, appliedEdits, appliedCount, allFailed := applyEdits(spec, allEdits)
+	if strings.TrimSpace(updatedSpec) == "" {
+		return nil, fmt.Errorf("judge edits produced an empty spec — aborting to prevent data loss")
+	}
+
+	// Phase 3: Conflict resolution.
+	updatedSpec, appliedCount, allFailed = attemptConflictResolution(ctx, round, updatedSpec, allEdits, allFailed, appliedCount, outputDir, &cfg)
+
+	combined := buildConsolidation(round, updatedSpec, allRejections, appliedEdits, appliedCount, allFailed)
+	if err := writeJudgeArtifacts(outputDir, combined); err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("  [round %d] judge total: %d applied, %d rejected, %d failed\n",
+		round, appliedCount, len(allRejections), len(allFailed))
+
+	return combined, nil
+}
+
+// judgeAllReviews dispatches parallel judgment for each review and collects results.
+func judgeAllReviews(ctx context.Context, spec string, round int, judgeable []ReviewOutput, outputDir string, cfg *JudgeConfig) ([]SpecEdit, []Rejection) {
 	ch := make(chan judgeDecision, len(judgeable))
 	for i := range judgeable {
 		if i > 0 && cfg.StaggerSec > 0 {
@@ -72,15 +106,12 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 			time.Sleep(time.Duration(cfg.StaggerSec) * time.Second)
 		}
 		go func(review ReviewOutput) {
-			decision := judgeOneReview(ctx, spec, round, &review, outputDir, &cfg)
-			ch <- decision
+			ch <- judgeOneReview(ctx, spec, round, &review, outputDir, cfg)
 		}(judgeable[i])
 	}
 
-	// Collect decisions.
 	var allEdits []SpecEdit
 	var allRejections []Rejection
-	var allFailed []string
 	for range judgeable {
 		decision := <-ch
 		if decision.err != nil {
@@ -92,73 +123,75 @@ func RunJudge(ctx context.Context, spec string, round int, reviews []ReviewOutpu
 		fmt.Printf("  [round %d] judge: %s — %d edits, %d rejected\n",
 			round, decision.personaID, len(decision.edits), len(decision.rejections))
 	}
+	return allEdits, allRejections
+}
 
-	// Phase 2: Apply all accepted edits to the spec (no LLM, pure string ops).
-	updatedSpec := spec
-	appliedCount := 0
-	var appliedEdits []SpecEdit
+// applyEdits applies accepted edits to the spec using pure string replacement.
+func applyEdits(spec string, allEdits []SpecEdit) (updatedSpec string, appliedEdits []SpecEdit, appliedCount int, failed []string) {
+	updatedSpec = spec
 	for i := range allEdits {
 		edit := &allEdits[i]
 		if edit.Find == "" {
-			allFailed = append(allFailed, fmt.Sprintf("%s: empty find field", edit.FindingID))
+			failed = append(failed, fmt.Sprintf("%s: empty find field", edit.FindingID))
 			continue
 		}
 		if edit.Replace == "" {
-			allFailed = append(allFailed, fmt.Sprintf("%s: empty replace field", edit.FindingID))
+			failed = append(failed, fmt.Sprintf("%s: empty replace field", edit.FindingID))
 			continue
 		}
 		if !strings.Contains(updatedSpec, edit.Find) {
-			allFailed = append(allFailed, fmt.Sprintf("%s: find text not found in spec", edit.FindingID))
+			failed = append(failed, fmt.Sprintf("%s: find text not found in spec", edit.FindingID))
 			continue
 		}
 		updatedSpec = strings.Replace(updatedSpec, edit.Find, edit.Replace, 1)
 		appliedEdits = append(appliedEdits, *edit)
 		appliedCount++
 	}
+	return updatedSpec, appliedEdits, appliedCount, failed
+}
 
-	if strings.TrimSpace(updatedSpec) == "" {
-		return nil, fmt.Errorf("judge edits produced an empty spec — aborting to prevent data loss")
+// attemptConflictResolution tries to resolve failed edits via LLM conflict resolution.
+func attemptConflictResolution(ctx context.Context, round int, spec string, allEdits []SpecEdit, allFailed []string, appliedCount int, outputDir string, cfg *JudgeConfig) (updatedSpec string, newApplied int, remaining []string) {
+	conflicts := conflictEdits(allEdits, allFailed)
+	if len(allFailed) == 0 || len(conflicts) == 0 {
+		return spec, appliedCount, allFailed
 	}
-
-	// Phase 3: Conflict resolution — use Opus to apply failed edits to the updated spec.
-	if len(allFailed) > 0 && len(conflictEdits(allEdits, allFailed)) > 0 {
-		resolved, resolveErr := resolveConflicts(ctx, updatedSpec, conflictEdits(allEdits, allFailed), outputDir, &cfg)
-		if resolveErr != nil {
-			fmt.Printf("  [round %d] judge: conflict resolution failed (%v)\n", round, resolveErr)
-		} else {
-			updatedSpec = resolved.spec
-			appliedCount += resolved.applied
-			allFailed = resolved.stillFailed
-			fmt.Printf("  [round %d] judge: conflict resolution — %d more applied, %d still failed\n",
-				round, resolved.applied, len(resolved.stillFailed))
-		}
+	resolved, resolveErr := resolveConflicts(ctx, spec, conflicts, outputDir, cfg)
+	if resolveErr != nil {
+		fmt.Printf("  [round %d] judge: conflict resolution failed (%v)\n", round, resolveErr)
+		return spec, appliedCount, allFailed
 	}
+	fmt.Printf("  [round %d] judge: conflict resolution — %d more applied, %d still failed\n",
+		round, resolved.applied, len(resolved.stillFailed))
+	return resolved.spec, appliedCount + resolved.applied, resolved.stillFailed
+}
 
-	combined := &ConsolidationResult{
+// buildConsolidation assembles the final ConsolidationResult.
+func buildConsolidation(round int, spec string, rejections []Rejection, appliedEdits []SpecEdit, appliedCount int, failed []string) *ConsolidationResult {
+	return &ConsolidationResult{
 		Round:       round,
-		UpdatedSpec: updatedSpec,
+		UpdatedSpec: spec,
 		RejectionLog: RejectionLog{
 			Round:      round,
-			Rejections: allRejections,
+			Rejections: rejections,
 		},
 		AppliedEdits:   appliedEdits,
 		AppliedCount:   appliedCount,
-		RejectedCount:  len(allRejections),
-		FailedEdits:    allFailed,
+		RejectedCount:  len(rejections),
+		FailedEdits:    failed,
 		ConsolidatedAt: time.Now(),
 	}
+}
 
+// writeJudgeArtifacts writes the consolidation and rejection log to disk.
+func writeJudgeArtifacts(outputDir string, combined *ConsolidationResult) error {
 	if err := writeJSON(filepath.Join(outputDir, "consolidation.json"), combined); err != nil {
-		return nil, fmt.Errorf("write consolidation: %w", err)
+		return fmt.Errorf("write consolidation: %w", err)
 	}
 	if err := writeJSON(filepath.Join(outputDir, "rejection-log.json"), combined.RejectionLog); err != nil {
-		return nil, fmt.Errorf("write rejection log: %w", err)
+		return fmt.Errorf("write rejection log: %w", err)
 	}
-
-	fmt.Printf("  [round %d] judge total: %d applied, %d rejected, %d failed\n",
-		round, appliedCount, len(allRejections), len(allFailed))
-
-	return combined, nil
+	return nil
 }
 
 type conflictResult struct {
@@ -209,7 +242,7 @@ func resolveConflicts(ctx context.Context, spec string, edits []SpecEdit, output
 	_ = os.WriteFile(promptPath, []byte(b.String()), 0o644)
 
 	fmt.Printf("  [judge] resolving %d conflicts ...\n", len(edits))
-	output, err := agentcli.InvokeFunc(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
+	output, err := consolidateInvoke(cfg)(ctx, &cfg.Backend, b.String(), cfg.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}

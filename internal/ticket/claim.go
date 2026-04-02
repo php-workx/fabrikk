@@ -45,37 +45,44 @@ func (s *Store) ClaimTask(taskID, ownerID, backend string, lease time.Duration) 
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {
 			return parseErr
 		}
 
-		// Same-owner re-claim: skip status check, extend lease (pm-001).
-		if fm.ClaimedBy == ownerID {
-			return s.setClaim(fm, body, path, ownerID, backend, lease)
+		if err := validateClaimEligibility(fm, ownerID); err != nil {
+			return err
 		}
-
-		// Active claim by other owner: reject unless expired.
-		if fm.ClaimedBy != "" {
-			expires := parseTime(fm.ClaimExpires)
-			if !expires.IsZero() && time.Now().Before(expires) {
-				return fmt.Errorf("%w: held by %s until %s", ErrAlreadyClaimed, fm.ClaimedBy, fm.ClaimExpires)
-			}
-			// Expired — reclaimable, skip status check (task is TaskClaimed from
-			// the prior claim, which is not in the claimable set).
-			return s.setClaim(fm, body, path, ownerID, backend, lease)
-		}
-
-		// Status check: only pending and repair_pending are claimable.
-		status := StatusFromTicket(fm.Status, fm.ExtendedStatus)
-		if status != state.TaskPending && status != state.TaskRepairPending {
-			return fmt.Errorf("%w: current status is %s", ErrNotClaimable, status)
-		}
-
 		return s.setClaim(fm, body, path, ownerID, backend, lease)
 	})
+}
+
+// validateClaimEligibility checks whether a claim is allowed given the current frontmatter state.
+// Returns nil if the claim should proceed, or an error explaining why it cannot.
+func validateClaimEligibility(fm *Frontmatter, ownerID string) error {
+	// Same-owner re-claim: always allowed (pm-001).
+	if fm.ClaimedBy == ownerID {
+		return nil
+	}
+
+	// Active claim by other owner: reject unless expired.
+	if fm.ClaimedBy != "" {
+		expires := parseTime(fm.ClaimExpires)
+		if !expires.IsZero() && time.Now().Before(expires) {
+			return fmt.Errorf("%w: held by %s until %s", ErrAlreadyClaimed, fm.ClaimedBy, fm.ClaimExpires)
+		}
+		// Expired — reclaimable.
+		return nil
+	}
+
+	// No existing claim — check status.
+	status := StatusFromTicket(fm.Status, fm.ExtendedStatus)
+	if status != state.TaskPending && status != state.TaskRepairPending {
+		return fmt.Errorf("%w: current status is %s", ErrNotClaimable, status)
+	}
+	return nil
 }
 
 // setClaim writes claim fields and TaskClaimed status to a ticket file.
@@ -108,7 +115,7 @@ func (s *Store) ReleaseClaim(taskID, ownerID string, newStatus state.TaskStatus,
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {
@@ -153,7 +160,7 @@ func (s *Store) RenewClaim(taskID, ownerID string, lease time.Duration) error {
 	return s.withLock(path, func() error {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("%w: %v", ErrTicketNotFound, readErr)
+			return fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
 		}
 		fm, body, parseErr := splitFrontmatterBody(data)
 		if parseErr != nil {
@@ -222,50 +229,58 @@ func (s *Store) ReclaimExpired(runID string) ([]string, error) {
 		if claim.ExpiresAt.IsZero() || !claim.ExpiresAt.Before(now) {
 			continue
 		}
-
-		// Double-check inside lock to avoid TOCTOU with concurrent RenewClaim.
-		path := filepath.Join(s.Dir, claim.TaskID+".md")
-		reclaimErr := s.withLock(path, func() error {
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return readErr // file gone — skip in outer loop
-			}
-			fm, body, parseErr := splitFrontmatterBody(data)
-			if parseErr != nil {
-				return parseErr // corrupt — skip in outer loop
-			}
-
-			// Re-check: still expired? (may have been renewed between ReadClaimsForRun and lock)
-			expires := parseTime(fm.ClaimExpires)
-			if fm.ClaimedBy == "" || expires.IsZero() || !expires.Before(now) {
-				return errNotExpired // no longer expired — don't count as reclaimed
-			}
-
-			fm.ClaimedBy = ""
-			fm.ClaimBackend = ""
-			fm.ClaimExpires = ""
-			fm.ClaimHeartbeat = ""
-			fm.ExtendedStatus = string(state.TaskPending)
-			fm.Status = StatusToTicket(state.TaskPending)
-			fm.StatusReason = "claim expired"
-			fm.UpdatedAt = formatTime(now)
-
-			out, marshalErr := marshalFrontmatterAndBody(fm, body)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			return atomicWrite(path, out)
-		})
-		if reclaimErr != nil {
-			if errors.Is(reclaimErr, errNotExpired) || os.IsNotExist(reclaimErr) {
-				continue // expected: claim was renewed or file was deleted
-			}
-			// Real error (disk full, corrupt YAML, etc.) — collect but continue.
-			continue
+		if s.reclaimOne(claim.TaskID, now) {
+			reclaimed = append(reclaimed, claim.TaskID)
 		}
-		reclaimed = append(reclaimed, claim.TaskID)
 	}
 	return reclaimed, nil
+}
+
+// reclaimOne attempts to reclaim a single expired task under lock.
+// Returns true if the task was successfully reclaimed.
+func (s *Store) reclaimOne(taskID string, now time.Time) bool {
+	path := filepath.Join(s.Dir, taskID+".md")
+	reclaimErr := s.withLock(path, func() error {
+		fm, body, err := readAndParseFrontmatter(path)
+		if err != nil {
+			return err
+		}
+
+		// Re-check: still expired? (may have been renewed between scan and lock)
+		expires := parseTime(fm.ClaimExpires)
+		if fm.ClaimedBy == "" || expires.IsZero() || !expires.Before(now) {
+			return errNotExpired
+		}
+
+		clearClaimFields(fm, now)
+		out, marshalErr := marshalFrontmatterAndBody(fm, body)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return atomicWrite(path, out)
+	})
+	return reclaimErr == nil
+}
+
+// readAndParseFrontmatter reads a ticket file and parses its frontmatter.
+func readAndParseFrontmatter(path string) (*Frontmatter, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return splitFrontmatterBody(data)
+}
+
+// clearClaimFields resets all claim-related fields and sets the task back to pending.
+func clearClaimFields(fm *Frontmatter, now time.Time) {
+	fm.ClaimedBy = ""
+	fm.ClaimBackend = ""
+	fm.ClaimExpires = ""
+	fm.ClaimHeartbeat = ""
+	fm.ExtendedStatus = string(state.TaskPending)
+	fm.Status = StatusToTicket(state.TaskPending)
+	fm.StatusReason = "claim expired"
+	fm.UpdatedAt = formatTime(now)
 }
 
 // readAllFrontmatter reads all .md files and returns parsed Frontmatters.

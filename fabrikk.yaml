@@ -1,0 +1,4 @@
+# fabrikk project configuration
+# Backends listed here fall back to Claude when requested.
+disabled_backends:
+  - gemini
