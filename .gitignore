@@ -39,11 +39,14 @@ coverage.html
 # Firebase
 firebase-debug.log
 
-# Ticket lock files
-.tickets/*.lock
+# Local ticket state
+.tickets/
 
 # AgentOps session artifacts
 .agents/
 
 # Legacy runtime state
 .attest/
+.playwright-mcp/
+.serena/
+.verk/
