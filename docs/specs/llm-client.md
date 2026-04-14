@@ -632,6 +632,18 @@ func NormalizeToolCallID(id string) string {
 }
 ```
 
+Normalization must persist the original-to-normalized mapping for the lifetime
+of the transformation that will later resolve tool results. Use an explicit
+`IDMapper` owned by the request transformer, or attach the mapper to the
+request/session context when tool results can arrive after the initial message
+conversion. `NormalizeToolCallID` first checks `IDMapper.mapping[originalID]` and
+returns the existing normalized value; if absent, it generates
+`tc_<sha256 first32hex>`, stores it in the same map, and returns it.
+`ToolResultMessages` must resolve original provider IDs through that same mapper
+instead of recomputing IDs independently. A single request-scoped mapper is
+sufficient for one-shot transformation; use a session-scoped mapper if tool
+results persist across requests.
+
 ### 2. Orphaned Tool Call Patching
 
 > **Port from:** `transform-messages.ts:126-228`

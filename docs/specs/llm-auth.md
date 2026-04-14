@@ -237,15 +237,30 @@ func VerifyDBPermissions(path string) error {
     if mode&0o077 != 0 {
         return fmt.Errorf("auth database %s has insecure permissions %o (expected 0600)", path, mode)
     }
+    return verifyDBOwner(path, info)
+}
+```
+
+Unix builds must implement the ownership check behind build tags:
+
+```go
+//go:build unix
+
+func verifyDBOwner(path string, info os.FileInfo) error {
+    stat, ok := info.Sys().(*syscall.Stat_t)
+    if !ok {
+        return fmt.Errorf("auth database %s ownership metadata unavailable", path)
+    }
+    if stat.Uid != uint32(os.Geteuid()) {
+        return fmt.Errorf("auth database %s is owned by uid %d, want current uid %d", path, stat.Uid, os.Geteuid())
+    }
     return nil
 }
 ```
 
-On platforms that expose file ownership, also verify that the database file is
-owned by the current user before opening it. For example, Unix implementations
-can inspect `info.Sys().(*syscall.Stat_t)` and compare `Uid` to `os.Geteuid()`;
-non-Unix implementations must use the platform equivalent or document the
-ownership-check limitation.
+Non-Unix builds must provide a separate `verifyDBOwner` implementation that
+returns nil or uses the platform equivalent, and the limitation must be
+documented in that file.
 
 **Opening the SQLite database** must use `O_CREATE|O_RDWR` with mode `0600` so the
 file is created with the right permissions on first run:
@@ -257,8 +272,14 @@ func openDB(path string) (*sql.DB, error) {
     if err := VerifyDBPermissions(path); err != nil {
         return nil, err
     }
-    // Touch with strict mode if missing — sqlite3 will respect the umask, but
-    // explicitly creating the file first guarantees 0600.
+    // Set this before opening SQLite during startup so the main DB and WAL/SHM
+    // sidecars inherit restrictive permissions. Umask is process-wide; do not
+    // wrap this around concurrent startup work.
+    oldUmask := syscall.Umask(0o077)
+    defer syscall.Umask(oldUmask)
+
+    // Touch with strict mode if missing, then VerifyDBPermissions confirms the
+    // effective mode after umask has been applied.
     f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
     if err != nil {
         return nil, err
@@ -1832,6 +1853,29 @@ internalize later if the cross-repo coordination overhead becomes painful.
 - [ ] **Permission verification on Open()** — refuse to use a database with mode `0077` bits set
 - [ ] **WAL mode** with `journal_mode=WAL` pragma (concurrent readers + one writer)
 - [ ] **WAL/SHM file permissions** — set umask `0o077` so SQLite-created sidecar files inherit `0600`
+
+### Environment & Configuration
+
+- [ ] `.env` parser with quote-stripping, `export ` prefix removal, blank/comment line handling, and no shell evaluation
+- [ ] Multi-source environment resolution order: explicit process env, `cwd/.env`, then `~/.env`
+- [ ] `getEnvApiKey()` implemented for every provider referenced in `serviceProviderMap`, including provider aliases
+- [ ] Missing and malformed env entries return typed errors that identify the provider and source path without logging secret values
+
+### API Key Validation
+
+- [ ] Anthropic API key validation probe: `count_tokens` endpoint, successful auth without creating a real message
+- [ ] OpenAI API key validation probe: `GET /v1/models`, with 401/403 mapped to credential failure and network errors kept retryable
+- [ ] Google API key validation probe: `GET /v1beta/models`, with project/quota errors surfaced distinctly from invalid key errors
+- [ ] Ollama validation probe: `GET /api/tags`, with no-auth local failures reported as connectivity/configuration issues
+
+### Client Identity Headers
+
+- [ ] Platform mapping helpers: `mapOs` and `mapArch`, with explicit handling for unknown platforms
+- [ ] Version handling for CLI identity headers, including default/fallback version behavior
+- [ ] Anthropic header set: Stainless runtime/platform/arch/language headers plus billing identity headers
+- [ ] GitHub Copilot header set: VS Code editor/plugin/integration headers and initiator/vision dynamic headers
+- [ ] Google header variants: Gemini CLI and Antigravity User-Agent/metadata differences
+- [ ] OpenAI Codex header set: account/session headers and `originator: pi`
 
 ### Anthropic Provider Module
 
