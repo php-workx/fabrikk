@@ -558,6 +558,12 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 			return nil
 		}
 	}
+	if !rf.council {
+		if externalSpec {
+			fmt.Println("Council review skipped; pass --council to review external specs.")
+		}
+		return nil
+	}
 
 	// Start daemon for judge context accumulation.
 	daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
@@ -828,6 +834,9 @@ func cmdBoundaries(args []string) error {
 
 func boundaryFlagValue(args []string, index int, flag string) (value string, next int, err error) {
 	if index+1 >= len(args) {
+		return "", index, fmt.Errorf("missing value for %s", flag)
+	}
+	if strings.HasPrefix(args[index+1], "-") {
 		return "", index, fmt.Errorf("missing value for %s", flag)
 	}
 	return args[index+1], index + 1, nil

@@ -324,6 +324,9 @@ func (d *Daemon) Query(ctx context.Context, prompt string) (string, error) {
 	atThreshold := count == threshold || (count > threshold && (count-threshold)%10 == 0)
 	if atThreshold && d.config.RestartOnThreshold {
 		restartErr := d.restartLocked(ctx, "context freshness threshold reached")
+		if restartErr != nil {
+			d.needsRestart = true
+		}
 		d.mu.Unlock()
 		if restartErr != nil {
 			d.logf("  daemon: threshold restart failed: %v\n", restartErr)

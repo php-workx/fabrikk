@@ -50,6 +50,24 @@ func TestParseReviewFlagsStaggerDelay(t *testing.T) {
 	}
 }
 
+func TestBoundaryFlagValueRejectsFollowingFlag(t *testing.T) {
+	value, next, err := boundaryFlagValue([]string{"--always", "--never"}, 0, "--always")
+	if err == nil {
+		t.Fatal("boundaryFlagValue error = nil, want missing value error")
+	}
+	if value != "" || next != 0 {
+		t.Fatalf("boundaryFlagValue value=%q next=%d, want empty value and unchanged index", value, next)
+	}
+
+	value, next, err = boundaryFlagValue([]string{"--always", "src/**"}, 0, "--always")
+	if err != nil {
+		t.Fatalf("boundaryFlagValue valid value: %v", err)
+	}
+	if value != "src/**" || next != 1 {
+		t.Fatalf("boundaryFlagValue value=%q next=%d, want src/** and 1", value, next)
+	}
+}
+
 func TestCmdStatusListsRunsAndSingleRun(t *testing.T) {
 	baseDir := t.TempDir()
 	withWorkingDir(t, baseDir)
