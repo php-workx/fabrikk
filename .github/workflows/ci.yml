@@ -96,6 +96,4 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-      - run: govulncheck ./...
+      - run: go tool -modfile=tools.mod golang.org/x/vuln/cmd/govulncheck ./...

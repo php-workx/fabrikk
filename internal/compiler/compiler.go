@@ -371,11 +371,8 @@ func overlappingConflictPath(left, right string) (string, bool) {
 		return left, true
 	case strings.HasPrefix(right, left+"/"):
 		return right, true
-	case len(left) >= len(right):
-		return left, true
-	default:
-		return right, true
 	}
+	return "", false
 }
 
 func resolveConflicts(waves []state.Wave, waveIndex int, conflicts []state.FileConflict, reverseDeps map[string][]string, order map[string]int) []state.Wave {
@@ -613,14 +610,9 @@ func requirementLess(left, right state.Requirement) bool {
 }
 
 func groupRequirements(reqs []state.Requirement) [][]state.Requirement {
-	const maxGroupSize = 1
-
 	groups := make([][]state.Requirement, 0, len(reqs))
 	for _, req := range reqs {
 		group := []state.Requirement{req}
-		if len(group) != maxGroupSize {
-			panic("compiler invariant violated: requirement group size must be 1")
-		}
 		groups = append(groups, group)
 	}
 	return groups

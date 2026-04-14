@@ -21,6 +21,7 @@ func writeExecutableScript(t *testing.T, dir, name, content string) string {
 }
 
 func TestResolveCodeIntelSearchOrder(t *testing.T) {
+	t.Setenv(codeIntelCandidatesEnv, "")
 	tempHome := t.TempDir()
 	pathDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(pathDir, 0o755); err != nil {
@@ -68,6 +69,7 @@ func TestResolveCodeIntelUsesConfiguredCandidatePaths(t *testing.T) {
 
 func TestResolveCodeIntelWithHomeUnavailable(t *testing.T) {
 	t.Setenv("FABRIKK_CODE_INTEL", "")
+	t.Setenv(codeIntelCandidatesEnv, "")
 	t.Setenv("PATH", t.TempDir())
 	if got := resolveCodeIntelWithHome(t.TempDir()); got != "" {
 		t.Fatalf("resolveCodeIntelWithHome() = %q, want empty", got)
@@ -226,6 +228,7 @@ func TestLimitedBufferReportsFullWriteAfterTruncation(t *testing.T) {
 func TestExploreForPlanReturnsValidatedResultAndPersists(t *testing.T) {
 	baseDir := t.TempDir()
 	existingRel := filepath.Join("internal", "engine", "plan.go")
+	existingJSONPath := filepath.ToSlash(existingRel)
 	existingPath := filepath.Join(baseDir, existingRel)
 	if err := os.MkdirAll(filepath.Dir(existingPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -247,7 +250,7 @@ func TestExploreForPlanReturnsValidatedResultAndPersists(t *testing.T) {
 		if !strings.Contains(prompt, "## Discovery Strategy") {
 			t.Fatal("fallback exploration prompt missing discovery strategy")
 		}
-		return "```json\n{\"file_inventory\":[{\"path\":\"" + existingRel + "\",\"exists\":false,\"is_new\":true,\"line_count\":1,\"language\":\"go\"},{\"path\":\"internal/missing.go\",\"exists\":true,\"is_new\":false,\"line_count\":0,\"language\":\"go\"}],\"symbols\":[{\"file_path\":\"" + existingRel + "\",\"line\":1,\"kind\":\"func\",\"signature\":\"func DraftExecutionPlan()\"},{\"file_path\":\"internal/ghost.go\",\"line\":1,\"kind\":\"func\",\"signature\":\"func Ghost()\"}],\"test_files\":[{\"path\":\"internal/ghost_test.go\",\"test_names\":[\"TestGhost\"],\"covers\":\"internal/ghost.go\"}],\"reuse_points\":[{\"file_path\":\"" + existingRel + "\",\"line\":1,\"symbol\":\"DraftExecutionPlan\",\"relevance\":\"existing planner entry point\"},{\"file_path\":\"internal/ghost.go\",\"line\":1,\"symbol\":\"Ghost\",\"relevance\":\"hallucinated\"}]}\n```", nil
+		return "```json\n{\"file_inventory\":[{\"path\":\"" + existingJSONPath + "\",\"exists\":false,\"is_new\":true,\"line_count\":1,\"language\":\"go\"},{\"path\":\"internal/missing.go\",\"exists\":true,\"is_new\":false,\"line_count\":0,\"language\":\"go\"}],\"symbols\":[{\"file_path\":\"" + existingJSONPath + "\",\"line\":1,\"kind\":\"func\",\"signature\":\"func DraftExecutionPlan()\"},{\"file_path\":\"internal/ghost.go\",\"line\":1,\"kind\":\"func\",\"signature\":\"func Ghost()\"}],\"test_files\":[{\"path\":\"internal/ghost_test.go\",\"test_names\":[\"TestGhost\"],\"covers\":\"internal/ghost.go\"}],\"reuse_points\":[{\"file_path\":\"" + existingJSONPath + "\",\"line\":1,\"symbol\":\"DraftExecutionPlan\",\"relevance\":\"existing planner entry point\"},{\"file_path\":\"internal/ghost.go\",\"line\":1,\"symbol\":\"Ghost\",\"relevance\":\"hallucinated\"}]}\n```", nil
 	}
 
 	artifact := &state.RunArtifact{Requirements: []state.Requirement{{ID: "AT-FR-001", Text: "Map requirements to symbols."}}}
@@ -261,10 +264,10 @@ func TestExploreForPlanReturnsValidatedResultAndPersists(t *testing.T) {
 	if len(result.FileInventory) != 1 || !result.FileInventory[0].Exists || result.FileInventory[0].IsNew {
 		t.Fatalf("file inventory = %#v, want only the existing file entry", result.FileInventory)
 	}
-	if len(result.Symbols) != 1 || result.Symbols[0].FilePath != existingRel {
+	if len(result.Symbols) != 1 || result.Symbols[0].FilePath != existingJSONPath {
 		t.Fatalf("validated symbols = %#v, want only existing symbol", result.Symbols)
 	}
-	if len(result.ReusePoints) != 1 || result.ReusePoints[0].FilePath != existingRel {
+	if len(result.ReusePoints) != 1 || result.ReusePoints[0].FilePath != existingJSONPath {
 		t.Fatalf("validated reuse points = %#v, want only existing reuse point", result.ReusePoints)
 	}
 	if len(result.TestFiles) != 0 {
