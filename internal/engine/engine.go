@@ -449,6 +449,10 @@ func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, ind
 		detail := fmt.Sprintf("tool %q is not allowlisted", check.Tool)
 		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_tool_allowlist", detail)
 	}
+	if err := validateValidationCommand(check.Tool, check.Args); err != nil {
+		detail := fmt.Sprintf("%s %s is not an approved validation command shape: %v", check.Tool, strings.Join(check.Args, " "), err)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_command_shape", detail)
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, validationCommandTimeout)
 	defer cancel()
@@ -473,6 +477,240 @@ func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, ind
 		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_command", detail)
 	}
 	return state.Check{Name: checkName, Pass: true, Detail: strings.TrimSpace(stdout.String())}, nil
+}
+
+func validateValidationCommand(tool string, args []string) error {
+	if err := rejectShellLikeArgs(args); err != nil {
+		return err
+	}
+	switch tool {
+	case "go":
+		return validateGoValidationArgs(args)
+	case "python3":
+		return validatePythonValidationArgs(args)
+	case "npm":
+		return validateNPMValidationArgs(args)
+	case "make", "just":
+		return validateTargetValidationArgs(args)
+	default:
+		return fmt.Errorf("unsupported tool %q", tool)
+	}
+}
+
+func rejectShellLikeArgs(args []string) error {
+	for _, arg := range args {
+		if strings.ContainsAny(arg, "\n\r") ||
+			strings.Contains(arg, "$(") ||
+			strings.Contains(arg, "`") ||
+			strings.Contains(arg, "|") ||
+			strings.Contains(arg, ";") ||
+			strings.Contains(arg, "&&") ||
+			strings.Contains(arg, "||") ||
+			strings.Contains(arg, "<") ||
+			strings.Contains(arg, ">") {
+			return fmt.Errorf("arg %q contains shell control syntax", arg)
+		}
+	}
+	return nil
+}
+
+func validateGoValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("go requires an approved subcommand")
+	}
+	switch args[0] {
+	case "env":
+		return validateGoEnvArgs(args[1:])
+	case "test", "vet":
+		return validateGoPackageCommandArgs(args[0], args[1:])
+	default:
+		return fmt.Errorf("go subcommand %q is not approved", args[0])
+	}
+}
+
+func validateGoEnvArgs(args []string) error {
+	allowed := map[string]struct{}{
+		"GOARCH": {}, "GOMOD": {}, "GOOS": {}, "GOPATH": {}, "GOROOT": {}, "GOWORK": {},
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("go env requires at least one approved key")
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("go env flags are not approved")
+		}
+		if _, ok := allowed[arg]; !ok {
+			return fmt.Errorf("go env key %q is not approved", arg)
+		}
+	}
+	return nil
+}
+
+func validateGoPackageCommandArgs(subcommand string, args []string) error {
+	for i := 0; i < len(args); i++ {
+		consumed, err := validateGoPackageCommandArg(subcommand, args, i)
+		if err != nil {
+			return err
+		}
+		i += consumed
+	}
+	return nil
+}
+
+func validateGoPackageCommandArg(subcommand string, args []string, index int) (int, error) {
+	arg := args[index]
+	if arg == "" {
+		return 0, fmt.Errorf("%s contains an empty argument", subcommand)
+	}
+	if isBlockedGoExecutionFlag(arg) {
+		return 0, fmt.Errorf("%s flag %q is not approved", subcommand, arg)
+	}
+	if arg == "-coverprofile" {
+		return validateGoPathFlagValue(subcommand, args, index)
+	}
+	if strings.HasPrefix(arg, "-coverprofile=") {
+		path := strings.TrimPrefix(arg, "-coverprofile=")
+		if err := validateRelativeValidationPathArg(path); err != nil {
+			return 0, fmt.Errorf("%s flag -coverprofile: %w", subcommand, err)
+		}
+		return 0, nil
+	}
+	if isGoFlagWithValue(arg) {
+		if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+			return 0, fmt.Errorf("%s flag %q requires a value", subcommand, arg)
+		}
+		return 1, nil
+	}
+	if isAllowedGoFlag(arg) {
+		return 0, nil
+	}
+	if strings.HasPrefix(arg, "-") {
+		return 0, fmt.Errorf("%s flag %q is not approved", subcommand, arg)
+	}
+	return 0, validateGoPackagePattern(arg)
+}
+
+func isBlockedGoExecutionFlag(arg string) bool {
+	return arg == "-exec" || strings.HasPrefix(arg, "-exec=") || arg == "-toolexec" || strings.HasPrefix(arg, "-toolexec=")
+}
+
+func validateGoPathFlagValue(subcommand string, args []string, index int) (int, error) {
+	if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+		return 0, fmt.Errorf("%s flag %q requires a value", subcommand, args[index])
+	}
+	if err := validateRelativeValidationPathArg(args[index+1]); err != nil {
+		return 0, fmt.Errorf("%s flag %q: %w", subcommand, args[index], err)
+	}
+	return 1, nil
+}
+
+func isGoFlagWithValue(arg string) bool {
+	return arg == "-run" || arg == "-timeout" || arg == "-count"
+}
+
+func isAllowedGoFlag(arg string) bool {
+	return strings.HasPrefix(arg, "-run=") ||
+		strings.HasPrefix(arg, "-timeout=") ||
+		strings.HasPrefix(arg, "-count=") ||
+		arg == "-race" ||
+		arg == "-cover" ||
+		strings.HasPrefix(arg, "-covermode=")
+}
+
+func validateGoPackagePattern(arg string) error {
+	clean := filepath.Clean(arg)
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(arg) {
+		return fmt.Errorf("go package path %q is not approved", arg)
+	}
+	if strings.Contains(arg, "\\") {
+		return fmt.Errorf("go package path %q must use slash separators", arg)
+	}
+	for _, r := range arg {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '.', '/', '_', '-', '@':
+			continue
+		default:
+			return fmt.Errorf("go package path %q contains unsupported character %q", arg, r)
+		}
+	}
+	return nil
+}
+
+func validatePythonValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("python3 requires an approved module invocation")
+	}
+	if args[0] == "-c" {
+		return fmt.Errorf("python3 -c is not approved")
+	}
+	if len(args) < 2 || args[0] != "-m" || args[1] != "pytest" {
+		return fmt.Errorf("python3 may only run -m pytest")
+	}
+	for _, arg := range args[2:] {
+		switch arg {
+		case "-q", "-x", "--disable-warnings", "--maxfail=1":
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("pytest flag %q is not approved", arg)
+		}
+		if err := validateRelativeValidationPathArg(arg); err != nil {
+			return fmt.Errorf("pytest arg %q is not approved: %w", arg, err)
+		}
+	}
+	return nil
+}
+
+func validateRelativeValidationPathArg(arg string) error {
+	if arg == "" {
+		return fmt.Errorf("empty path")
+	}
+	if filepath.IsAbs(arg) {
+		return fmt.Errorf("absolute paths are not approved")
+	}
+	if strings.Contains(arg, "\\") {
+		return fmt.Errorf("paths must use slash separators")
+	}
+	clean := filepath.Clean(arg)
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes workdir")
+	}
+	return nil
+}
+
+func validateNPMValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("npm requires an approved command")
+	}
+	if args[0] == "exec" || args[0] == "x" {
+		return fmt.Errorf("npm %s is not approved", args[0])
+	}
+	if len(args) == 1 && slices.Contains([]string{"test"}, args[0]) {
+		return nil
+	}
+	if len(args) == 2 && args[0] == "run" && slices.Contains([]string{"test", "lint", "build", "typecheck", "check"}, args[1]) {
+		return nil
+	}
+	return fmt.Errorf("npm command %q is not approved", strings.Join(args, " "))
+}
+
+func validateTargetValidationArgs(args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("only one fixed target is approved")
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("flags are not approved")
+	}
+	if !slices.Contains([]string{"test", "check", "lint", "build", "verify", "pre-commit", "pre-push", "vuln"}, args[0]) {
+		return fmt.Errorf("target %q is not approved", args[0])
+	}
+	return nil
 }
 
 func (e *Engine) validationPath(path string) (string, error) {

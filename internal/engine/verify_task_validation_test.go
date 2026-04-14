@@ -84,7 +84,7 @@ func TestVerifyTaskRejectsNonAllowlistedValidationTool(t *testing.T) {
 func TestVerifyTaskCapturesFailedValidationCommandOutput(t *testing.T) {
 	eng, _, _ := setupValidationEngine(t)
 	task := baseValidationTask()
-	task.ValidationChecks = []state.ValidationCheck{{Type: "command", Tool: "go", Args: []string{"not-a-real-subcommand"}}}
+	task.ValidationChecks = []state.ValidationCheck{{Type: "command", Tool: "go", Args: []string{"test", "./missing-validation-package"}}}
 
 	result, err := eng.VerifyTask(context.Background(), task, baseValidationReport())
 	if err != nil {
@@ -98,6 +98,40 @@ func TestVerifyTaskCapturesFailedValidationCommandOutput(t *testing.T) {
 	}
 	if !strings.Contains(result.BlockingFindings[0].Summary, "exit code") {
 		t.Fatalf("finding summary = %q, want exit code detail", result.BlockingFindings[0].Summary)
+	}
+}
+
+func TestVerifyTaskRejectsUnapprovedValidationCommandShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+		args []string
+	}{
+		{name: "go exec flag", tool: "go", args: []string{"test", "-exec", "echo"}},
+		{name: "python command string", tool: "python3", args: []string{"-c", "print(1)"}},
+		{name: "npm exec", tool: "npm", args: []string{"exec", "eslint"}},
+		{name: "make arbitrary target", tool: "make", args: []string{"deploy"}},
+		{name: "just arbitrary recipe", tool: "just", args: []string{"release"}},
+		{name: "shell operator", tool: "go", args: []string{"test", "./...", "|", "cat"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eng, _, _ := setupValidationEngine(t)
+			task := baseValidationTask()
+			task.ValidationChecks = []state.ValidationCheck{{Type: "command", Tool: tt.tool, Args: tt.args}}
+
+			result, err := eng.VerifyTask(context.Background(), task, baseValidationReport())
+			if err != nil {
+				t.Fatalf("VerifyTask: %v", err)
+			}
+			if result.Pass {
+				t.Fatal("VerifyTask unexpectedly passed")
+			}
+			if len(result.BlockingFindings) == 0 || result.BlockingFindings[0].Category != "validation_command_shape" {
+				t.Fatalf("BlockingFindings = %+v, want validation_command_shape rejection", result.BlockingFindings)
+			}
+		})
 	}
 }
 
