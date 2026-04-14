@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/php-workx/fabrikk/internal/agentcli"
@@ -133,24 +133,18 @@ func newLearningStore(wd string) *learning.Store {
 	return learning.NewStore(sharedDir)
 }
 
-var (
-	localDirOnce   sync.Once
-	cachedLocalDir string
-)
-
 func resolveLocalLearningDir(wd string) string {
-	localDirOnce.Do(func() {
-		out, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
-		if err != nil {
-			return
-		}
-		gitCommonDir := strings.TrimSpace(string(out))
-		if !filepath.IsAbs(gitCommonDir) {
-			gitCommonDir = filepath.Join(wd, gitCommonDir)
-		}
-		cachedLocalDir = filepath.Join(gitCommonDir, "fabrikk", "learnings")
-	})
-	return cachedLocalDir
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = wd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	gitCommonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(wd, gitCommonDir)
+	}
+	return filepath.Join(gitCommonDir, "fabrikk", "learnings")
 }
 
 func workDir() (string, error) {
@@ -254,7 +248,7 @@ func parseTechSpecFlags(args []string) techSpecFlags {
 	if len(args) > 0 {
 		f.action = args[0]
 	}
-	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true, "--persona": true, "--persona-dir": true}
+	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true, "--persona": true, "--persona-dir": true, "--stagger-delay": true}
 	for i := 1; i < len(args); i++ {
 		i = parseTechSpecArg(&f, args, i, valuedFlags)
 	}
@@ -291,7 +285,7 @@ func parseTechSpecArg(f *techSpecFlags, args []string, i int, valuedFlags map[st
 
 func cmdTechSpec(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: fabrikk tech-spec <draft|review|approve> [run-id] [--from <path>] [--no-normalize] [--council] [--force] [--round N]")
+		return fmt.Errorf("usage: fabrikk tech-spec <draft|review|approve> [run-id] [--from <path>] [--no-normalize] [--council] [--force] [--round N] [--stagger-delay N]")
 	}
 
 	f := parseTechSpecFlags(args)
@@ -433,6 +427,7 @@ type reviewFlags struct {
 	force          bool
 	skipApproval   bool
 	rounds         int
+	staggerDelay   int
 	mode           councilflow.ReviewMode
 	personaPaths   []string // repeatable --persona <path>
 	personaDirs    []string // repeatable --persona-dir <dir>
@@ -440,7 +435,7 @@ type reviewFlags struct {
 
 // parseReviewFlags extracts review-specific flags from the argument list.
 func parseReviewFlags(flags []string) (reviewFlags, error) {
-	rf := reviewFlags{rounds: 2, mode: councilflow.ReviewStandard}
+	rf := reviewFlags{rounds: 2, staggerDelay: -1, mode: councilflow.ReviewStandard}
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case "--structural-only":
@@ -454,32 +449,63 @@ func parseReviewFlags(flags []string) (reviewFlags, error) {
 		case "--skip-approval":
 			rf.skipApproval = true
 		case "--round":
-			if i+1 < len(flags) {
-				_, _ = fmt.Sscanf(flags[i+1], "%d", &rf.rounds)
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--round")
+			if err != nil {
+				return rf, err
 			}
+			rounds, err := strconv.Atoi(value)
+			if err != nil || rounds <= 0 {
+				return rf, fmt.Errorf("invalid round count %q (use a positive integer)", value)
+			}
+			rf.rounds = rounds
+			i = next
 		case "--mode":
-			if i+1 < len(flags) {
-				m := councilflow.ReviewMode(flags[i+1])
-				if !councilflow.ValidReviewModes[m] {
-					return rf, fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
-				}
-				rf.mode = m
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--mode")
+			if err != nil {
+				return rf, err
 			}
+			m := councilflow.ReviewMode(value)
+			if !councilflow.ValidReviewModes[m] {
+				return rf, fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", value)
+			}
+			rf.mode = m
+			i = next
+		case "--stagger-delay":
+			value, next, err := reviewFlagValue(flags, i, "--stagger-delay")
+			if err != nil {
+				return rf, fmt.Errorf("--stagger-delay requires a value in seconds")
+			}
+			seconds, err := strconv.Atoi(value)
+			if err != nil || seconds < 0 {
+				return rf, fmt.Errorf("invalid stagger delay %q (use a non-negative number of seconds)", value)
+			}
+			rf.staggerDelay = seconds
+			i = next
 		case "--persona":
-			if i+1 < len(flags) {
-				rf.personaPaths = append(rf.personaPaths, flags[i+1])
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--persona")
+			if err != nil {
+				return rf, err
 			}
+			rf.personaPaths = append(rf.personaPaths, value)
+			i = next
 		case "--persona-dir":
-			if i+1 < len(flags) {
-				rf.personaDirs = append(rf.personaDirs, flags[i+1])
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--persona-dir")
+			if err != nil {
+				return rf, err
 			}
+			rf.personaDirs = append(rf.personaDirs, value)
+			i = next
 		}
 	}
 	return rf, nil
+}
+
+func reviewFlagValue(flags []string, index int, flag string) (value string, next int, err error) {
+	values := flags[index+1:]
+	if len(values) == 0 || strings.HasPrefix(values[0], "-") {
+		return "", index, fmt.Errorf("%s requires a value", flag)
+	}
+	return values[0], index + 1, nil
 }
 
 // runStructuralReview runs the pre-flight structural review and returns whether
@@ -543,6 +569,9 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	cfg.Force = rf.force
 	cfg.SkipApproval = rf.skipApproval
 	cfg.JudgeInvokeFn = daemon
+	if rf.staggerDelay >= 0 {
+		cfg.StaggerDelay = rf.staggerDelay
+	}
 
 	// Load custom personas from --persona / --persona-dir flags.
 	customPersonas, cpErr := loadCustomPersonas(rf)
@@ -679,6 +708,9 @@ func cmdPlan(ctx context.Context, args []string) error {
 		}
 		if rf.mode != councilflow.ReviewStandard {
 			cfg.Mode = rf.mode
+		}
+		if rf.staggerDelay >= 0 {
+			cfg.StaggerDelay = rf.staggerDelay
 		}
 		cfg.SkipJudge = true
 		cfg.JudgeInvokeFn = daemon

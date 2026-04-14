@@ -93,7 +93,7 @@ func TestRunFormatsAskFirstHumanInputGuidance(t *testing.T) {
 	if err := runDir.WriteTechnicalSpecApproval(&state.ArtifactApproval{
 		SchemaVersion: "0.1",
 		RunID:         "run-plan-ask-first",
-		ArtifactType:  "technical_spec",
+		ArtifactType:  "technical_spec_approval",
 		ArtifactPath:  "technical-spec.md",
 		ArtifactHash:  specHash,
 		Status:        state.ArtifactApproved,

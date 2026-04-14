@@ -21,6 +21,35 @@ import (
 
 const emptyExplorationJSON = `{"file_inventory":[],"symbols":[],"test_files":[],"reuse_points":[]}`
 
+func TestParseReviewFlagsStaggerDelay(t *testing.T) {
+	rf, err := parseReviewFlags([]string{"--council", "--stagger-delay", "0"})
+	if err != nil {
+		t.Fatalf("parseReviewFlags: %v", err)
+	}
+	if !rf.council {
+		t.Fatal("council = false, want true")
+	}
+	if rf.staggerDelay != 0 {
+		t.Fatalf("staggerDelay = %d, want 0", rf.staggerDelay)
+	}
+
+	if _, err := parseReviewFlags([]string{"--stagger-delay", "-1"}); err == nil {
+		t.Fatal("parseReviewFlags negative delay error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--stagger-delay"}); err == nil {
+		t.Fatal("parseReviewFlags missing delay error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--round", "--mode"}); err == nil {
+		t.Fatal("parseReviewFlags missing round error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--round", "abc"}); err == nil {
+		t.Fatal("parseReviewFlags invalid round error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--mode", "--council"}); err == nil {
+		t.Fatal("parseReviewFlags missing mode error = nil, want error")
+	}
+}
+
 func TestCmdStatusListsRunsAndSingleRun(t *testing.T) {
 	baseDir := t.TempDir()
 	withWorkingDir(t, baseDir)
@@ -464,7 +493,7 @@ H
 		t.Fatalf("cmdPlan draft: %v", err)
 	}
 	output := captureStdout(t, func() {
-		if err := cmdPlan(context.Background(), []string{"review", "run-plan-council", "--council"}); err != nil {
+		if err := cmdPlan(context.Background(), []string{"review", "run-plan-council", "--council", "--stagger-delay", "0"}); err != nil {
 			t.Fatalf("cmdPlan review --council: %v", err)
 		}
 	})
@@ -555,7 +584,7 @@ H
 	}
 	var reviewErr error
 	output := captureStdout(t, func() {
-		reviewErr = cmdPlan(context.Background(), []string{"review", "run-plan-council-fail", "--council"})
+		reviewErr = cmdPlan(context.Background(), []string{"review", "run-plan-council-fail", "--council", "--stagger-delay", "0"})
 	})
 	if reviewErr == nil {
 		t.Fatal("cmdPlan review --council error = nil, want council failure")
