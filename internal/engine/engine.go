@@ -23,11 +23,13 @@ import (
 )
 
 const (
-	errReadArtifact  = "read artifact: %w"
-	errReadTasks     = "read tasks: %w"
-	errWriteTasks    = "write tasks: %w"
-	errRefreshStatus = "refresh status: %w"
-	errSyncCoverage  = "sync requirement coverage: %w"
+	errReadArtifact           = "read artifact: %w"
+	errReadTasks              = "read tasks: %w"
+	errWriteTasks             = "write tasks: %w"
+	errRefreshStatus          = "refresh status: %w"
+	errSyncCoverage           = "sync requirement coverage: %w"
+	validationCommandTimeout  = 30 * time.Second
+	errValidationPathCategory = "validation_path"
 )
 
 // Engine is the Phase 1 run engine (spec section 18.3).
@@ -391,7 +393,12 @@ func (e *Engine) runValidationCheck(ctx context.Context, task *state.Task, index
 	case "files_exist":
 		missing := make([]string, 0, len(check.Paths))
 		for _, path := range check.Paths {
-			if _, err := os.Stat(e.validationPath(path)); err != nil {
+			validatedPath, err := e.validationPath(path)
+			if err != nil {
+				detail := fmt.Sprintf("files_exist has invalid path %q: %v", path, err)
+				return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, errValidationPathCategory, detail)
+			}
+			if _, err := os.Stat(validatedPath); err != nil {
 				missing = append(missing, path)
 			}
 		}
@@ -405,7 +412,12 @@ func (e *Engine) runValidationCheck(ctx context.Context, task *state.Task, index
 			detail := "content_check requires both file and pattern"
 			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
 		}
-		data, err := os.ReadFile(e.validationPath(check.File))
+		validatedPath, err := e.validationPath(check.File)
+		if err != nil {
+			detail := fmt.Sprintf("content_check has invalid file path %q: %v", check.File, err)
+			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, errValidationPathCategory, detail)
+		}
+		data, err := os.ReadFile(validatedPath)
 		if err != nil {
 			detail := fmt.Sprintf("content_check could not read %s: %v", check.File, err)
 			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
@@ -438,7 +450,10 @@ func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, ind
 		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_tool_allowlist", detail)
 	}
 
-	cmd := exec.CommandContext(ctx, check.Tool, check.Args...) //nolint:gosec // validation checks execute allowlisted local developer tools without shell interpretation
+	runCtx, cancel := context.WithTimeout(ctx, validationCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, check.Tool, check.Args...) //nolint:gosec // validation checks execute allowlisted local developer tools without shell interpretation
 	cmd.Dir = e.WorkDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -449,17 +464,47 @@ func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, ind
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		}
-		detail := fmt.Sprintf("%s %s failed with exit code %d: %s", check.Tool, strings.Join(check.Args, " "), exitCode, strings.TrimSpace(stderr.String()))
+		var detail string
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			detail = fmt.Sprintf("%s %s timed out after %s: %s", check.Tool, strings.Join(check.Args, " "), validationCommandTimeout, strings.TrimSpace(stderr.String()))
+		} else {
+			detail = fmt.Sprintf("%s %s failed with exit code %d: %s", check.Tool, strings.Join(check.Args, " "), exitCode, strings.TrimSpace(stderr.String()))
+		}
 		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_command", detail)
 	}
 	return state.Check{Name: checkName, Pass: true, Detail: strings.TrimSpace(stdout.String())}, nil
 }
 
-func (e *Engine) validationPath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
+func (e *Engine) validationPath(path string) (string, error) {
+	return resolveWorktreePath(e.WorkDir, path)
+}
+
+func resolveWorktreePath(workDir, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty path")
 	}
-	return filepath.Join(e.WorkDir, path)
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir: %w", err)
+	}
+	var target string
+	if filepath.IsAbs(path) {
+		target = filepath.Clean(path)
+	} else {
+		target = filepath.Join(absWorkDir, filepath.Clean(path))
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(absWorkDir, absTarget)
+	if err != nil {
+		return "", fmt.Errorf("relativize path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes workdir")
+	}
+	return absTarget, nil
 }
 
 func validationFinding(task *state.Task, index int, category, detail string) *state.Finding {

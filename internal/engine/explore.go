@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/php-workx/fabrikk/internal/agentcli"
@@ -179,6 +179,9 @@ func (e *Engine) validateExplorationResult(result *state.ExplorationResult) {
 	validatedFiles := result.FileInventory[:0]
 	for _, fileInfo := range result.FileInventory {
 		path := e.explorationPath(fileInfo.Path)
+		if path == "" {
+			continue
+		}
 		if _, err := os.Stat(path); err == nil {
 			fileInfo.Exists = true
 			fileInfo.IsNew = false
@@ -207,10 +210,11 @@ func (e *Engine) validateExplorationResult(result *state.ExplorationResult) {
 }
 
 func (e *Engine) explorationPath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
+	resolved, err := resolveWorktreePath(e.WorkDir, path)
+	if err != nil {
+		return ""
 	}
-	return filepath.Join(e.WorkDir, path)
+	return resolved
 }
 
 func filterExplorationTestFiles(items []state.TestFileInfo, pathOf, coverOf func(state.TestFileInfo) string) []state.TestFileInfo {
@@ -305,7 +309,7 @@ func isUnavailableToolError(err error) bool {
 		return true
 	}
 	var pathErr *os.PathError
-	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.ENOENT) {
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, fs.ErrNotExist) {
 		return true
 	}
 	return false

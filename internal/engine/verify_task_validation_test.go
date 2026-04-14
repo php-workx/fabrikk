@@ -126,6 +126,29 @@ func TestVerifyTaskHandlesFileAndContentChecks(t *testing.T) {
 	}
 }
 
+func TestVerifyTaskRejectsValidationPathsOutsideWorkDir(t *testing.T) {
+	eng, _, _ := setupValidationEngine(t)
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	task := baseValidationTask()
+	task.ValidationChecks = []state.ValidationCheck{{Type: "files_exist", Paths: []string{outsideFile}}}
+
+	result, err := eng.VerifyTask(context.Background(), task, baseValidationReport())
+	if err != nil {
+		t.Fatalf("VerifyTask: %v", err)
+	}
+	if result.Pass {
+		t.Fatal("VerifyTask unexpectedly passed")
+	}
+	if len(result.BlockingFindings) == 0 || result.BlockingFindings[0].Category != "validation_path" {
+		t.Fatalf("BlockingFindings = %+v, want validation_path rejection", result.BlockingFindings)
+	}
+}
+
 func TestVerifyTaskSkipsDuplicateQualityGateValidationCheck(t *testing.T) {
 	eng, runDir, _ := setupValidationEngine(t)
 	if err := runDir.WriteArtifact(&state.RunArtifact{

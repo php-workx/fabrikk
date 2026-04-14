@@ -272,11 +272,16 @@ func TestValidateExplorationResultPreservesNewTestGuidance(t *testing.T) {
 	if err := os.WriteFile(coveredPath, []byte("package engine\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(coveredPath): %v", err)
 	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.go")
+	if err := os.WriteFile(outsidePath, []byte("package outside\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(outsidePath): %v", err)
+	}
 
 	eng := New(nil, baseDir)
 	result := &state.ExplorationResult{
 		FileInventory: []state.FileInfo{
 			{Path: coveredRel, Exists: true, IsNew: false},
+			{Path: outsidePath, Exists: true, IsNew: false},
 			{Path: filepath.Join("internal", "ghost.go"), Exists: false, IsNew: false},
 		},
 		TestFiles: []state.TestFileInfo{
