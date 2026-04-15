@@ -24,8 +24,6 @@ const (
 
 // DraftExecutionPlan derives a run-scoped execution plan from an approved technical spec.
 func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, error) {
-	_ = ctx
-
 	techSpecHash, err := e.readApprovedTechnicalSpecHash()
 	if err != nil {
 		return nil, err
@@ -263,9 +261,9 @@ func cloneImplementationDetail(detail state.ImplementationDetail) state.Implemen
 }
 
 // ReviewExecutionPlan runs deterministic structural checks over the plan artifact.
-func (e *Engine) ReviewExecutionPlan(ctx context.Context) (*state.ExecutionPlanReview, error) {
-	_ = ctx
-
+// ctx is accepted for interface symmetry with other lifecycle methods but is not used:
+// review work is local I/O only and finishes well within typical caller timeouts.
+func (e *Engine) ReviewExecutionPlan(_ context.Context) (*state.ExecutionPlanReview, error) {
 	plan, _, err := e.readExecutionPlanWithHash()
 	if err != nil {
 		return nil, err
