@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -448,6 +449,147 @@ func TestRemoveDepSuccess(t *testing.T) {
 	}
 }
 
+func TestLinkAddsBidirectionalLinksIdempotently(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	taskA := testTask()
+	taskA.TaskID = testTaskA
+	taskB := testTask()
+	taskB.TaskID = testTaskB
+	if err := store.WriteTask(&taskA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteTask(&taskB); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddNote(testTaskA, "Preserve this body note"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Link(testTaskA, testTaskB); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := store.Link(testTaskA, testTaskB); err != nil {
+		t.Fatalf("Link duplicate: %v", err)
+	}
+
+	fmA, bodyA := readTicketFrontmatter(t, dir, testTaskA)
+	fmB, _ := readTicketFrontmatter(t, dir, testTaskB)
+	assertStringsEqual(t, fmA.Links, []string{testTaskB})
+	assertStringsEqual(t, fmB.Links, []string{testTaskA})
+	if !strings.Contains(bodyA, "Preserve this body note") {
+		t.Fatalf("Link should preserve ticket body, got: %s", bodyA)
+	}
+}
+
+func TestLinkResolvesPartialIDsAndRejectsMissingTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	taskA := testTask()
+	taskA.TaskID = "source-task"
+	taskB := testTask()
+	taskB.TaskID = "target-task"
+	if err := store.WriteTask(&taskA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteTask(&taskB); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Link("source", "target"); err != nil {
+		t.Fatalf("Link with partial IDs: %v", err)
+	}
+	fmA, _ := readTicketFrontmatter(t, dir, "source-task")
+	fmB, _ := readTicketFrontmatter(t, dir, "target-task")
+	assertStringsEqual(t, fmA.Links, []string{"target-task"})
+	assertStringsEqual(t, fmB.Links, []string{"source-task"})
+
+	err := store.Link("source-task", "missing-target")
+	if !errors.Is(err, ErrTicketNotFound) {
+		t.Fatalf("expected ErrTicketNotFound for missing link target, got: %v", err)
+	}
+}
+
+func TestLinkDoesNotPartiallyUpdateWhenTargetPreparationFails(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	taskA := testTask()
+	taskA.TaskID = testTaskA
+	taskB := testTask()
+	taskB.TaskID = testTaskB
+	if err := store.WriteTask(&taskA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteTask(&taskB); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(dir, testTaskB+".md")
+	if err := os.WriteFile(targetPath, []byte("not valid ticket frontmatter"), 0o644); err != nil {
+		t.Fatalf("WriteFile(target malformed): %v", err)
+	}
+
+	if err := store.Link(testTaskA, testTaskB); err == nil {
+		t.Fatal("Link with malformed target error = nil, want error")
+	}
+	fmA, _ := readTicketFrontmatter(t, dir, testTaskA)
+	assertStringsEqual(t, fmA.Links, nil)
+}
+
+func TestUnlinkRemovesBidirectionalLinksIdempotently(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	taskA := testTask()
+	taskA.TaskID = testTaskA
+	taskB := testTask()
+	taskB.TaskID = testTaskB
+	if err := store.WriteTask(&taskA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteTask(&taskB); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Link(testTaskA, testTaskB); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Unlink(testTaskA, testTaskB); err != nil {
+		t.Fatalf("Unlink: %v", err)
+	}
+	if err := store.Unlink(testTaskA, testTaskB); err != nil {
+		t.Fatalf("Unlink duplicate should be a no-op: %v", err)
+	}
+
+	fmA, _ := readTicketFrontmatter(t, dir, testTaskA)
+	fmB, _ := readTicketFrontmatter(t, dir, testTaskB)
+	assertStringsEqual(t, fmA.Links, nil)
+	assertStringsEqual(t, fmB.Links, nil)
+}
+
+func TestLinkSelfAddsSingleSelfLink(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	task := testTask()
+	task.TaskID = testTaskA
+	if err := store.WriteTask(&task); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Link(testTaskA, testTaskA); err != nil {
+		t.Fatalf("Link self: %v", err)
+	}
+	if err := store.Link(testTaskA, testTaskA); err != nil {
+		t.Fatalf("Link self duplicate: %v", err)
+	}
+
+	fm, _ := readTicketFrontmatter(t, dir, testTaskA)
+	assertStringsEqual(t, fm.Links, []string{testTaskA})
+}
+
 func TestAddNoteAppendsToTicket(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
@@ -493,5 +635,102 @@ func TestAddNoteNotFound(t *testing.T) {
 	err := store.AddNote("nonexistent", "a note")
 	if !errors.Is(err, ErrTicketNotFound) {
 		t.Fatalf("expected ErrTicketNotFound, got: %v", err)
+	}
+}
+
+func TestMarshalProducesTkCompatibleFormat(t *testing.T) {
+	requireTk(t)
+
+	root := t.TempDir()
+	store := NewStore(filepath.Join(root, ".tickets"))
+	task := testTask()
+	task.TaskID = "task-cli-compatible"
+	task.Title = "Go-created ticket"
+	task.DependsOn = nil
+
+	if err := store.WriteTask(&task); err != nil {
+		t.Fatalf("WriteTask: %v", err)
+	}
+
+	cmd := exec.Command("tk", "show", "task-cli-compatible")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tk show failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "# Go-created ticket") {
+		t.Fatalf("tk show output missing Go-created title:\n%s", output)
+	}
+}
+
+func TestUnmarshalTkCreatedTicket(t *testing.T) {
+	requireTk(t)
+
+	root := t.TempDir()
+	cmd := exec.Command("tk", "create", "tk-created ticket",
+		"--description", "Created through the tk CLI",
+		"--type", "task",
+		"--priority", "1",
+		"--tags", "cli,roundtrip",
+	)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tk create failed: %v\n%s", err, output)
+	}
+	id := strings.TrimSpace(string(output))
+
+	store := NewStore(filepath.Join(root, ".tickets"))
+	got, err := store.ReadTask(id)
+	if err != nil {
+		t.Fatalf("ReadTask(%q): %v", id, err)
+	}
+	if got.TaskID != id {
+		t.Fatalf("TaskID = %q, want %q", got.TaskID, id)
+	}
+	if got.Title != "tk-created ticket" {
+		t.Fatalf("Title = %q, want tk-created ticket", got.Title)
+	}
+	if got.TaskType != "task" {
+		t.Fatalf("TaskType = %q, want task", got.TaskType)
+	}
+	if got.Priority != 1 {
+		t.Fatalf("Priority = %d, want 1", got.Priority)
+	}
+	if got.Status != state.TaskPending {
+		t.Fatalf("Status = %q, want pending", got.Status)
+	}
+	assertStringsEqual(t, got.Tags, []string{"cli", "roundtrip"})
+}
+
+func requireTk(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("tk"); err != nil {
+		t.Skip("tk CLI not in PATH")
+	}
+}
+
+func readTicketFrontmatter(t *testing.T, dir, id string) (fm *Frontmatter, body string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, id+".md"))
+	if err != nil {
+		t.Fatalf("read ticket %s: %v", id, err)
+	}
+	fm, body, err = splitFrontmatterBody(data)
+	if err != nil {
+		t.Fatalf("split ticket %s: %v", id, err)
+	}
+	return fm, body
+}
+
+func assertStringsEqual(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
 	}
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/php-workx/fabrikk/internal/agentcli"
@@ -28,11 +30,14 @@ var (
 )
 
 const (
-	commandReview  = "review"
-	commandApprove = "approve"
+	commandDraft      = "draft"
+	commandReview     = "review"
+	commandApprove    = "approve"
+	commandBoundaries = "boundaries"
 
 	fabrikDir            = ".fabrikk"
 	flagFrom             = "--from"
+	flagFromTechSpec     = "--from-tech-spec"
 	completionReportFile = "completion-report.json"
 )
 
@@ -46,59 +51,67 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	var err error
+	if handleRunMetaCommands(args[0], stderr) {
+		return 0
+	}
 
-	switch args[0] {
+	err := dispatchRunCommand(ctx, args)
+	if err == nil {
+		return 0
+	}
+
+	var humanErr *engine.HumanInputRequiredError
+	if errors.As(err, &humanErr) {
+		writeHumanInputRequired(stderr, args, humanErr)
+		return 1
+	}
+	if strings.HasPrefix(err.Error(), "unknown command:") {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		usage(stderr)
+		return 1
+	}
+	_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+	return 1
+}
+
+func handleRunMetaCommands(command string, stderr io.Writer) bool {
+	switch command {
 	case "help", "--help", "-h":
 		usage(stderr)
-		return 0
+		return true
 	case "version", "--version", "-v":
 		_, _ = fmt.Fprintf(stderr, "fabrikk %s (%s, %s)\n", Version, GitCommit, BuildDate)
-		return 0
-	case "prepare":
-		err = cmdPrepare(ctx, args[1:])
-	case commandReview:
-		err = cmdReview(ctx, args[1:])
-	case "tech-spec":
-		err = cmdTechSpec(ctx, args[1:])
-	case "plan":
-		err = cmdPlan(ctx, args[1:])
-	case commandApprove:
-		err = cmdApprove(ctx, args[1:])
-	case "status":
-		err = cmdStatus(ctx, args[1:])
-	case "report":
-		err = cmdReport(args[1:])
-	case "verify":
-		err = cmdVerify(ctx, args[1:])
-	case "retry":
-		err = cmdRetry(args[1:])
-	case "tasks":
-		err = cmdTasks(args[1:])
-	case "ready":
-		err = cmdReady(args[1:])
-	case "blocked":
-		err = cmdBlocked(args[1:])
-	case "next":
-		err = cmdNext(args[1:])
-	case "progress":
-		err = cmdProgress(args[1:])
-	case "learn":
-		err = cmdLearn(args[1:])
-	case "context":
-		err = cmdContext(args[1:])
+		return true
 	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
-		usage(stderr)
-		return 1
+		return false
 	}
+}
 
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+func dispatchRunCommand(ctx context.Context, args []string) error {
+	handlers := map[string]func([]string) error{
+		"prepare":         func(rest []string) error { return cmdPrepare(ctx, rest) },
+		commandReview:     func(rest []string) error { return cmdReview(ctx, rest) },
+		"tech-spec":       func(rest []string) error { return cmdTechSpec(ctx, rest) },
+		"plan":            func(rest []string) error { return cmdPlan(ctx, rest) },
+		commandBoundaries: cmdBoundaries,
+		commandApprove:    func(rest []string) error { return cmdApprove(ctx, rest) },
+		"status":          func(rest []string) error { return cmdStatus(ctx, rest) },
+		"report":          cmdReport,
+		"verify":          func(rest []string) error { return cmdVerify(ctx, rest) },
+		"retry":           cmdRetry,
+		"tasks":           cmdTasks,
+		"ready":           cmdReady,
+		"blocked":         cmdBlocked,
+		"next":            cmdNext,
+		"progress":        cmdProgress,
+		"learn":           cmdLearn,
+		"context":         cmdContext,
 	}
-
-	return 0
+	handler, ok := handlers[args[0]]
+	if !ok {
+		return fmt.Errorf("unknown command: %s", args[0])
+	}
+	return handler(args[1:])
 }
 
 // usage is defined in help.go — renders grouped command help with lipgloss.
@@ -122,24 +135,18 @@ func newLearningStore(wd string) *learning.Store {
 	return learning.NewStore(sharedDir)
 }
 
-var (
-	localDirOnce   sync.Once
-	cachedLocalDir string
-)
-
 func resolveLocalLearningDir(wd string) string {
-	localDirOnce.Do(func() {
-		out, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
-		if err != nil {
-			return
-		}
-		gitCommonDir := strings.TrimSpace(string(out))
-		if !filepath.IsAbs(gitCommonDir) {
-			gitCommonDir = filepath.Join(wd, gitCommonDir)
-		}
-		cachedLocalDir = filepath.Join(gitCommonDir, "fabrikk", "learnings")
-	})
-	return cachedLocalDir
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = wd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	gitCommonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(wd, gitCommonDir)
+	}
+	return filepath.Join(gitCommonDir, "fabrikk", "learnings")
 }
 
 func workDir() (string, error) {
@@ -243,7 +250,7 @@ func parseTechSpecFlags(args []string) techSpecFlags {
 	if len(args) > 0 {
 		f.action = args[0]
 	}
-	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true, "--persona": true, "--persona-dir": true}
+	valuedFlags := map[string]bool{flagFrom: true, "--round": true, "--mode": true, "--persona": true, "--persona-dir": true, "--stagger-delay": true}
 	for i := 1; i < len(args); i++ {
 		i = parseTechSpecArg(&f, args, i, valuedFlags)
 	}
@@ -280,7 +287,7 @@ func parseTechSpecArg(f *techSpecFlags, args []string, i int, valuedFlags map[st
 
 func cmdTechSpec(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: fabrikk tech-spec <draft|review|approve> [run-id] [--from <path>] [--no-normalize] [--council] [--force] [--round N]")
+		return fmt.Errorf("usage: fabrikk tech-spec <draft|review|approve> [run-id] [--from <path>] [--no-normalize] [--council] [--force] [--round N] [--stagger-delay N]")
 	}
 
 	f := parseTechSpecFlags(args)
@@ -303,7 +310,7 @@ func cmdTechSpec(ctx context.Context, args []string) error {
 	eng := engine.New(runDir, wd)
 
 	switch f.action {
-	case "draft":
+	case commandDraft:
 		fromPath := f.fromPath
 		if fromPath == "" {
 			fromPath, err = detectTechnicalSpecSource(wd)
@@ -417,10 +424,12 @@ func findRunBySpecHash(wd, specHash string) (runDir *state.RunDir, runID string)
 // reviewFlags holds parsed flags for the tech-spec review command.
 type reviewFlags struct {
 	structuralOnly bool
+	council        bool
 	dryRun         bool
 	force          bool
 	skipApproval   bool
 	rounds         int
+	staggerDelay   int
 	mode           councilflow.ReviewMode
 	personaPaths   []string // repeatable --persona <path>
 	personaDirs    []string // repeatable --persona-dir <dir>
@@ -428,13 +437,13 @@ type reviewFlags struct {
 
 // parseReviewFlags extracts review-specific flags from the argument list.
 func parseReviewFlags(flags []string) (reviewFlags, error) {
-	rf := reviewFlags{rounds: 2, mode: councilflow.ReviewStandard}
+	rf := reviewFlags{rounds: 2, staggerDelay: -1, mode: councilflow.ReviewStandard}
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
 		case "--structural-only":
 			rf.structuralOnly = true
 		case "--council":
-			// Accepted for backward compat but council is now the default.
+			rf.council = true
 		case "--dry-run":
 			rf.dryRun = true
 		case "--force":
@@ -442,32 +451,63 @@ func parseReviewFlags(flags []string) (reviewFlags, error) {
 		case "--skip-approval":
 			rf.skipApproval = true
 		case "--round":
-			if i+1 < len(flags) {
-				_, _ = fmt.Sscanf(flags[i+1], "%d", &rf.rounds)
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--round")
+			if err != nil {
+				return rf, err
 			}
+			rounds, err := strconv.Atoi(value)
+			if err != nil || rounds <= 0 {
+				return rf, fmt.Errorf("invalid round count %q (use a positive integer)", value)
+			}
+			rf.rounds = rounds
+			i = next
 		case "--mode":
-			if i+1 < len(flags) {
-				m := councilflow.ReviewMode(flags[i+1])
-				if !councilflow.ValidReviewModes[m] {
-					return rf, fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", flags[i+1])
-				}
-				rf.mode = m
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--mode")
+			if err != nil {
+				return rf, err
 			}
+			m := councilflow.ReviewMode(value)
+			if !councilflow.ValidReviewModes[m] {
+				return rf, fmt.Errorf("invalid review mode %q (use: mvp, standard, production)", value)
+			}
+			rf.mode = m
+			i = next
+		case "--stagger-delay":
+			value, next, err := reviewFlagValue(flags, i, "--stagger-delay")
+			if err != nil {
+				return rf, fmt.Errorf("--stagger-delay requires a value in seconds")
+			}
+			seconds, err := strconv.Atoi(value)
+			if err != nil || seconds < 0 {
+				return rf, fmt.Errorf("invalid stagger delay %q (use a non-negative number of seconds)", value)
+			}
+			rf.staggerDelay = seconds
+			i = next
 		case "--persona":
-			if i+1 < len(flags) {
-				rf.personaPaths = append(rf.personaPaths, flags[i+1])
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--persona")
+			if err != nil {
+				return rf, err
 			}
+			rf.personaPaths = append(rf.personaPaths, value)
+			i = next
 		case "--persona-dir":
-			if i+1 < len(flags) {
-				rf.personaDirs = append(rf.personaDirs, flags[i+1])
-				i++
+			value, next, err := reviewFlagValue(flags, i, "--persona-dir")
+			if err != nil {
+				return rf, err
 			}
+			rf.personaDirs = append(rf.personaDirs, value)
+			i = next
 		}
 	}
 	return rf, nil
+}
+
+func reviewFlagValue(flags []string, index int, flag string) (value string, next int, err error) {
+	values := flags[index+1:]
+	if len(values) == 0 || strings.HasPrefix(values[0], "-") {
+		return "", index, fmt.Errorf("%s requires a value", flag)
+	}
+	return values[0], index + 1, nil
 }
 
 // runStructuralReview runs the pre-flight structural review and returns whether
@@ -518,6 +558,12 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 			return nil
 		}
 	}
+	if !rf.council {
+		if externalSpec {
+			fmt.Println("Council review skipped; pass --council to review external specs.")
+		}
+		return nil
+	}
 
 	// Start daemon for judge context accumulation.
 	daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
@@ -531,6 +577,9 @@ func cmdTechSpecReview(ctx context.Context, eng *engine.Engine, flags []string, 
 	cfg.Force = rf.force
 	cfg.SkipApproval = rf.skipApproval
 	cfg.JudgeInvokeFn = daemon
+	if rf.staggerDelay >= 0 {
+		cfg.StaggerDelay = rf.staggerDelay
+	}
 
 	// Load custom personas from --persona / --persona-dir flags.
 	customPersonas, cpErr := loadCustomPersonas(rf)
@@ -632,7 +681,7 @@ func cmdPlan(ctx context.Context, args []string) error {
 	eng := engine.New(runDir, wd)
 
 	switch action {
-	case "draft":
+	case commandDraft:
 		plan, err := eng.DraftExecutionPlan(ctx)
 		if err != nil {
 			return err
@@ -640,12 +689,58 @@ func cmdPlan(ctx context.Context, args []string) error {
 		fmt.Printf("Execution plan recorded: %s (%d slices)\n", runDir.ExecutionPlan(), len(plan.Slices))
 		return nil
 	case commandReview:
+		rf, err := parseReviewFlags(args[2:])
+		if err != nil {
+			return err
+		}
 		review, err := eng.ReviewExecutionPlan(ctx)
 		if err != nil {
 			return err
 		}
-		data, _ := json.MarshalIndent(review, "", "  ")
+		if review.Status != state.ReviewPass || rf.structuralOnly || !rf.council {
+			data, _ := json.MarshalIndent(review, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		}
+		daemon, daemonCleanup := startJudgeDaemon(ctx, eng)
+		defer daemonCleanup()
+		eng.InvokeFn = daemon
+		cfg := councilflow.DefaultConfig()
+		cfg.Rounds = 1
+		cfg.Mode = councilflow.ReviewMVP
+		cfg.SkipApproval = true
+		cfg.DryRun = rf.dryRun
+		cfg.Force = rf.force
+		if rf.rounds != 2 {
+			cfg.Rounds = rf.rounds
+		}
+		if rf.mode != councilflow.ReviewStandard {
+			cfg.Mode = rf.mode
+		}
+		if rf.staggerDelay >= 0 {
+			cfg.StaggerDelay = rf.staggerDelay
+		}
+		cfg.SkipJudge = true
+		cfg.JudgeInvokeFn = daemon
+		customPersonas, cpErr := loadCustomPersonas(rf)
+		if cpErr != nil {
+			return cpErr
+		}
+		cfg.CustomPersonas = customPersonas
+		result, err := eng.CouncilReviewExecutionPlan(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		finalReview, err := eng.RunDir.ReadExecutionPlanReview()
+		if err != nil {
+			return fmt.Errorf("read execution plan review: %w", err)
+		}
+		data, _ := json.MarshalIndent(finalReview, "", "  ")
 		fmt.Println(string(data))
+		printCouncilVerdict(result)
+		if result.OverallVerdict == councilflow.VerdictFail {
+			return fmt.Errorf("execution plan council review failed")
+		}
 		return nil
 	case commandApprove:
 		approval, err := eng.ApproveExecutionPlan(ctx, "user")
@@ -656,6 +751,192 @@ func cmdPlan(ctx context.Context, args []string) error {
 		return nil
 	default:
 		return fmt.Errorf("usage: fabrikk plan <draft|review|approve> <run-id>")
+	}
+}
+
+func cmdBoundaries(args []string) error {
+	if len(args) < 2 || args[0] != "set" {
+		return fmt.Errorf("usage: fabrikk boundaries set <run-id> [--always <item>] [--ask-first <item>] [--never <item>] [--from-tech-spec]")
+	}
+
+	runID := args[1]
+	var (
+		fromTechSpec bool
+		direct       state.Boundaries
+	)
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--always":
+			value, next, err := boundaryFlagValue(args, i, "--always")
+			if err != nil {
+				return err
+			}
+			direct.Always = append(direct.Always, value)
+			i = next
+		case "--ask-first":
+			value, next, err := boundaryFlagValue(args, i, "--ask-first")
+			if err != nil {
+				return err
+			}
+			direct.AskFirst = append(direct.AskFirst, value)
+			i = next
+		case "--never":
+			value, next, err := boundaryFlagValue(args, i, "--never")
+			if err != nil {
+				return err
+			}
+			direct.Never = append(direct.Never, value)
+			i = next
+		case flagFromTechSpec:
+			fromTechSpec = true
+		default:
+			return fmt.Errorf("unknown flag: %s", args[i])
+		}
+	}
+
+	if fromTechSpec && hasBoundaryValues(direct) {
+		return fmt.Errorf("use either direct boundary flags or %s", flagFromTechSpec)
+	}
+	if !fromTechSpec && !hasBoundaryValues(direct) {
+		return fmt.Errorf("usage: fabrikk boundaries set <run-id> [--always <item>] [--ask-first <item>] [--never <item>] [--from-tech-spec]")
+	}
+
+	wd, err := workDir()
+	if err != nil {
+		return err
+	}
+	runDir := state.NewRunDir(wd, runID)
+	artifact, err := runDir.ReadArtifact()
+	if err != nil {
+		return fmt.Errorf("read artifact: %w", err)
+	}
+
+	boundaries := normalizeCLIboundaries(direct)
+	if fromTechSpec {
+		techSpec, err := runDir.ReadTechnicalSpec()
+		if err != nil {
+			return fmt.Errorf("read technical spec: %w", err)
+		}
+		boundaries, err = parseBoundariesFromTechSpec(techSpec)
+		if err != nil {
+			return fmt.Errorf("parse technical spec boundaries: %w", err)
+		}
+	}
+
+	artifact.Boundaries = boundaries
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		return fmt.Errorf("write artifact: %w", err)
+	}
+
+	fmt.Printf("Boundaries updated: %s\n", runID)
+	return nil
+}
+
+func boundaryFlagValue(args []string, index int, flag string) (value string, next int, err error) {
+	if index+1 >= len(args) {
+		return "", index, fmt.Errorf("missing value for %s", flag)
+	}
+	if strings.HasPrefix(args[index+1], "-") {
+		return "", index, fmt.Errorf("missing value for %s", flag)
+	}
+	return args[index+1], index + 1, nil
+}
+
+func hasBoundaryValues(boundaries state.Boundaries) bool {
+	return len(boundaries.Always) > 0 || len(boundaries.AskFirst) > 0 || len(boundaries.Never) > 0
+}
+
+func normalizeCLIboundaries(boundaries state.Boundaries) state.Boundaries {
+	return state.Boundaries{
+		Always:   trimNonEmpty(boundaries.Always),
+		AskFirst: trimNonEmpty(boundaries.AskFirst),
+		Never:    trimNonEmpty(boundaries.Never),
+	}.Normalized()
+}
+
+func trimNonEmpty(items []string) []string {
+	trimmed := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		trimmed = append(trimmed, item)
+	}
+	return trimmed
+}
+
+func parseBoundariesFromTechSpec(data []byte) (state.Boundaries, error) {
+	var (
+		boundaries state.Boundaries
+		inSection  bool
+		sawHeading bool
+		current    *[]string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), len(data)+1)
+	for scanner.Scan() {
+		rawLine := strings.TrimSuffix(scanner.Text(), "\r")
+		line := strings.TrimSpace(rawLine)
+		if !inSection {
+			if line == "## Boundaries" {
+				inSection = true
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "## ") {
+			break
+		}
+		switch line {
+		case "**Always:**":
+			current = &boundaries.Always
+			sawHeading = true
+			continue
+		case "**Ask First:**":
+			current = &boundaries.AskFirst
+			sawHeading = true
+			continue
+		case "**Never:**":
+			current = &boundaries.Never
+			sawHeading = true
+			continue
+		}
+		if current == nil || !strings.HasPrefix(line, "-") {
+			continue
+		}
+		item := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		if item == "" {
+			continue
+		}
+		*current = append(*current, item)
+	}
+	if err := scanner.Err(); err != nil {
+		return state.Boundaries{}, fmt.Errorf("scan technical spec boundaries: %w", err)
+	}
+	if !inSection {
+		return state.Boundaries{}, fmt.Errorf("technical spec missing ## Boundaries section")
+	}
+	if !sawHeading {
+		return state.Boundaries{}, fmt.Errorf("## Boundaries section must contain **Always:**, **Ask First:**, or **Never:** headings")
+	}
+	return normalizeCLIboundaries(boundaries), nil
+}
+
+func writeHumanInputRequired(w io.Writer, args []string, err *engine.HumanInputRequiredError) {
+	if len(args) >= 3 && args[0] == "plan" && args[1] == "draft" {
+		_, _ = fmt.Fprintln(w, "Plan draft requires human input for the following items:")
+		for _, item := range err.Items {
+			_, _ = fmt.Fprintf(w, "  - %s\n", item)
+		}
+		_, _ = fmt.Fprintln(w, "Refresh boundaries from your tech spec and re-run:")
+		_, _ = fmt.Fprintf(w, "  fabrikk boundaries set %s --from-tech-spec\n", args[2])
+		_, _ = fmt.Fprintf(w, "  fabrikk plan draft %s\n", args[2])
+		return
+	}
+
+	_, _ = fmt.Fprintln(w, "Human input required for the following items:")
+	for _, item := range err.Items {
+		_, _ = fmt.Fprintf(w, "  - %s\n", item)
 	}
 }
 
@@ -942,12 +1223,11 @@ func cmdVerify(ctx context.Context, args []string) error {
 	if result.Pass {
 		fmt.Println("\nVerification: PASS")
 		handleVerifyPass(wd)
-	} else {
-		fmt.Println("\nVerification: FAIL")
-		handleVerifyFail(eng, result, task)
+		return nil
 	}
-
-	return nil
+	fmt.Println("\nVerification: FAIL")
+	handleVerifyFail(eng, result, task)
+	return fmt.Errorf("verification failed for %s", taskID)
 }
 
 func cmdRetry(args []string) error {

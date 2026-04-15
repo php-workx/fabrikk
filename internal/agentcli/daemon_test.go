@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -99,6 +100,26 @@ func fixtureDaemonConfig(t *testing.T) DaemonConfig {
 	}
 }
 
+func TestNewDaemonDefaultsNonPositiveFreshnessThreshold(t *testing.T) {
+	for _, threshold := range []int{0, -1} {
+		cfg := fixtureDaemonConfig(t)
+		cfg.ContextFreshnessThreshold = threshold
+		d := NewDaemon(cfg)
+
+		if got, want := d.config.ContextFreshnessThreshold, 20; got != want {
+			t.Fatalf("ContextFreshnessThreshold for %d = %d, want %d", threshold, got, want)
+		}
+	}
+}
+
+func TestDaemonLoggingHelpersIgnoreNilWriter(t *testing.T) {
+	d := NewDaemon(fixtureDaemonConfig(t))
+	d.log = nil
+
+	d.logf("ignored %s", "message")
+	d.logln("ignored", "message")
+}
+
 func TestDaemon_StartStop(t *testing.T) {
 	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
 
@@ -132,6 +153,29 @@ func TestDaemon_StartStop(t *testing.T) {
 	}
 	if _, err := os.Stat(d.pidPath); !os.IsNotExist(err) {
 		t.Errorf("pid file should be removed after Stop, got err: %v", err)
+	}
+}
+
+func TestDaemon_StartResetsQueryCount(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+
+	cfg := fixtureDaemonConfig(t)
+	d := NewDaemon(cfg)
+	d.queryCount = 7
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	d.mu.Lock()
+	got := d.queryCount
+	d.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("queryCount after Start = %d, want 0", got)
 	}
 }
 
@@ -539,6 +583,109 @@ func TestDaemon_GracefulShutdown(t *testing.T) {
 	// Calling Stop again must be safe (idempotent).
 	if err := d.Stop(); err != nil {
 		t.Fatalf("second Stop: %v", err)
+	}
+}
+
+func TestDaemon_FreshnessWarning(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+
+	cfg := fixtureDaemonConfig(t)
+	cfg.ContextFreshnessThreshold = 2 // low threshold for test speed
+	d := NewDaemon(cfg)
+	var logBuf bytes.Buffer
+	d.log = &logBuf
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	// Query 1: below threshold — no warning expected.
+	if _, err := d.Query(ctx, "q1"); err != nil {
+		t.Fatalf("Query 1: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "context freshness warning") {
+		t.Errorf("query 1: unexpected freshness warning in log: %q", logBuf.String())
+	}
+
+	// Query 2: at threshold — warning expected.
+	logBuf.Reset()
+	if _, err := d.Query(ctx, "q2"); err != nil {
+		t.Fatalf("Query 2: %v", err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "context freshness warning") {
+		t.Errorf("query 2: expected freshness warning in log, got: %q", logged)
+	}
+	if !strings.Contains(logged, "2 queries") {
+		t.Errorf("query 2: expected count in warning, got: %q", logged)
+	}
+
+	// Query 3: one past threshold — no repeat yet (repeat every 10).
+	logBuf.Reset()
+	if _, err := d.Query(ctx, "q3"); err != nil {
+		t.Fatalf("Query 3: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "context freshness warning") {
+		t.Errorf("query 3: unexpected freshness warning (repeat not due yet): %q", logBuf.String())
+	}
+}
+
+func TestDaemon_FreshnessRestart(t *testing.T) {
+	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
+
+	cfg := fixtureDaemonConfig(t)
+	cfg.ContextFreshnessThreshold = 2
+	cfg.RestartOnThreshold = true
+	d := NewDaemon(cfg)
+	var logBuf bytes.Buffer
+	d.log = &logBuf
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	// Query 1: establish "alpha" in the fixture's conversation history.
+	if _, err := d.Query(ctx, "remember alpha"); err != nil {
+		t.Fatalf("Query 1: %v", err)
+	}
+
+	// Query 2: hits the threshold and triggers an auto-restart. The result is
+	// still returned — restart happens after the successful response.
+	logBuf.Reset()
+	r2, err := d.Query(ctx, "remember beta")
+	if err != nil {
+		t.Fatalf("Query 2 (threshold): %v", err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "context freshness threshold reached") {
+		t.Errorf("expected threshold restart message in log, got: %q", logged)
+	}
+	if !strings.Contains(logged, "restarted successfully") {
+		t.Errorf("expected restart success message in log, got: %q", logged)
+	}
+	if !strings.Contains(r2, "beta") {
+		t.Errorf("query 2 result = %q, should contain %q", r2, "beta")
+	}
+
+	// Query 3: after restart the Claude process is fresh — "alpha" must be
+	// gone, proving the counter reset and restart actually happened.
+	r3, err := d.Query(ctx, "remember gamma")
+	if err != nil {
+		t.Fatalf("Query 3 (post-restart): %v", err)
+	}
+	if strings.Contains(r3, "alpha") {
+		t.Errorf("query 3 result = %q, should NOT contain %q (context cleared on restart)", r3, "alpha")
+	}
+	if !strings.Contains(r3, "gamma") {
+		t.Errorf("query 3 result = %q, should contain %q", r3, "gamma")
 	}
 }
 

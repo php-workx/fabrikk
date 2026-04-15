@@ -31,21 +31,28 @@ type Frontmatter struct {
 	Tags        []string `yaml:"tags,omitempty"`
 
 	// extended status fields — custom YAML keys, preserved by tk as pass-through.
-	ExtendedStatus   string   `yaml:"extended_status,omitempty"`
-	RequirementIDs   []string `yaml:"requirement_ids,omitempty"`
-	RiskLevel        string   `yaml:"risk_level,omitempty"`
-	Order            int      `yaml:"order"`
-	ETag             string   `yaml:"etag,omitempty"`
-	LineageID        string   `yaml:"lineage_id,omitempty"`
-	DefaultModel     string   `yaml:"default_model,omitempty"`
-	IsolationMode    string   `yaml:"isolation_mode,omitempty"`
-	OwnedPaths       []string `yaml:"owned_paths,omitempty"`
-	ReadOnlyPaths    []string `yaml:"read_only_paths,omitempty"`
-	SharedPaths      []string `yaml:"shared_paths,omitempty"`
-	StatusReason     string   `yaml:"status_reason,omitempty"`
-	RequiredEvidence []string `yaml:"required_evidence,omitempty"`
-	CreatedFrom      string   `yaml:"created_from,omitempty"`
-	UpdatedAt        string   `yaml:"updated_at,omitempty"`
+	ExtendedStatus       string                     `yaml:"extended_status,omitempty"`
+	RequirementIDs       []string                   `yaml:"requirement_ids,omitempty"`
+	RiskLevel            string                     `yaml:"risk_level,omitempty"`
+	Order                int                        `yaml:"order"`
+	ETag                 string                     `yaml:"etag,omitempty"`
+	LineageID            string                     `yaml:"lineage_id,omitempty"`
+	DefaultModel         string                     `yaml:"default_model,omitempty"`
+	IsolationMode        string                     `yaml:"isolation_mode,omitempty"`
+	OwnedPaths           []string                   `yaml:"owned_paths,omitempty"`
+	ReadOnlyPaths        []string                   `yaml:"read_only_paths,omitempty"`
+	SharedPaths          []string                   `yaml:"shared_paths,omitempty"`
+	FilesLikelyTouched   []string                   `yaml:"files_likely_touched,omitempty"`
+	StatusReason         string                     `yaml:"status_reason,omitempty"`
+	RequiredEvidence     []string                   `yaml:"required_evidence,omitempty"`
+	ValidationChecks     []state.ValidationCheck    `yaml:"validation_checks,omitempty"`
+	ImplementationDetail state.ImplementationDetail `yaml:"implementation_detail,omitempty"`
+	CreatedFrom          string                     `yaml:"created_from,omitempty"`
+	UpdatedAt            string                     `yaml:"updated_at,omitempty"`
+
+	// Grouping metadata — set when same-symbol exception groups >1 requirement (spec §2.1).
+	GroupingReason        string   `yaml:"grouping_reason,omitempty"`
+	GroupedRequirementIDs []string `yaml:"grouped_requirement_ids,omitempty"`
 
 	// Learning context — injected by engine post-compilation.
 	Intent      string   `yaml:"intent,omitempty"`
@@ -149,34 +156,39 @@ func parseTime(s string) time.Time {
 // TaskToFrontmatter converts a state.Task to YAML frontmatter.
 func TaskToFrontmatter(task *state.Task) *Frontmatter {
 	return &Frontmatter{
-		ID:               task.TaskID,
-		Title:            task.Title,
-		Status:           StatusToTicket(task.Status),
-		Deps:             task.DependsOn,
-		Created:          formatTime(task.CreatedAt),
-		Type:             task.TaskType,
-		Priority:         task.Priority,
-		Tags:             task.Tags,
-		Parent:           task.ParentTaskID,
-		ExtendedStatus:   string(task.Status),
-		RequirementIDs:   task.RequirementIDs,
-		RiskLevel:        task.RiskLevel,
-		Order:            task.Order,
-		ETag:             task.ETag,
-		LineageID:        task.LineageID,
-		DefaultModel:     task.DefaultModel,
-		IsolationMode:    task.Scope.IsolationMode,
-		OwnedPaths:       task.Scope.OwnedPaths,
-		ReadOnlyPaths:    task.Scope.ReadOnlyPaths,
-		SharedPaths:      task.Scope.SharedPaths,
-		StatusReason:     task.StatusReason,
-		RequiredEvidence: task.RequiredEvidence,
-		CreatedFrom:      task.CreatedFrom,
-		UpdatedAt:        formatTime(task.UpdatedAt),
-		Intent:           task.Intent,
-		Constraints:      task.Constraints,
-		Warnings:         task.Warnings,
-		LearningIDs:      task.LearningIDs,
+		ID:                    task.TaskID,
+		Title:                 task.Title,
+		Status:                StatusToTicket(task.Status),
+		Deps:                  task.DependsOn,
+		Created:               formatTime(task.CreatedAt),
+		Type:                  task.TaskType,
+		Priority:              task.Priority,
+		Tags:                  task.Tags,
+		Parent:                task.ParentTaskID,
+		ExtendedStatus:        string(task.Status),
+		RequirementIDs:        task.RequirementIDs,
+		RiskLevel:             task.RiskLevel,
+		Order:                 task.Order,
+		ETag:                  task.ETag,
+		LineageID:             task.LineageID,
+		DefaultModel:          task.DefaultModel,
+		IsolationMode:         task.Scope.IsolationMode,
+		OwnedPaths:            task.Scope.OwnedPaths,
+		ReadOnlyPaths:         task.Scope.ReadOnlyPaths,
+		SharedPaths:           task.Scope.SharedPaths,
+		FilesLikelyTouched:    task.FilesLikelyTouched,
+		StatusReason:          task.StatusReason,
+		RequiredEvidence:      task.RequiredEvidence,
+		ValidationChecks:      task.ValidationChecks,
+		ImplementationDetail:  task.ImplementationDetail,
+		CreatedFrom:           task.CreatedFrom,
+		UpdatedAt:             formatTime(task.UpdatedAt),
+		GroupingReason:        task.GroupingReason,
+		GroupedRequirementIDs: task.GroupedRequirementIDs,
+		Intent:                task.Intent,
+		Constraints:           task.Constraints,
+		Warnings:              task.Warnings,
+		LearningIDs:           task.LearningIDs,
 	}
 }
 
@@ -201,18 +213,23 @@ func FrontmatterToTask(fm *Frontmatter) *state.Task {
 			SharedPaths:   fm.SharedPaths,
 			IsolationMode: fm.IsolationMode,
 		},
-		Priority:         fm.Priority,
-		RiskLevel:        fm.RiskLevel,
-		DefaultModel:     fm.DefaultModel,
-		Status:           StatusFromTicket(fm.Status, fm.ExtendedStatus),
-		StatusReason:     fm.StatusReason,
-		RequiredEvidence: fm.RequiredEvidence,
-		ParentTaskID:     fm.Parent,
-		CreatedFrom:      fm.CreatedFrom,
-		Intent:           fm.Intent,
-		Constraints:      fm.Constraints,
-		Warnings:         fm.Warnings,
-		LearningIDs:      fm.LearningIDs,
+		FilesLikelyTouched:    fm.FilesLikelyTouched,
+		Priority:              fm.Priority,
+		RiskLevel:             fm.RiskLevel,
+		DefaultModel:          fm.DefaultModel,
+		Status:                StatusFromTicket(fm.Status, fm.ExtendedStatus),
+		StatusReason:          fm.StatusReason,
+		RequiredEvidence:      fm.RequiredEvidence,
+		ValidationChecks:      fm.ValidationChecks,
+		ImplementationDetail:  fm.ImplementationDetail,
+		ParentTaskID:          fm.Parent,
+		CreatedFrom:           fm.CreatedFrom,
+		GroupingReason:        fm.GroupingReason,
+		GroupedRequirementIDs: fm.GroupedRequirementIDs,
+		Intent:                fm.Intent,
+		Constraints:           fm.Constraints,
+		Warnings:              fm.Warnings,
+		LearningIDs:           fm.LearningIDs,
 	}
 }
 
@@ -233,35 +250,105 @@ func MarshalTicket(task *state.Task) ([]byte, error) {
 	buf.WriteString(task.Title)
 	buf.WriteString("\n")
 
+	appendScopeSection(&buf, task)
+	appendAcceptanceCriteriaSection(&buf, task)
+	appendValidationSection(&buf, task)
+	appendImplementationDetailSection(&buf, task)
+	appendLearningContextSection(&buf, task)
+
+	return buf.Bytes(), nil
+}
+
+func appendScopeSection(buf *bytes.Buffer, task *state.Task) {
+	if len(task.Scope.OwnedPaths) == 0 && len(task.Scope.ReadOnlyPaths) == 0 {
+		return
+	}
+	buf.WriteString("\n## Scope\n\n")
 	if len(task.Scope.OwnedPaths) > 0 {
-		buf.WriteString("\n## Scope\n\n")
 		buf.WriteString("Owned paths: ")
 		buf.WriteString(strings.Join(task.Scope.OwnedPaths, ", "))
 		buf.WriteString("\n")
-		if len(task.Scope.ReadOnlyPaths) > 0 {
-			buf.WriteString("Read-only paths: ")
-			buf.WriteString(strings.Join(task.Scope.ReadOnlyPaths, ", "))
-			buf.WriteString("\n")
-		}
 	}
-
-	if len(task.RequiredEvidence) > 0 {
-		buf.WriteString("\n## Acceptance Criteria\n\n")
-		for _, e := range task.RequiredEvidence {
-			buf.WriteString("- ")
-			buf.WriteString(e)
-			buf.WriteString("\n")
-		}
+	if len(task.Scope.ReadOnlyPaths) > 0 {
+		buf.WriteString("Read-only paths: ")
+		buf.WriteString(strings.Join(task.Scope.ReadOnlyPaths, ", "))
+		buf.WriteString("\n")
 	}
+}
 
-	if len(task.LearningContext) > 0 {
-		buf.WriteString("\n## Context from Learnings\n\n")
-		for _, lr := range task.LearningContext {
-			fmt.Fprintf(&buf, "- **%s** (%s): %s\n", lr.ID, lr.Category, lr.Summary)
-		}
+func appendAcceptanceCriteriaSection(buf *bytes.Buffer, task *state.Task) {
+	if len(task.RequiredEvidence) == 0 {
+		return
 	}
+	buf.WriteString("\n## Acceptance Criteria\n\n")
+	for _, evidence := range task.RequiredEvidence {
+		buf.WriteString("- ")
+		buf.WriteString(evidence)
+		buf.WriteString("\n")
+	}
+}
 
-	return buf.Bytes(), nil
+func appendValidationSection(buf *bytes.Buffer, task *state.Task) {
+	if len(task.ValidationChecks) == 0 {
+		return
+	}
+	buf.WriteString("\n## Validation\n\n")
+	for _, check := range task.ValidationChecks {
+		appendValidationCheck(buf, check)
+	}
+}
+
+func appendValidationCheck(buf *bytes.Buffer, check state.ValidationCheck) {
+	fmt.Fprintf(buf, "- **%s**", check.Type)
+	if check.Tool != "" {
+		fmt.Fprintf(buf, " tool=%s", check.Tool)
+	}
+	if check.File != "" {
+		fmt.Fprintf(buf, " file=%s", check.File)
+	}
+	if check.Pattern != "" {
+		fmt.Fprintf(buf, " pattern=`%s`", check.Pattern)
+	}
+	if len(check.Paths) > 0 {
+		fmt.Fprintf(buf, " paths=[%s]", strings.Join(check.Paths, ", "))
+	}
+	if len(check.Args) > 0 {
+		fmt.Fprintf(buf, " args=[%s]", strings.Join(check.Args, ", "))
+	}
+	buf.WriteString("\n")
+}
+
+func appendImplementationDetailSection(buf *bytes.Buffer, task *state.Task) {
+	if task.ImplementationDetail.IsZero() {
+		return
+	}
+	buf.WriteString("\n## Implementation Detail\n\n")
+	for _, file := range task.ImplementationDetail.FilesToModify {
+		fmt.Fprintf(buf, "- file `%s`: %s", file.Path, file.Change)
+		if file.IsNew {
+			buf.WriteString(" (new)")
+		}
+		buf.WriteString("\n")
+	}
+	for _, symbol := range task.ImplementationDetail.SymbolsToAdd {
+		fmt.Fprintf(buf, "- add symbol `%s`\n", symbol)
+	}
+	for _, symbol := range task.ImplementationDetail.SymbolsToUse {
+		fmt.Fprintf(buf, "- use symbol `%s`\n", symbol)
+	}
+	for _, testName := range task.ImplementationDetail.TestsToAdd {
+		fmt.Fprintf(buf, "- add test `%s`\n", testName)
+	}
+}
+
+func appendLearningContextSection(buf *bytes.Buffer, task *state.Task) {
+	if len(task.LearningContext) == 0 {
+		return
+	}
+	buf.WriteString("\n## Context from Learnings\n\n")
+	for _, learning := range task.LearningContext {
+		fmt.Fprintf(buf, "- **%s** (%s): %s\n", learning.ID, learning.Category, learning.Summary)
+	}
 }
 
 // UnmarshalTicket parses a ticket markdown file into a state.Task.
@@ -337,6 +424,10 @@ func UpdateFrontmatter(existingData []byte, task *state.Task) ([]byte, error) {
 		fm.ClaimHeartbeat = existingFM.ClaimHeartbeat
 	}
 
+	return renderFrontmatterBody(fm, body)
+}
+
+func renderFrontmatterBody(fm *Frontmatter, body string) ([]byte, error) {
 	yamlData, err := yaml.Marshal(fm)
 	if err != nil {
 		return nil, fmt.Errorf("marshal frontmatter: %w", err)

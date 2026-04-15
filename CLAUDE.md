@@ -12,9 +12,11 @@ A spec-driven autonomous run system for coding agents. Implementation is only co
 
 ```bash
 just setup          # Configure git hooks + install dev tools (first time)
-just pre-commit     # Local checks + tests (~30s) — hooks run this automatically
-just check          # Full quality gate: pre-commit + vuln scan (~45s)
-just test           # All tests with race detector
+just pre-commit     # Fast local checks + fresh non-race tests
+just pre-push       # Pre-commit + race tests + vuln scan
+just check          # Full quality gate (same as pre-push)
+just test           # Fresh non-race tests
+just test-race      # Fresh tests with race detector
 just format         # Auto-fix formatting (gofumpt)
 just build          # Compile to bin/fabrikk with version info (also creates bin/fab alias)
 just cover          # Tests with coverage → coverage.html

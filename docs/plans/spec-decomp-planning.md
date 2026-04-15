@@ -1,8 +1,8 @@
 # Plan: Spec Decomposition & Planning Improvements
 
-**Status:** Planned
-**Branch:** TBD
-**Date:** 2026-03-21 (updated 2026-04-02)
+**Status:** Implemented
+**Branch:** feat/spec-decomp
+**Date:** 2026-03-21 (updated 2026-04-11)
 
 ---
 
@@ -153,8 +153,8 @@ Conflicts are resolved by moving the later task (by Order) to the next wave. Bef
 **Granularity note:** `OwnedPaths` are directory-level in the current compiler (e.g., `internal/compiler`). For MVP, conflict detection uses `OwnedPaths` as-is — this over-serializes tasks within the same directory but is safe. When exploration results are available (§2.3), `FilesLikelyTouched` provides file-level granularity and should be preferred for conflict detection:
 ```go
 func conflictPaths(task state.Task) []string {
-    if len(task.Scope.FilesLikelyTouched) > 0 {
-        return task.Scope.FilesLikelyTouched
+    if len(task.FilesLikelyTouched) > 0 {
+        return task.FilesLikelyTouched
     }
     return task.Scope.OwnedPaths
 }
@@ -322,12 +322,16 @@ DraftExecutionPlan
   │    ├─ os.Stat every SymbolInfo.FilePath: drop entries with nonexistent files
   │    └─ Skipped when explorationResult is nil
   │
-  ├─ Compile: compiler.CompileExecutionPlan(artifact, plan)
+  ├─ Compile: compiler.Compile(artifact)
+  │    └─ Produces compiled tasks from requirements
   │
-  ├─ Enrich: enrichSlices(plan.Slices, explorationResult)
-  │    └─ Populates FilesLikelyTouched and ImplementationDetail on each slice
+  ├─ Enrich + prune: enrich compiled tasks with exploration results, then remove false dependencies
+  │    └─ Populates FilesLikelyTouched / ImplementationDetail before wave assignment
   │
-  └─ Persist: write exploration result to run directory
+  ├─ Wave assignment: compiler.ComputeWaves(compiled.Tasks)
+  │    └─ Materializes execution slices with WaveID from the compiled task graph
+  │
+  └─ Persist: write execution plan and exploration result to the run directory
 ```
 
 **Prompt size management:** The structural analysis JSON for a typical project (50 files, 200 functions) is ~15KB — well within context limits. For larger projects (500+ files), the prompt builder truncates to the top 100 functions by: (1) keyword overlap between function name/signature and requirement text, (2) structural centrality (in-degree in the call graph — most-called functions are most likely relevant). Full analysis is written to `<run-dir>/structural-analysis.json` with a note in the prompt that the agent can Read this file for complete data.
@@ -593,7 +597,7 @@ type Boundaries struct {
   }
   ```
 - `Never` items are validated during verification — if a worker touches out-of-scope paths, verification produces a warning finding. MVP: warning finding only (advisory, not blocking). Post-MVP: the compiler SHOULD check Never paths against task `Scope.OwnedPaths` at compilation time and flag conflicts, preventing assignment of tasks that would violate boundaries.
-- Boundaries can be set during `fabrikk prepare` or parsed from a `## Boundaries` section in the tech spec
+- Boundaries can be set via `fabrikk boundaries set <run-id> --always "..." --never "..."` or parsed from a `## Boundaries` section in the tech spec with `--from-tech-spec`
 
 ### 2.7 Implementation Detail on Execution Slices
 
@@ -628,11 +632,12 @@ type FileChange struct {
 |------|--------|-----------|
 | `internal/compiler/compiler.go` | Change `maxGroupSize` to 1, add `ComputeWaves`, `detectFileConflicts`, `resolveConflicts`, false dep removal, propagate `ValidationChecks` and `ImplementationDetail` from slice to task in `CompileExecutionPlan` | +130 |
 | `internal/compiler/compiler_test.go` | Tests for wave computation, conflict detection, single-requirement tasks | +150 |
-| `internal/engine/explore.go` | **NEW** — Hybrid codebase exploration: `runStructuralAnalysis` (code_intel.py dispatch), `exploreForPlan` (LLM agent with structural context), `extractExplorationJSON` (councilflow JSON extraction pattern), `validateExplorationResult` (filesystem validation), `resolveCodeIntel`, `buildExplorationPrompt` (two templates: structural-interpretation and tool-exploration) | ~240 |
-| `internal/engine/explore_test.go` | **NEW** — Exploration tests (stubbed agent responses, structural analysis parsing) | ~120 |
+| `internal/engine/explore.go` | Hybrid codebase exploration: `runStructuralAnalysis` (code_intel.py dispatch), `exploreForPlan` (LLM agent with structural context), `extractExplorationJSON` (councilflow JSON extraction pattern), `validateExplorationResult` (filesystem validation), `resolveCodeIntel`, `buildExplorationPrompt` (two templates: structural-interpretation and tool-exploration) | ~240 |
+| `internal/engine/explore_test.go` | Exploration tests (stubbed agent responses, structural analysis parsing) | ~120 |
 | `internal/state/types.go` | Add `StructuralAnalysis`, `StructuralNode`, `StructuralEdge`, `ExplorationResult`, `FileInfo`, `SymbolInfo`, `TestFileInfo`, `ReusePoint`, `FileConflict`, `ValidationCheck`, `Boundaries`, `ImplementationDetail`, `FileChange` types. Add `ValidationChecks` and `ImplementationDetail` to `Task`. Add `WaveID string` to `ExecutionSlice`. Add `Boundaries` to `RunArtifact`. | +90 |
 | `internal/engine/plan.go` | Update `DraftExecutionPlan` to call exploration + wave computation. Add `CouncilReviewExecutionPlan`. Update `ReviewExecutionPlan` to validate waves and run optional council. | +150 |
-| `internal/engine/plan_test.go` | Tests for exploration integration, council review wiring, wave validation | +100 |
+| `internal/engine/engine_test.go` | Tests for exploration integration, boundary enforcement, plan enrichment, and wave validation | +180 |
+| `internal/engine/plan_council_test.go` | Tests for execution-plan council review wiring and verdict handling | +120 |
 | `internal/ticket/format.go` | Render `ValidationChecks` and `ImplementationDetail` in ticket body | +30 |
 | `cmd/fabrikk/main.go` | Add `--council` flag to `plan review`, add `boundaries` command | +20 |
 
@@ -674,9 +679,9 @@ type FileChange struct {
 
 ### Wave 5: Boundaries (depends on Wave 2)
 
-13. **Boundary enforcement** — `Always` constraints injected into task `Constraints`. `Never` items validated during verification. `AskFirst` returns `ErrHumanInputRequired` from `DraftExecutionPlan`.
+13. **Boundary enforcement** — `Always` constraints injected into task `Constraints`. `Never` items validated during verification. `AskFirst` returns `*HumanInputRequiredError` from `DraftExecutionPlan`.
 
-14. **CLI command** — `fabrikk boundaries set --always "..." --never "..."` or parse from tech spec `## Boundaries` section.
+14. **CLI command** — `fabrikk boundaries set <run-id> --always "..." --never "..."` or parse from tech spec `## Boundaries` section with `--from-tech-spec`.
 
 ## 5. Design Decisions
 
@@ -727,7 +732,7 @@ Following user preference: MVP mode with a single review round and auto-approved
 4. Manual: `fabrikk plan draft <run-id>` with a spec containing 10+ requirements → verify single-requirement tasks
 5. Manual: verify wave groupings in execution plan markdown
 6. Manual: verify file-conflict matrix in review output
-7. Manual: `fabrikk plan review --council <run-id>` → verify council findings
+7. Manual: `fabrikk plan review <run-id> --council` → verify council findings
 8. Manual: verify exploration results populate `ImplementationDetail` on slices
 9. Manual: verify `ValidationChecks` render in ticket body
 10. Manual: compile with exploration → verify `## Validation` section in tickets

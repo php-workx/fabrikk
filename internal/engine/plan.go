@@ -4,25 +4,26 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/php-workx/fabrikk/internal/compiler"
+	"github.com/php-workx/fabrikk/internal/councilflow"
 	"github.com/php-workx/fabrikk/internal/state"
 )
 
 const (
-	sha256Prefix       = "sha256:"
-	graphFindingFmtID  = "epr-graph-%03d"
-	waveWarningIDFmt   = "epr-w-%03d"
-	readTechSpecErrFmt = "read technical spec: %w"
+	sha256Prefix             = "sha256:"
+	graphFindingFmtID        = "epr-graph-%03d"
+	waveWarningIDFmt         = "epr-w-%03d"
+	readTechSpecErrFmt       = "read technical spec: %w"
+	sharedFileMitigationText = "Refresh the shared-file base SHA before starting the later wave."
 )
 
 // DraftExecutionPlan derives a run-scoped execution plan from an approved technical spec.
 func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, error) {
-	_ = ctx
-
 	techSpecHash, err := e.readApprovedTechnicalSpecHash()
 	if err != nil {
 		return nil, err
@@ -32,10 +33,32 @@ func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, 
 	if err != nil {
 		return nil, fmt.Errorf("read run artifact: %w", err)
 	}
+	if askFirst := artifact.Boundaries.Normalized().AskFirst; len(askFirst) > 0 {
+		return nil, &HumanInputRequiredError{Items: askFirst}
+	}
 
 	compiled, err := compiler.Compile(artifact)
 	if err != nil {
 		return nil, fmt.Errorf("compile execution slices: %w", err)
+	}
+
+	sa, err := e.runStructuralAnalysis(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  explore: structural analysis failed: %v (proceeding without structural context)\n", err)
+		sa = nil
+	}
+	exploration, err := e.exploreForPlan(ctx, artifact, sa)
+	if err != nil {
+		return nil, fmt.Errorf("explore for plan: %w", err)
+	}
+	enrichTasksFromExploration(compiled.Tasks, exploration)
+	compiled.Tasks = compiler.PruneDependencies(compiled.Tasks)
+
+	waveByTaskID := make(map[string]string, len(compiled.Tasks))
+	for _, wave := range compiler.ComputeWaves(compiled.Tasks) {
+		for _, taskID := range wave.Tasks {
+			waveByTaskID[taskID] = wave.WaveID
+		}
 	}
 
 	now := time.Now()
@@ -51,19 +74,23 @@ func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, 
 
 	for i := range compiled.Tasks {
 		task := &compiled.Tasks[i]
-		plan.Slices = append(plan.Slices, state.ExecutionSlice{
-			SliceID:            sliceIDFromTaskID(task.TaskID),
-			Title:              task.Title,
-			Goal:               goalFromTask(task),
-			RequirementIDs:     append([]string(nil), task.RequirementIDs...),
-			DependsOn:          sliceIDsFromTaskIDs(task.DependsOn),
-			FilesLikelyTouched: append([]string(nil), task.Scope.OwnedPaths...),
-			OwnedPaths:         append([]string(nil), task.Scope.OwnedPaths...),
-			AcceptanceChecks:   acceptanceChecksForTask(artifact, task),
-			Risk:               task.RiskLevel,
-			Size:               executionSliceSize(task.RequirementIDs),
-			Notes:              fmt.Sprintf("Derived from approved technical spec and grouped requirements: %s", strings.Join(task.RequirementIDs, ", ")),
-		})
+		slice := state.ExecutionSlice{
+			SliceID:              sliceIDFromTaskID(task.TaskID),
+			Title:                task.Title,
+			Goal:                 goalFromTask(task),
+			RequirementIDs:       append([]string(nil), task.RequirementIDs...),
+			DependsOn:            sliceIDsFromTaskIDs(task.DependsOn),
+			WaveID:               waveByTaskID[task.TaskID],
+			FilesLikelyTouched:   filesLikelyTouchedForTask(task),
+			OwnedPaths:           append([]string(nil), task.Scope.OwnedPaths...),
+			AcceptanceChecks:     acceptanceChecksForTask(artifact, task),
+			ImplementationDetail: cloneImplementationDetail(task.ImplementationDetail),
+			Risk:                 task.RiskLevel,
+			Size:                 executionSliceSize(task.RequirementIDs),
+			Notes:                fmt.Sprintf("Derived from approved technical spec requirements: %s", strings.Join(task.RequirementIDs, ", ")),
+		}
+		slice.ValidationChecks = compiler.DeriveValidationChecks(artifact, &slice)
+		plan.Slices = append(plan.Slices, slice)
 	}
 
 	if err := e.RunDir.WriteExecutionPlan(plan); err != nil {
@@ -83,10 +110,160 @@ func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, 
 	return plan, nil
 }
 
-// ReviewExecutionPlan runs deterministic structural checks over the plan artifact.
-func (e *Engine) ReviewExecutionPlan(ctx context.Context) (*state.ExecutionPlanReview, error) {
-	_ = ctx
+func filesLikelyTouchedForTask(task *state.Task) []string {
+	if len(task.FilesLikelyTouched) > 0 {
+		return append([]string(nil), task.FilesLikelyTouched...)
+	}
+	return append([]string(nil), task.Scope.OwnedPaths...)
+}
 
+func enrichTasksFromExploration(tasks []state.Task, exploration *state.ExplorationResult) {
+	if exploration == nil {
+		return
+	}
+	for i := range tasks {
+		tasks[i].FilesLikelyTouched = touchedFilesForTask(tasks[i].Scope.OwnedPaths, exploration)
+		tasks[i].ImplementationDetail = implementationDetailForTask(tasks[i].Scope.OwnedPaths, exploration)
+	}
+}
+
+func touchedFilesForTask(ownedPaths []string, exploration *state.ExplorationResult) []string {
+	matched := make([]string, 0, len(exploration.FileInventory)+len(exploration.Symbols)+len(exploration.TestFiles)+len(exploration.ReusePoints))
+	for _, file := range exploration.FileInventory {
+		if matchesOwnedPath(file.Path, ownedPaths) {
+			matched = append(matched, file.Path)
+		}
+	}
+	for _, symbol := range exploration.Symbols {
+		if matchesOwnedPath(symbol.FilePath, ownedPaths) {
+			matched = append(matched, symbol.FilePath)
+		}
+	}
+	for _, testFile := range exploration.TestFiles {
+		if matchesOwnedPath(testFile.Path, ownedPaths) {
+			matched = append(matched, testFile.Path)
+		}
+		if matchesOwnedPath(testFile.Covers, ownedPaths) {
+			matched = append(matched, testFile.Covers)
+		}
+	}
+	for _, reuse := range exploration.ReusePoints {
+		if matchesOwnedPath(reuse.FilePath, ownedPaths) {
+			matched = append(matched, reuse.FilePath)
+		}
+	}
+	return sortedUniquePaths(matched)
+}
+
+func implementationDetailForTask(ownedPaths []string, exploration *state.ExplorationResult) state.ImplementationDetail {
+	detail := state.ImplementationDetail{}
+	for _, file := range exploration.FileInventory {
+		if !matchesOwnedPath(file.Path, ownedPaths) {
+			continue
+		}
+		change := "Modify existing implementation surfaced during exploration"
+		if file.IsNew {
+			change = "Create implementation file surfaced during exploration"
+		}
+		detail.FilesToModify = append(detail.FilesToModify, state.FileChange{
+			Path:   file.Path,
+			Change: change,
+			IsNew:  file.IsNew,
+		})
+	}
+	for _, reuse := range exploration.ReusePoints {
+		if matchesOwnedPath(reuse.FilePath, ownedPaths) {
+			detail.SymbolsToUse = append(detail.SymbolsToUse, formatReusePoint(reuse))
+		}
+	}
+	for _, testFile := range exploration.TestFiles {
+		if !matchesOwnedPath(testFile.Path, ownedPaths) && !matchesOwnedPath(testFile.Covers, ownedPaths) {
+			continue
+		}
+		detail.TestsToAdd = append(detail.TestsToAdd, testFile.TestNames...)
+	}
+	sort.Slice(detail.FilesToModify, func(i, j int) bool {
+		return detail.FilesToModify[i].Path < detail.FilesToModify[j].Path
+	})
+	detail.SymbolsToAdd = sortedUniqueStrings(detail.SymbolsToAdd)
+	detail.SymbolsToUse = sortedUniqueStrings(detail.SymbolsToUse)
+	detail.TestsToAdd = sortedUniqueStrings(detail.TestsToAdd)
+	return detail
+}
+
+func matchesOwnedPath(path string, ownedPaths []string) bool {
+	cleanPath := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	if cleanPath == "." || cleanPath == "" {
+		return false
+	}
+	for _, owned := range ownedPaths {
+		cleanOwned := filepath.ToSlash(filepath.Clean(strings.TrimSpace(owned)))
+		if cleanOwned == "." || cleanOwned == "" {
+			continue
+		}
+		if cleanPath == cleanOwned || strings.HasPrefix(cleanPath, cleanOwned+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func formatReusePoint(reuse state.ReusePoint) string {
+	if reuse.Line > 0 {
+		return fmt.Sprintf("%s at %s:%d", reuse.Symbol, reuse.FilePath, reuse.Line)
+	}
+	return fmt.Sprintf("%s at %s", reuse.Symbol, reuse.FilePath)
+}
+
+func sortedUniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+		if clean == "." || clean == "" {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		result = append(result, clean)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func sortedUniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func cloneImplementationDetail(detail state.ImplementationDetail) state.ImplementationDetail {
+	return state.ImplementationDetail{
+		FilesToModify: append([]state.FileChange(nil), detail.FilesToModify...),
+		SymbolsToAdd:  append([]string(nil), detail.SymbolsToAdd...),
+		SymbolsToUse:  append([]string(nil), detail.SymbolsToUse...),
+		TestsToAdd:    append([]string(nil), detail.TestsToAdd...),
+	}
+}
+
+// ReviewExecutionPlan runs deterministic structural checks over the plan artifact.
+// ctx is accepted for interface symmetry with other lifecycle methods but is not used:
+// review work is local I/O only and finishes well within typical caller timeouts.
+func (e *Engine) ReviewExecutionPlan(_ context.Context) (*state.ExecutionPlanReview, error) {
 	plan, _, err := e.readExecutionPlanWithHash()
 	if err != nil {
 		return nil, err
@@ -113,6 +290,7 @@ func (e *Engine) ReviewExecutionPlan(ctx context.Context) (*state.ExecutionPlanR
 	}
 
 	validateSliceGraph(plan.Slices, review)
+	validateSliceWaves(plan.Slices, review)
 	for i := range plan.Slices {
 		reviewSlice(&plan.Slices[i], review)
 	}
@@ -121,6 +299,15 @@ func (e *Engine) ReviewExecutionPlan(ctx context.Context) (*state.ExecutionPlanR
 	artifact, artifactErr := e.RunDir.ReadArtifact()
 	if artifactErr == nil {
 		validateRequirementCoverage(artifact, plan.Slices, review)
+	} else {
+		review.Status = state.ReviewFail
+		review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
+			FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
+			Severity:        "high",
+			Category:        "artifact_read_failure",
+			Summary:         fmt.Sprintf("could not read run artifact for requirement coverage validation: %v", artifactErr),
+			SuggestedRepair: "Restore a readable run-artifact.json before reviewing the execution plan.",
+		})
 	}
 
 	review.Reviewers = []state.ReviewSummary{{
@@ -158,6 +345,155 @@ func (e *Engine) ReviewExecutionPlan(ctx context.Context) (*state.ExecutionPlanR
 	})
 
 	return review, nil
+}
+
+// CouncilReviewExecutionPlan runs council review over the drafted execution plan after structural review passes.
+func (e *Engine) CouncilReviewExecutionPlan(ctx context.Context, cfg councilflow.CouncilConfig) (*councilflow.CouncilResult, error) {
+	review, err := e.RunDir.ReadExecutionPlanReview()
+	if err != nil {
+		return nil, fmt.Errorf("read execution plan review: %w", err)
+	}
+	if review.Status != state.ReviewPass {
+		return nil, fmt.Errorf("execution plan review is not passing")
+	}
+
+	planMarkdown, err := e.RunDir.ReadExecutionPlanMarkdown()
+	if err != nil {
+		return nil, fmt.Errorf("read execution plan markdown: %w", err)
+	}
+	if cfg.SpecPath == "" {
+		cfg.SpecPath = e.RunDir.ExecutionPlanMarkdown()
+	}
+	if len(cfg.CustomPersonas) == 0 {
+		cfg.CustomPersonas = executionPlanCouncilPersonas()
+		cfg.SkipDynPersonas = true
+	}
+	if cfg.CodebaseContext == "" {
+		cfg.CodebaseContext = executionPlanCouncilContext(e)
+	}
+
+	councilDir := filepath.Join(e.RunDir.Root, "execution-plan-council")
+	result, err := councilflow.RunCouncil(ctx, string(planMarkdown), councilDir, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("council review: %w", err)
+	}
+
+	review.ReviewedAt = time.Now()
+	switch result.OverallVerdict {
+	case councilflow.VerdictFail:
+		review.Status = state.ReviewFail
+		review.Summary = "Execution plan has blocking council findings."
+		review.BlockingFindings = append(review.BlockingFindings, executionPlanCouncilFindings(result)...)
+	case councilflow.VerdictWarn:
+		review.Summary = "Execution plan passed council review with warnings."
+		review.Warnings = append(review.Warnings, executionPlanCouncilWarnings(result)...)
+	default:
+		review.Summary = "Execution plan passed council review."
+	}
+	if err := e.RunDir.WriteExecutionPlanReview(review); err != nil {
+		return nil, fmt.Errorf("write execution plan review after council: %w", err)
+	}
+
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: review.ReviewedAt,
+		Type:      "execution_plan_council_reviewed",
+		RunID:     review.RunID,
+		Detail:    fmt.Sprintf("verdict=%s rounds=%d", result.OverallVerdict, len(result.Rounds)),
+	})
+	return result, nil
+}
+
+func executionPlanCouncilPersonas() []councilflow.Persona {
+	return []councilflow.Persona{
+		{PersonaID: "plan-scope", DisplayName: "Plan Scope Reviewer", Type: councilflow.PersonaCustom, Perspective: "Reviews execution-plan scope completeness and requirement mapping.", Instructions: "Review the execution plan ONLY for scope coverage, requirement completeness, and missing implementation detail. Do NOT flag runtime verifier mechanics.", Backend: "claude", ModelPref: "opus"},
+		{PersonaID: "plan-dependency", DisplayName: "Plan Dependency Reviewer", Type: councilflow.PersonaCustom, Perspective: "Reviews dependency ordering, wave assignment, and conflict serialization.", Instructions: "Review the execution plan ONLY for dependency correctness, wave ordering, and shared-file conflicts. Do NOT flag stylistic issues.", Backend: "codex", ModelPref: "gpt-5.4"},
+		{PersonaID: "plan-feasibility", DisplayName: "Plan Feasibility Reviewer", Type: councilflow.PersonaCustom, Perspective: "Reviews whether slices are actionable for implementation agents.", Instructions: "Review the execution plan ONLY for actionable implementation detail, realistic file touch sets, and feasible validation checks.", Backend: "claude", ModelPref: "opus"},
+		{PersonaID: "plan-completeness", DisplayName: "Plan Completeness Reviewer", Type: councilflow.PersonaCustom, Perspective: "Reviews whether supporting artifacts are present for downstream implementation.", Instructions: "Review the execution plan ONLY for missing exploration context, missing validation checks, and missing test guidance. Do NOT restate deterministic findings already captured by structural review.", Backend: "codex", ModelPref: "gpt-5.4"},
+	}
+}
+
+func executionPlanCouncilContext(e *Engine) string {
+	var b strings.Builder
+	if techSpec, err := e.RunDir.ReadTechnicalSpec(); err == nil {
+		b.WriteString("## Technical Specification\n\n")
+		b.Write(techSpec)
+		b.WriteString("\n\n")
+	}
+	if exploration, err := os.ReadFile(e.RunDir.Path("exploration.json")); err == nil {
+		b.WriteString("## Exploration Result\n\n```json\n")
+		b.Write(exploration)
+		b.WriteString("\n```\n")
+	}
+	return b.String()
+}
+
+func executionPlanCouncilFindings(result *councilflow.CouncilResult) []state.ReviewFinding {
+	if result == nil || len(result.Rounds) == 0 {
+		return nil
+	}
+	latest := result.Rounds[len(result.Rounds)-1]
+	findings := make([]state.ReviewFinding, 0)
+	for i := range latest.Reviews {
+		review := &latest.Reviews[i]
+		for j := range review.Findings {
+			finding := review.Findings[j]
+			summary := finding.Description
+			if summary == "" {
+				summary = review.Recommendation
+			}
+			findings = append(findings, state.ReviewFinding{
+				FindingID:       finding.FindingID,
+				Severity:        councilSeverityToState(finding.Severity),
+				Category:        finding.Category,
+				Summary:         summary,
+				SuggestedRepair: firstNonEmpty(finding.Fix, finding.Recommendation),
+			})
+		}
+	}
+	return findings
+}
+
+func executionPlanCouncilWarnings(result *councilflow.CouncilResult) []state.ReviewWarning {
+	if result == nil || len(result.Rounds) == 0 {
+		return nil
+	}
+	latest := result.Rounds[len(result.Rounds)-1]
+	warnings := make([]state.ReviewWarning, 0)
+	for i := range latest.Reviews {
+		review := &latest.Reviews[i]
+		for j := range review.Findings {
+			finding := review.Findings[j]
+			summary := finding.Description
+			if summary == "" {
+				summary = review.Recommendation
+			}
+			warnings = append(warnings, state.ReviewWarning{
+				WarningID: finding.FindingID,
+				Summary:   summary,
+			})
+		}
+	}
+	return warnings
+}
+
+func councilSeverityToState(severity string) string {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return "critical"
+	case "significant":
+		return "high"
+	default:
+		return "low"
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ApproveExecutionPlan records explicit approval for the reviewed execution plan.
@@ -216,12 +552,25 @@ func (e *Engine) ApproveExecutionPlan(ctx context.Context, approvedBy string) (*
 	return approval, nil
 }
 
-// validateSliceGraph checks the execution plan's dependency graph for structural issues:
-// duplicate IDs, case-colliding IDs, unknown depends_on references, self-dependencies, and cycles.
+// validateSliceGraph enforces graph-level invariants for slice IDs and dependencies:
+// duplicate IDs, case-colliding IDs, unknown depends_on references, self-dependencies,
+// same-wave dependencies, and cycles.
 func validateSliceGraph(slices []state.ExecutionSlice, review *state.ExecutionPlanReview) {
 	idSet := validateSliceIDs(slices, review)
-	adj := validateSliceDeps(slices, idSet, review)
+	waveBySliceID := collectWaveIDs(slices)
+	adj := validateSliceDeps(slices, idSet, waveBySliceID, review)
 	detectSliceCycles(slices, adj, review)
+}
+
+func collectWaveIDs(slices []state.ExecutionSlice) map[string]string {
+	waveBySliceID := make(map[string]string, len(slices))
+	for i := range slices {
+		if slices[i].SliceID == "" {
+			continue
+		}
+		waveBySliceID[slices[i].SliceID] = slices[i].WaveID
+	}
+	return waveBySliceID
 }
 
 func validateSliceIDs(slices []state.ExecutionSlice, review *state.ExecutionPlanReview) map[string]bool {
@@ -263,7 +612,7 @@ func validateSliceIDs(slices []state.ExecutionSlice, review *state.ExecutionPlan
 	return idSet
 }
 
-func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, review *state.ExecutionPlanReview) map[string][]string {
+func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, waveBySliceID map[string]string, review *state.ExecutionPlanReview) map[string][]string {
 	adj := make(map[string][]string, len(slices))
 	for i := range slices {
 		id := slices[i].SliceID
@@ -292,6 +641,17 @@ func validateSliceDeps(slices []state.ExecutionSlice, idSet map[string]bool, rev
 				})
 				continue
 			}
+			if wave := waveBySliceID[id]; wave != "" && wave == waveBySliceID[dep] {
+				review.Status = state.ReviewFail
+				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
+					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
+					Severity:        "high",
+					Category:        "intra_wave_dependency",
+					SliceID:         id,
+					Summary:         fmt.Sprintf("slice %q depends on %q in the same wave %q", id, dep, wave),
+					SuggestedRepair: "Move one slice to a later wave or remove the dependency edge.",
+				})
+			}
 			adj[id] = append(adj[id], dep)
 		}
 	}
@@ -312,6 +672,165 @@ func detectSliceCycles(slices []state.ExecutionSlice, adj map[string][]string, r
 		Summary:         fmt.Sprintf("dependency cycle detected involving slice %q", cycleNode),
 		SuggestedRepair: "Break the dependency cycle so the graph is a DAG.",
 	})
+}
+
+func validateSliceWaves(slices []state.ExecutionSlice, review *state.ExecutionPlanReview) {
+	detectIntraWaveConflicts(slices, review)
+	review.SharedFileRegistry = buildSharedFileRegistry(slices)
+}
+
+func detectIntraWaveConflicts(slices []state.ExecutionSlice, review *state.ExecutionPlanReview) {
+	for i := 0; i < len(slices); i++ {
+		left := &slices[i]
+		if left.WaveID == "" {
+			continue
+		}
+		for j := i + 1; j < len(slices); j++ {
+			right := &slices[j]
+			if left.WaveID != right.WaveID {
+				continue
+			}
+			if conflictPath, ok := compiler.ConflictPath(conflictPathsForSlice(left), conflictPathsForSlice(right)); ok {
+				review.Status = state.ReviewFail
+				review.BlockingFindings = append(review.BlockingFindings, state.ReviewFinding{
+					FindingID:       fmt.Sprintf(graphFindingFmtID, len(review.BlockingFindings)+1),
+					Severity:        "high",
+					Category:        "intra_wave_file_conflict",
+					SliceID:         left.SliceID,
+					Summary:         fmt.Sprintf("slices %q and %q share conflict path %q inside wave %q", left.SliceID, right.SliceID, conflictPath, left.WaveID),
+					SuggestedRepair: "Move one slice to a later wave or narrow the touched-file scope.",
+				})
+			}
+		}
+	}
+}
+
+type sharedRegistryKey struct {
+	file  string
+	wave1 string
+	wave2 string
+}
+
+type sharedRegistryEntry struct {
+	wave1Tasks map[string]struct{}
+	wave2Tasks map[string]struct{}
+}
+
+func buildSharedFileRegistry(slices []state.ExecutionSlice) []state.SharedFileEntry {
+	waveOrder := sharedWaveOrder(slices)
+	registry := make(map[sharedRegistryKey]*sharedRegistryEntry)
+	for i := 0; i < len(slices); i++ {
+		left := &slices[i]
+		if left.WaveID == "" {
+			continue
+		}
+		for j := i + 1; j < len(slices); j++ {
+			registerSharedFilePair(registry, waveOrder, left, &slices[j])
+		}
+	}
+	return buildSharedEntries(registry, waveOrder)
+}
+
+func sharedWaveOrder(slices []state.ExecutionSlice) map[string]int {
+	waveOrder := make(map[string]int, len(slices))
+	nextWaveOrder := 0
+	for i := range slices {
+		waveID := slices[i].WaveID
+		if waveID == "" {
+			continue
+		}
+		if _, ok := waveOrder[waveID]; ok {
+			continue
+		}
+		waveOrder[waveID] = nextWaveOrder
+		nextWaveOrder++
+	}
+	return waveOrder
+}
+
+func registerSharedFilePair(registry map[sharedRegistryKey]*sharedRegistryEntry, waveOrder map[string]int, left, right *state.ExecutionSlice) {
+	if right.WaveID == "" || left.WaveID == right.WaveID {
+		return
+	}
+	conflictPath, ok := compiler.ConflictPath(conflictPathsForSlice(left), conflictPathsForSlice(right))
+	if !ok {
+		return
+	}
+	key, task1, task2 := orderedSharedPair(waveOrder, conflictPath, left, right)
+	entry := registry[key]
+	if entry == nil {
+		entry = &sharedRegistryEntry{
+			wave1Tasks: make(map[string]struct{}),
+			wave2Tasks: make(map[string]struct{}),
+		}
+		registry[key] = entry
+	}
+	if task1 != "" {
+		entry.wave1Tasks[task1] = struct{}{}
+	}
+	if task2 != "" {
+		entry.wave2Tasks[task2] = struct{}{}
+	}
+}
+
+func orderedSharedPair(waveOrder map[string]int, conflictPath string, left, right *state.ExecutionSlice) (key sharedRegistryKey, task1, task2 string) {
+	wave1, wave2 := left.WaveID, right.WaveID
+	task1, task2 = left.SliceID, right.SliceID
+	if waveOrder[wave1] > waveOrder[wave2] {
+		wave1, wave2 = wave2, wave1
+		task1, task2 = task2, task1
+	}
+	key = sharedRegistryKey{file: conflictPath, wave1: wave1, wave2: wave2}
+	return key, task1, task2
+}
+
+func buildSharedEntries(registry map[sharedRegistryKey]*sharedRegistryEntry, waveOrder map[string]int) []state.SharedFileEntry {
+	keys := make([]sharedRegistryKey, 0, len(registry))
+	for key := range registry {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].file != keys[j].file {
+			return keys[i].file < keys[j].file
+		}
+		if keys[i].wave1 != keys[j].wave1 {
+			return waveOrder[keys[i].wave1] < waveOrder[keys[j].wave1]
+		}
+		return waveOrder[keys[i].wave2] < waveOrder[keys[j].wave2]
+	})
+	shared := make([]state.SharedFileEntry, 0, len(keys))
+	for i := range keys {
+		entry := registry[keys[i]]
+		shared = append(shared, state.SharedFileEntry{
+			File:       keys[i].file,
+			Wave1Tasks: sortedSliceIDs(entry.wave1Tasks),
+			Wave2Tasks: sortedSliceIDs(entry.wave2Tasks),
+			Mitigation: sharedFileMitigationText,
+		})
+	}
+	return shared
+}
+
+func conflictPathsForSlice(slice *state.ExecutionSlice) []string {
+	if slice == nil {
+		return nil
+	}
+	if len(slice.FilesLikelyTouched) > 0 {
+		return append([]string(nil), slice.FilesLikelyTouched...)
+	}
+	return append([]string(nil), slice.OwnedPaths...)
+}
+
+func sortedSliceIDs(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // findCycleInGraph uses DFS three-color marking to find a cycle in the slice dependency graph.
@@ -417,6 +936,13 @@ func reviewSlice(slice *state.ExecutionSlice, review *state.ExecutionPlanReview)
 			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
 			SliceID:   slice.SliceID,
 			Summary:   "slice is missing likely file touch points",
+		})
+	}
+	if len(slice.ValidationChecks) == 0 {
+		review.Warnings = append(review.Warnings, state.ReviewWarning{
+			WarningID: fmt.Sprintf(waveWarningIDFmt, len(review.Warnings)+1),
+			SliceID:   slice.SliceID,
+			Summary:   fmt.Sprintf("slice %q has no validation checks — consider adding files_exist or content_check assertions.", slice.SliceID),
 		})
 	}
 }

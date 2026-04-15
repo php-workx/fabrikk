@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -341,13 +342,39 @@ func (s *Store) DetectCycles(runID string) ([][]string, error) {
 }
 
 // Link creates a bidirectional link between two tickets.
-func (s *Store) Link(_, _ string) error {
-	return fmt.Errorf("Link not yet implemented")
+func (s *Store) Link(id, targetID string) error {
+	resolvedID, err := ResolveID(s.Dir, id)
+	if err != nil {
+		return err
+	}
+	resolvedTargetID, err := ResolveID(s.Dir, targetID)
+	if err != nil {
+		return fmt.Errorf("link target %s: %w", targetID, err)
+	}
+
+	path := filepath.Join(s.Dir, resolvedID+".md")
+	targetPath := filepath.Join(s.Dir, resolvedTargetID+".md")
+	return s.withLocks([]string{path, targetPath}, func() error {
+		return updateBidirectionalTicketLinks(path, resolvedTargetID, targetPath, resolvedID, appendUniqueLink)
+	})
 }
 
 // Unlink removes a bidirectional link.
-func (s *Store) Unlink(_, _ string) error {
-	return fmt.Errorf("Unlink not yet implemented")
+func (s *Store) Unlink(id, targetID string) error {
+	resolvedID, err := ResolveID(s.Dir, id)
+	if err != nil {
+		return err
+	}
+	resolvedTargetID, err := ResolveID(s.Dir, targetID)
+	if err != nil {
+		return fmt.Errorf("link target %s: %w", targetID, err)
+	}
+
+	path := filepath.Join(s.Dir, resolvedID+".md")
+	targetPath := filepath.Join(s.Dir, resolvedTargetID+".md")
+	return s.withLocks([]string{path, targetPath}, func() error {
+		return updateBidirectionalTicketLinks(path, resolvedTargetID, targetPath, resolvedID, removeLink)
+	})
 }
 
 // readAll reads all ticket files from the directory.
@@ -399,13 +426,134 @@ func (s *Store) writeFile(id string, data []byte) error {
 
 // withLock executes fn while holding an exclusive file lock.
 func (s *Store) withLock(path string, fn func() error) error {
-	lockPath := path + ".lock"
-	fl := flock.New(lockPath)
-	if err := fl.Lock(); err != nil {
-		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
+	return s.withLocks([]string{path}, fn)
+}
+
+// withLocks executes fn while holding exclusive locks in stable path order.
+func (s *Store) withLocks(paths []string, fn func() error) error {
+	paths = uniqueSortedPaths(paths)
+	locks := make([]*flock.Flock, 0, len(paths))
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create lock dir %s: %w", filepath.Dir(path), err)
+		}
+		lockPath := path + ".lock"
+		fl := flock.New(lockPath)
+		if err := fl.Lock(); err != nil {
+			for i := len(locks) - 1; i >= 0; i-- {
+				_ = locks[i].Unlock()
+			}
+			return fmt.Errorf("acquire lock %s: %w", lockPath, err)
+		}
+		locks = append(locks, fl)
 	}
-	defer func() { _ = fl.Unlock() }()
+	defer func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			_ = locks[i].Unlock()
+		}
+	}()
 	return fn()
+}
+
+func uniqueSortedPaths(paths []string) []string {
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+	unique := sorted[:0]
+	for _, path := range sorted {
+		if len(unique) == 0 || unique[len(unique)-1] != path {
+			unique = append(unique, path)
+		}
+	}
+	return unique
+}
+
+type ticketLinkUpdate struct {
+	path     string
+	previous []byte
+	updated  []byte
+	changed  bool
+}
+
+func updateBidirectionalTicketLinks(path, linkID, targetPath, targetID string, mutate func([]string, string) ([]string, bool)) error {
+	first, err := prepareTicketLinkUpdate(path, linkID, mutate)
+	if err != nil {
+		return err
+	}
+	if targetPath == path {
+		if !first.changed {
+			return nil
+		}
+		return atomicWrite(first.path, first.updated)
+	}
+	second, err := prepareTicketLinkUpdate(targetPath, targetID, mutate)
+	if err != nil {
+		return err
+	}
+	return applyTicketLinkUpdates(first, second)
+}
+
+func prepareTicketLinkUpdate(path, linkID string, mutate func([]string, string) ([]string, bool)) (ticketLinkUpdate, error) {
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return ticketLinkUpdate{}, fmt.Errorf(errWrapFmt, ErrTicketNotFound, readErr)
+	}
+	fm, body, err := splitFrontmatterBody(data)
+	if err != nil {
+		return ticketLinkUpdate{}, err
+	}
+	links, changed := mutate(fm.Links, linkID)
+	if !changed {
+		return ticketLinkUpdate{path: path, previous: data, changed: false}, nil
+	}
+	fm.Links = links
+	fm.UpdatedAt = formatTime(time.Now())
+
+	updated, err := renderFrontmatterBody(fm, body)
+	if err != nil {
+		return ticketLinkUpdate{}, err
+	}
+	return ticketLinkUpdate{path: path, previous: data, updated: updated, changed: true}, nil
+}
+
+func applyTicketLinkUpdates(updates ...ticketLinkUpdate) error {
+	applied := make([]ticketLinkUpdate, 0, len(updates))
+	for _, update := range updates {
+		if !update.changed {
+			continue
+		}
+		if err := atomicWrite(update.path, update.updated); err != nil {
+			for i := len(applied) - 1; i >= 0; i-- {
+				if rollbackErr := atomicWrite(applied[i].path, applied[i].previous); rollbackErr != nil {
+					return fmt.Errorf("%w (rollback %s: %v)", err, applied[i].path, rollbackErr)
+				}
+			}
+			return err
+		}
+		applied = append(applied, update)
+	}
+	return nil
+}
+
+func appendUniqueLink(links []string, linkID string) ([]string, bool) {
+	for _, link := range links {
+		if link == linkID {
+			return links, false
+		}
+	}
+	return append(links, linkID), true
+}
+
+func removeLink(links []string, linkID string) ([]string, bool) {
+	filtered := links[:0]
+	changed := false
+	for _, link := range links {
+		if link == linkID {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, link)
+	}
+	return filtered, changed
 }
 
 // atomicWrite writes data to path using temp file + fsync + rename + dir fsync.

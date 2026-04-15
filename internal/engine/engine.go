@@ -2,12 +2,17 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,11 +23,13 @@ import (
 )
 
 const (
-	errReadArtifact  = "read artifact: %w"
-	errReadTasks     = "read tasks: %w"
-	errWriteTasks    = "write tasks: %w"
-	errRefreshStatus = "refresh status: %w"
-	errSyncCoverage  = "sync requirement coverage: %w"
+	errReadArtifact           = "read artifact: %w"
+	errReadTasks              = "read tasks: %w"
+	errWriteTasks             = "write tasks: %w"
+	errRefreshStatus          = "refresh status: %w"
+	errSyncCoverage           = "sync requirement coverage: %w"
+	validationCommandTimeout  = 30 * time.Second
+	errValidationPathCategory = "validation_path"
 )
 
 // Engine is the Phase 1 run engine (spec section 18.3).
@@ -243,6 +250,9 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 		return nil, fmt.Errorf("verify: %w", err)
 	}
 
+	e.applyValidationChecks(ctx, task, artifact, result)
+	e.applyNeverBoundaryWarnings(result, artifact, report)
+
 	if err := e.writeVerifierResult(task, report, result); err != nil {
 		return nil, err
 	}
@@ -266,6 +276,520 @@ func (e *Engine) VerifyTask(ctx context.Context, task *state.Task, report *state
 	}
 
 	return result, nil
+}
+
+var validationCommandAllowlist = map[string]struct{}{"go": {}, "python3": {}, "npm": {}, "make": {}, "just": {}}
+
+func (e *Engine) applyValidationChecks(ctx context.Context, task *state.Task, artifact *state.RunArtifact, result *state.VerifierResult) {
+	for i, check := range task.ValidationChecks {
+		if isQualityGateValidationCheck(check, artifact) {
+			continue
+		}
+		checkResult, finding := e.runValidationCheck(ctx, task, i, check)
+		result.EvidenceChecks = append(result.EvidenceChecks, checkResult)
+		if finding != nil {
+			result.Pass = false
+			result.BlockingFindings = append(result.BlockingFindings, *finding)
+		}
+	}
+}
+
+func isQualityGateValidationCheck(check state.ValidationCheck, artifact *state.RunArtifact) bool {
+	if artifact == nil || artifact.QualityGate == nil || check.Type != "command" || check.Tool == "" {
+		return false
+	}
+	parts := strings.Fields(strings.TrimSpace(artifact.QualityGate.Command))
+	if len(parts) == 0 || parts[0] != check.Tool || len(parts[1:]) != len(check.Args) {
+		return false
+	}
+	for i := range check.Args {
+		if parts[i+1] != check.Args[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) applyNeverBoundaryWarnings(result *state.VerifierResult, artifact *state.RunArtifact, report *state.CompletionReport) {
+	if result == nil || artifact == nil || report == nil {
+		return
+	}
+	boundaries := artifact.Boundaries.Normalized().Never
+	if len(boundaries) == 0 {
+		return
+	}
+	for _, boundary := range boundaries {
+		if state.IsEmptyBoundaryItem(boundary) {
+			result.NonBlockingFindings = append(result.NonBlockingFindings, state.Finding{
+				FindingID: fmt.Sprintf("%s-boundary-never-empty", result.TaskID),
+				Severity:  "low",
+				Category:  "boundary_never",
+				Summary:   "run artifact contains an empty never boundary item that could not be enforced deterministically",
+				DedupeKey: fmt.Sprintf("boundary-never-empty:%s", result.TaskID),
+			})
+			continue
+		}
+		boundary = state.BoundaryItemValue(boundary)
+		violations := boundaryViolations(report.ChangedFiles, boundary, e.WorkDir)
+		if len(violations) == 0 {
+			continue
+		}
+		result.NonBlockingFindings = append(result.NonBlockingFindings, state.Finding{
+			FindingID: fmt.Sprintf("%s-boundary-never-%d", result.TaskID, len(result.NonBlockingFindings)+1),
+			Severity:  "low",
+			Category:  "boundary_never",
+			Summary:   fmt.Sprintf("Never boundary %q was touched by changed files: %s", boundary, strings.Join(violations, ", ")),
+			DedupeKey: fmt.Sprintf("boundary-never:%s:%s", result.TaskID, boundary),
+		})
+	}
+}
+
+func boundaryViolations(changedFiles []string, boundary, workDir string) []string {
+	normalizedBoundary := normalizeBoundaryPath(boundary, workDir)
+	if normalizedBoundary == "" {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(changedFiles))
+	violations := make([]string, 0, len(changedFiles))
+	for _, changed := range changedFiles {
+		normalizedChanged := normalizeBoundaryPath(changed, workDir)
+		if normalizedChanged == "" || !pathWithinBoundary(normalizedChanged, normalizedBoundary) {
+			continue
+		}
+		if _, ok := seen[normalizedChanged]; ok {
+			continue
+		}
+		seen[normalizedChanged] = struct{}{}
+		violations = append(violations, normalizedChanged)
+	}
+	sort.Strings(violations)
+	return violations
+}
+
+func normalizeBoundaryPath(path, workDir string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	clean := filepath.Clean(trimmed)
+	if workDir != "" && filepath.IsAbs(clean) {
+		if rel, err := filepath.Rel(workDir, clean); err == nil {
+			clean = rel
+		}
+	}
+	clean = filepath.ToSlash(clean)
+	if clean == "." {
+		return ""
+	}
+	return strings.Trim(clean, "/")
+}
+
+func pathWithinBoundary(path, boundary string) bool {
+	return path == boundary || strings.HasPrefix(path, boundary+"/")
+}
+
+func (e *Engine) runValidationCheck(ctx context.Context, task *state.Task, index int, check state.ValidationCheck) (state.Check, *state.Finding) {
+	checkName := fmt.Sprintf("validation_check_%02d", index+1)
+	switch check.Type {
+	case "files_exist":
+		missing := make([]string, 0, len(check.Paths))
+		for _, path := range check.Paths {
+			validatedPath, err := e.validationPath(path)
+			if err != nil {
+				detail := fmt.Sprintf("files_exist has invalid path %q: %v", path, err)
+				return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, errValidationPathCategory, detail)
+			}
+			if _, err := os.Stat(validatedPath); err != nil {
+				missing = append(missing, path)
+			}
+		}
+		if len(missing) == 0 {
+			return state.Check{Name: checkName, Pass: true, Detail: "all required files exist"}, nil
+		}
+		detail := fmt.Sprintf("missing required files: %s", strings.Join(missing, ", "))
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_files_exist", detail)
+	case "content_check":
+		if check.File == "" || check.Pattern == "" {
+			detail := "content_check requires both file and pattern"
+			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
+		}
+		validatedPath, err := e.validationPath(check.File)
+		if err != nil {
+			detail := fmt.Sprintf("content_check has invalid file path %q: %v", check.File, err)
+			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, errValidationPathCategory, detail)
+		}
+		data, err := os.ReadFile(validatedPath)
+		if err != nil {
+			detail := fmt.Sprintf("content_check could not read %s: %v", check.File, err)
+			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
+		}
+		matched, err := regexp.Match(check.Pattern, data)
+		if err != nil {
+			detail := fmt.Sprintf("content_check has invalid pattern %q: %v", check.Pattern, err)
+			return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
+		}
+		if matched {
+			return state.Check{Name: checkName, Pass: true, Detail: fmt.Sprintf("pattern matched in %s", check.File)}, nil
+		}
+		detail := fmt.Sprintf("pattern %q not found in %s", check.Pattern, check.File)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_content_check", detail)
+	case "tests", "command":
+		return e.runValidationCommand(ctx, task, index, checkName, check)
+	default:
+		detail := fmt.Sprintf("unsupported validation check type %q", check.Type)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_type", detail)
+	}
+}
+
+func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, index int, checkName string, check state.ValidationCheck) (state.Check, *state.Finding) {
+	if check.Tool == "" {
+		detail := fmt.Sprintf("%s requires a tool", check.Type)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_tool", detail)
+	}
+	if _, ok := validationCommandAllowlist[check.Tool]; !ok {
+		detail := fmt.Sprintf("tool %q is not allowlisted", check.Tool)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_tool_allowlist", detail)
+	}
+	if err := validateValidationCommand(check.Tool, check.Args); err != nil {
+		detail := fmt.Sprintf("%s %s is not an approved validation command shape: %v", check.Tool, strings.Join(check.Args, " "), err)
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_command_shape", detail)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, validationCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, check.Tool, check.Args...) //nolint:gosec // validation checks execute allowlisted local developer tools without shell interpretation
+	cmd.Dir = e.WorkDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		var detail string
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			detail = fmt.Sprintf("%s %s timed out after %s: %s", check.Tool, strings.Join(check.Args, " "), validationCommandTimeout, strings.TrimSpace(stderr.String()))
+		} else {
+			detail = fmt.Sprintf("%s %s failed with exit code %d: %s", check.Tool, strings.Join(check.Args, " "), exitCode, strings.TrimSpace(stderr.String()))
+		}
+		return state.Check{Name: checkName, Pass: false, Detail: detail}, validationFinding(task, index, "validation_command", detail)
+	}
+	return state.Check{Name: checkName, Pass: true, Detail: strings.TrimSpace(stdout.String())}, nil
+}
+
+func validateValidationCommand(tool string, args []string) error {
+	if err := rejectShellLikeArgs(args); err != nil {
+		return err
+	}
+	switch tool {
+	case "go":
+		return validateGoValidationArgs(args)
+	case "python3":
+		return validatePythonValidationArgs(args)
+	case "npm":
+		return validateNPMValidationArgs(args)
+	case "make", "just":
+		return validateTargetValidationArgs(args)
+	default:
+		return fmt.Errorf("unsupported tool %q", tool)
+	}
+}
+
+func rejectShellLikeArgs(args []string) error {
+	for _, arg := range args {
+		if strings.ContainsAny(arg, "\n\r") ||
+			strings.Contains(arg, "$(") ||
+			strings.Contains(arg, "`") ||
+			strings.Contains(arg, "|") ||
+			strings.Contains(arg, ";") ||
+			strings.Contains(arg, "&&") ||
+			strings.Contains(arg, "||") ||
+			strings.Contains(arg, "<") ||
+			strings.Contains(arg, ">") {
+			return fmt.Errorf("arg %q contains shell control syntax", arg)
+		}
+	}
+	return nil
+}
+
+func validateGoValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("go requires an approved subcommand")
+	}
+	switch args[0] {
+	case "env":
+		return validateGoEnvArgs(args[1:])
+	case "test", "vet":
+		return validateGoPackageCommandArgs(args[0], args[1:])
+	default:
+		return fmt.Errorf("go subcommand %q is not approved", args[0])
+	}
+}
+
+func validateGoEnvArgs(args []string) error {
+	allowed := map[string]struct{}{
+		"GOARCH": {}, "GOMOD": {}, "GOOS": {}, "GOPATH": {}, "GOROOT": {}, "GOWORK": {},
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("go env requires at least one approved key")
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("go env flags are not approved")
+		}
+		if _, ok := allowed[arg]; !ok {
+			return fmt.Errorf("go env key %q is not approved", arg)
+		}
+	}
+	return nil
+}
+
+func validateGoPackageCommandArgs(subcommand string, args []string) error {
+	for i := 0; i < len(args); i++ {
+		consumed, err := validateGoPackageCommandArg(subcommand, args, i)
+		if err != nil {
+			return err
+		}
+		i += consumed
+	}
+	return nil
+}
+
+func validateGoPackageCommandArg(subcommand string, args []string, index int) (int, error) {
+	arg := args[index]
+	if arg == "" {
+		return 0, fmt.Errorf("%s contains an empty argument", subcommand)
+	}
+	if isBlockedGoExecutionFlag(arg) {
+		return 0, fmt.Errorf("%s flag %q is not approved", subcommand, arg)
+	}
+	if arg == "-coverprofile" {
+		return validateGoPathFlagValue(subcommand, args, index)
+	}
+	if strings.HasPrefix(arg, "-coverprofile=") {
+		path := strings.TrimPrefix(arg, "-coverprofile=")
+		if err := validateRelativeValidationPathArg(path); err != nil {
+			return 0, fmt.Errorf("%s flag -coverprofile: %w", subcommand, err)
+		}
+		return 0, nil
+	}
+	if isGoFlagWithValue(arg) {
+		if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+			return 0, fmt.Errorf("%s flag %q requires a value", subcommand, arg)
+		}
+		return 1, nil
+	}
+	if isAllowedGoFlag(arg) {
+		return 0, nil
+	}
+	if strings.HasPrefix(arg, "-") {
+		return 0, fmt.Errorf("%s flag %q is not approved", subcommand, arg)
+	}
+	return 0, validateGoPackagePattern(arg)
+}
+
+func isBlockedGoExecutionFlag(arg string) bool {
+	return arg == "-exec" || strings.HasPrefix(arg, "-exec=") || arg == "-toolexec" || strings.HasPrefix(arg, "-toolexec=")
+}
+
+func validateGoPathFlagValue(subcommand string, args []string, index int) (int, error) {
+	if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+		return 0, fmt.Errorf("%s flag %q requires a value", subcommand, args[index])
+	}
+	if err := validateRelativeValidationPathArg(args[index+1]); err != nil {
+		return 0, fmt.Errorf("%s flag %q: %w", subcommand, args[index], err)
+	}
+	return 1, nil
+}
+
+func isGoFlagWithValue(arg string) bool {
+	return arg == "-run" || arg == "-timeout" || arg == "-count"
+}
+
+func isAllowedGoFlag(arg string) bool {
+	return strings.HasPrefix(arg, "-run=") ||
+		strings.HasPrefix(arg, "-timeout=") ||
+		strings.HasPrefix(arg, "-count=") ||
+		arg == "-race" ||
+		arg == "-cover" ||
+		strings.HasPrefix(arg, "-covermode=")
+}
+
+func validateGoPackagePattern(arg string) error {
+	clean := filepath.Clean(arg)
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(arg) {
+		return fmt.Errorf("go package path %q is not approved", arg)
+	}
+	if strings.Contains(arg, "\\") {
+		return fmt.Errorf("go package path %q must use slash separators", arg)
+	}
+	for _, r := range arg {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '.', '/', '_', '-', '@':
+			continue
+		default:
+			return fmt.Errorf("go package path %q contains unsupported character %q", arg, r)
+		}
+	}
+	return nil
+}
+
+func validatePythonValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("python3 requires an approved module invocation")
+	}
+	if args[0] == "-c" {
+		return fmt.Errorf("python3 -c is not approved")
+	}
+	if len(args) < 2 || args[0] != "-m" || args[1] != "pytest" {
+		return fmt.Errorf("python3 may only run -m pytest")
+	}
+	for _, arg := range args[2:] {
+		switch arg {
+		case "-q", "-x", "--disable-warnings", "--maxfail=1":
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("pytest flag %q is not approved", arg)
+		}
+		if err := validateRelativeValidationPathArg(arg); err != nil {
+			return fmt.Errorf("pytest arg %q is not approved: %w", arg, err)
+		}
+	}
+	return nil
+}
+
+func validateRelativeValidationPathArg(arg string) error {
+	if arg == "" {
+		return fmt.Errorf("empty path")
+	}
+	if filepath.IsAbs(arg) {
+		return fmt.Errorf("absolute paths are not approved")
+	}
+	if strings.Contains(arg, "\\") {
+		return fmt.Errorf("paths must use slash separators")
+	}
+	clean := filepath.Clean(arg)
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes workdir")
+	}
+	return nil
+}
+
+func validateNPMValidationArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("npm requires an approved command")
+	}
+	if args[0] == "exec" || args[0] == "x" {
+		return fmt.Errorf("npm %s is not approved", args[0])
+	}
+	if len(args) == 1 && slices.Contains([]string{"test"}, args[0]) {
+		return nil
+	}
+	if len(args) == 2 && args[0] == "run" && slices.Contains([]string{"test", "lint", "build", "typecheck", "check"}, args[1]) {
+		return nil
+	}
+	return fmt.Errorf("npm command %q is not approved", strings.Join(args, " "))
+}
+
+func validateTargetValidationArgs(args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("only one fixed target is approved")
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("default targets are not approved")
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("flags are not approved")
+	}
+	if !slices.Contains([]string{"test", "check", "lint", "build", "verify", "pre-commit", "pre-push", "vuln"}, args[0]) {
+		return fmt.Errorf("target %q is not approved", args[0])
+	}
+	return nil
+}
+
+func (e *Engine) validationPath(path string) (string, error) {
+	return resolveWorktreePath(e.WorkDir, path)
+}
+
+func resolveWorktreePath(workDir, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir: %w", err)
+	}
+	canonicalWorkDir, err := filepath.EvalSymlinks(absWorkDir)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize workdir: %w", err)
+	}
+	var target string
+	if filepath.IsAbs(path) {
+		target = filepath.Clean(path)
+	} else {
+		target = filepath.Join(absWorkDir, filepath.Clean(path))
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	canonicalTarget, err := canonicalizePathForContainment(absTarget)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize path: %w", err)
+	}
+	rel, err := filepath.Rel(canonicalWorkDir, canonicalTarget)
+	if err != nil {
+		return "", fmt.Errorf("relativize path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes workdir")
+	}
+	return canonicalTarget, nil
+}
+
+func canonicalizePathForContainment(path string) (string, error) {
+	existing := filepath.Clean(path)
+	var missing []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if os.IsNotExist(err) {
+			parent := filepath.Dir(existing)
+			if parent == existing {
+				return "", err
+			}
+			missing = append([]string{filepath.Base(existing)}, missing...)
+			existing = parent
+		} else {
+			return "", err
+		}
+	}
+
+	canonical, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	for _, part := range missing {
+		canonical = filepath.Join(canonical, part)
+	}
+	return canonical, nil
+}
+
+func validationFinding(task *state.Task, index int, category, detail string) *state.Finding {
+	return &state.Finding{
+		FindingID: fmt.Sprintf("%s-validation-%02d", task.TaskID, index+1),
+		Severity:  "high",
+		Category:  category,
+		Summary:   detail,
+		DedupeKey: fmt.Sprintf("validation:%s:%d:%s", task.TaskID, index, category),
+	}
 }
 
 // writeVerifierResult persists the verifier result to the attempt-scoped report directory.

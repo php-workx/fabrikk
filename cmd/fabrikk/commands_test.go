@@ -6,16 +6,67 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/php-workx/fabrikk/internal/agentcli"
 	"github.com/php-workx/fabrikk/internal/compiler"
 	"github.com/php-workx/fabrikk/internal/engine"
 	"github.com/php-workx/fabrikk/internal/learning"
 	"github.com/php-workx/fabrikk/internal/state"
 	"github.com/php-workx/fabrikk/internal/ticket"
 )
+
+const emptyExplorationJSON = `{"file_inventory":[],"symbols":[],"test_files":[],"reuse_points":[]}`
+
+func TestParseReviewFlagsStaggerDelay(t *testing.T) {
+	rf, err := parseReviewFlags([]string{"--council", "--stagger-delay", "0"})
+	if err != nil {
+		t.Fatalf("parseReviewFlags: %v", err)
+	}
+	if !rf.council {
+		t.Fatal("council = false, want true")
+	}
+	if rf.staggerDelay != 0 {
+		t.Fatalf("staggerDelay = %d, want 0", rf.staggerDelay)
+	}
+
+	if _, err := parseReviewFlags([]string{"--stagger-delay", "-1"}); err == nil {
+		t.Fatal("parseReviewFlags negative delay error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--stagger-delay"}); err == nil {
+		t.Fatal("parseReviewFlags missing delay error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--round", "--mode"}); err == nil {
+		t.Fatal("parseReviewFlags missing round error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--round", "abc"}); err == nil {
+		t.Fatal("parseReviewFlags invalid round error = nil, want error")
+	}
+	if _, err := parseReviewFlags([]string{"--mode", "--council"}); err == nil {
+		t.Fatal("parseReviewFlags missing mode error = nil, want error")
+	}
+}
+
+func TestBoundaryFlagValueRejectsFollowingFlag(t *testing.T) {
+	value, next, err := boundaryFlagValue([]string{"--always", "--never"}, 0, "--always")
+	if err == nil {
+		t.Fatal("boundaryFlagValue error = nil, want missing value error")
+	}
+	if value != "" || next != 0 {
+		t.Fatalf("boundaryFlagValue value=%q next=%d, want empty value and unchanged index", value, next)
+	}
+
+	value, next, err = boundaryFlagValue([]string{"--always", "src/**"}, 0, "--always")
+	if err != nil {
+		t.Fatalf("boundaryFlagValue valid value: %v", err)
+	}
+	if value != "src/**" || next != 1 {
+		t.Fatalf("boundaryFlagValue value=%q next=%d, want src/** and 1", value, next)
+	}
+}
 
 func TestCmdStatusListsRunsAndSingleRun(t *testing.T) {
 	baseDir := t.TempDir()
@@ -378,6 +429,188 @@ Pending
 	}
 }
 
+func TestCmdPlanReviewWithCouncil(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	writeRunFixture(t, baseDir, "run-plan-council", runFixture{
+		artifact: &state.RunArtifact{
+			SchemaVersion: "0.1",
+			RunID:         "run-plan-council",
+			Requirements: []state.Requirement{{
+				ID:         "AT-FR-001",
+				Text:       "The system must ingest specs.",
+				SourceSpec: "spec.md",
+				SourceLine: 10,
+			}},
+		},
+	})
+	runDir := state.NewRunDir(baseDir, "run-plan-council")
+	techSpec := []byte(`# Technical Spec
+
+## 1. Technical context
+A
+
+## 2. Architecture
+B
+
+## 3. Canonical artifacts and schemas
+C
+
+## 4. Interfaces
+D
+
+## 5. Verification
+E
+
+## 6. Requirement traceability
+F
+
+## 7. Open questions and risks
+G
+
+## 8. Approval
+H
+`)
+	if err := runDir.WriteTechnicalSpec(techSpec); err != nil {
+		t.Fatalf("WriteTechnicalSpec: %v", err)
+	}
+	if err := runDir.WriteTechnicalSpecApproval(&state.ArtifactApproval{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-council",
+		ArtifactType:  "technical_spec_approval",
+		ArtifactPath:  "technical-spec.md",
+		ArtifactHash:  "sha256:" + state.SHA256Bytes(techSpec),
+		Status:        state.ArtifactApproved,
+		ApprovedBy:    "tester",
+		ApprovedAt:    time.Date(2026, time.April, 11, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteTechnicalSpecApproval: %v", err)
+	}
+
+	origInvoke := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = origInvoke }()
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, prompt string, _ int) (string, error) {
+		switch {
+		case strings.Contains(prompt, "codebase exploration report"):
+			return emptyExplorationJSON, nil
+		case strings.Contains(prompt, "Plan Scope Reviewer"):
+			return `{"persona_id":"plan-scope","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Dependency Reviewer"):
+			return `{"persona_id":"plan-dependency","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Feasibility Reviewer"):
+			return `{"persona_id":"plan-feasibility","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Completeness Reviewer"):
+			return `{"persona_id":"plan-completeness","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		default:
+			return emptyExplorationJSON, nil
+		}
+	}
+
+	if err := cmdPlan(context.Background(), []string{"draft", "run-plan-council"}); err != nil {
+		t.Fatalf("cmdPlan draft: %v", err)
+	}
+	output := captureStdout(t, func() {
+		if err := cmdPlan(context.Background(), []string{"review", "run-plan-council", "--council", "--stagger-delay", "0"}); err != nil {
+			t.Fatalf("cmdPlan review --council: %v", err)
+		}
+	})
+	assertContains(t, output, `"status": "pass"`)
+	assertContains(t, output, "Council verdict: pass")
+}
+
+func TestCmdPlanReviewWithCouncilReturnsErrorOnCouncilFailure(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	writeRunFixture(t, baseDir, "run-plan-council-fail", runFixture{
+		artifact: &state.RunArtifact{
+			SchemaVersion: "0.1",
+			RunID:         "run-plan-council-fail",
+			Requirements: []state.Requirement{{
+				ID:         "AT-FR-001",
+				Text:       "The system must ingest specs.",
+				SourceSpec: "spec.md",
+				SourceLine: 10,
+			}},
+		},
+	})
+	runDir := state.NewRunDir(baseDir, "run-plan-council-fail")
+	techSpec := []byte(`# Technical Spec
+
+## 1. Technical context
+A
+
+## 2. Architecture
+B
+
+## 3. Canonical artifacts and schemas
+C
+
+## 4. Interfaces
+D
+
+## 5. Verification
+E
+
+## 6. Requirement traceability
+F
+
+## 7. Open questions and risks
+G
+
+## 8. Approval
+H
+`)
+	if err := runDir.WriteTechnicalSpec(techSpec); err != nil {
+		t.Fatalf("WriteTechnicalSpec: %v", err)
+	}
+	if err := runDir.WriteTechnicalSpecApproval(&state.ArtifactApproval{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-council-fail",
+		ArtifactType:  "technical_spec_approval",
+		ArtifactPath:  "technical-spec.md",
+		ArtifactHash:  "sha256:" + state.SHA256Bytes(techSpec),
+		Status:        state.ArtifactApproved,
+		ApprovedBy:    "tester",
+		ApprovedAt:    time.Date(2026, time.April, 11, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("WriteTechnicalSpecApproval: %v", err)
+	}
+
+	origInvoke := agentcli.InvokeFunc
+	defer func() { agentcli.InvokeFunc = origInvoke }()
+	agentcli.InvokeFunc = func(_ context.Context, _ *agentcli.CLIBackend, prompt string, _ int) (string, error) {
+		switch {
+		case strings.Contains(prompt, "codebase exploration report"):
+			return emptyExplorationJSON, nil
+		case strings.Contains(prompt, "Plan Scope Reviewer"):
+			return `{"persona_id":"plan-scope","round":1,"verdict":"fail","confidence":"HIGH","key_insight":"bad","findings":[{"finding_id":"scope-001","severity":"significant","category":"missing_scope","section":"execution","location":"slice-001","description":"missing scope detail","recommendation":"add scope detail"}],"recommendation":"fix","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Dependency Reviewer"):
+			return `{"persona_id":"plan-dependency","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Feasibility Reviewer"):
+			return `{"persona_id":"plan-feasibility","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		case strings.Contains(prompt, "Plan Completeness Reviewer"):
+			return `{"persona_id":"plan-completeness","round":1,"verdict":"pass","confidence":"HIGH","key_insight":"ok","findings":[],"recommendation":"ok","schema_version":3}`, nil
+		default:
+			return emptyExplorationJSON, nil
+		}
+	}
+
+	if err := cmdPlan(context.Background(), []string{"draft", "run-plan-council-fail"}); err != nil {
+		t.Fatalf("cmdPlan draft: %v", err)
+	}
+	var reviewErr error
+	output := captureStdout(t, func() {
+		reviewErr = cmdPlan(context.Background(), []string{"review", "run-plan-council-fail", "--council", "--stagger-delay", "0"})
+	})
+	if reviewErr == nil {
+		t.Fatal("cmdPlan review --council error = nil, want council failure")
+	}
+	assertContains(t, output, "Council verdict: fail")
+	assertContains(t, output, `"status": "fail"`)
+}
+
 func TestCmdPlanDraftRequiresApprovedTechnicalSpec(t *testing.T) {
 	baseDir := t.TempDir()
 	withWorkingDir(t, baseDir)
@@ -401,6 +634,110 @@ func TestCmdPlanDraftRequiresApprovedTechnicalSpec(t *testing.T) {
 	}
 }
 
+func TestCmdBoundariesSetPersistsDirectValues(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	writeRunFixture(t, baseDir, "run-boundaries-direct", runFixture{
+		artifact: &state.RunArtifact{
+			SchemaVersion: "0.1",
+			RunID:         "run-boundaries-direct",
+			Requirements:  []state.Requirement{{ID: "AT-FR-001", Text: "The system must ingest specs."}},
+			QualityGate:   &state.QualityGate{Command: "just check", TimeoutSeconds: 60, Required: true},
+		},
+	})
+
+	if err := cmdBoundaries([]string{
+		"set",
+		"run-boundaries-direct",
+		"--always", " keep tests focused ",
+		"--always", "",
+		"--ask-first", " confirm rollout window ",
+		"--never", " docs/ ",
+	}); err != nil {
+		t.Fatalf("cmdBoundaries set: %v", err)
+	}
+
+	runDir := state.NewRunDir(baseDir, "run-boundaries-direct")
+	artifact, err := runDir.ReadArtifact()
+	if err != nil {
+		t.Fatalf("ReadArtifact: %v", err)
+	}
+
+	if artifact.QualityGate == nil || artifact.QualityGate.Command != "just check" {
+		t.Fatalf("QualityGate = %+v, want preserved", artifact.QualityGate)
+	}
+	if got, want := artifact.Boundaries.Always, []string{"keep tests focused"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.Always = %v, want %v", got, want)
+	}
+	if got, want := artifact.Boundaries.AskFirst, []string{"confirm rollout window"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.AskFirst = %v, want %v", got, want)
+	}
+	if got, want := artifact.Boundaries.Never, []string{"docs/"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.Never = %v, want %v", got, want)
+	}
+}
+
+func TestCmdBoundariesSetParsesTechSpecSection(t *testing.T) {
+	baseDir := t.TempDir()
+	withWorkingDir(t, baseDir)
+
+	writeRunFixture(t, baseDir, "run-boundaries-spec", runFixture{
+		artifact: &state.RunArtifact{
+			SchemaVersion: "0.1",
+			RunID:         "run-boundaries-spec",
+			Requirements:  []state.Requirement{{ID: "AT-FR-001", Text: "The system must ingest specs."}},
+		},
+	})
+
+	runDir := state.NewRunDir(baseDir, "run-boundaries-spec")
+	spec := []byte(`# Example Technical Specification
+
+## 1. Technical context
+Context
+
+## Boundaries
+
+**Always:**
+- keep tests focused
+-   
+- preserve audit trail
+
+**Ask First:**
+- confirm rollout window
+
+**Never:**
+- docs/
+- generated/
+`)
+	if err := runDir.WriteTechnicalSpec(spec); err != nil {
+		t.Fatalf("WriteTechnicalSpec: %v", err)
+	}
+
+	if err := cmdBoundaries([]string{"set", "run-boundaries-spec", "--from-tech-spec"}); err != nil {
+		t.Fatalf("cmdBoundaries set --from-tech-spec: %v", err)
+	}
+
+	artifact, err := runDir.ReadArtifact()
+	if err != nil {
+		t.Fatalf("ReadArtifact: %v", err)
+	}
+
+	if got, want := artifact.Boundaries.Always, []string{"keep tests focused", "preserve audit trail"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.Always = %v, want %v", got, want)
+	}
+	if got, want := artifact.Boundaries.AskFirst, []string{"confirm rollout window"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.AskFirst = %v, want %v", got, want)
+	}
+	if got, want := artifact.Boundaries.Never, []string{"docs/", "generated/"}; !equalStrings(got, want) {
+		t.Fatalf("Boundaries.Never = %v, want %v", got, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	return slices.Equal(got, want)
+}
+
 func TestCmdVerifyPrintsFailureDetails(t *testing.T) {
 	baseDir := t.TempDir()
 	withWorkingDir(t, baseDir)
@@ -420,11 +757,13 @@ func TestCmdVerifyPrintsFailureDetails(t *testing.T) {
 		tasks: []state.Task{task},
 	})
 
+	var verifyErr error
 	output := captureStdout(t, func() {
-		if err := cmdVerify(context.Background(), []string{"run-verify", task.TaskID}); err != nil {
-			t.Fatalf("cmdVerify: %v", err)
-		}
+		verifyErr = cmdVerify(context.Background(), []string{"run-verify", task.TaskID})
 	})
+	if verifyErr == nil {
+		t.Fatal("cmdVerify error = nil, want verification failure")
+	}
 
 	assertContains(t, output, `"pass": false`)
 	assertContains(t, output, "Verification: FAIL")

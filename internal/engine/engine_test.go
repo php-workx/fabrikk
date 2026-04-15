@@ -2,9 +2,11 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1228,6 +1230,94 @@ func TestVerifyTaskFailureBlocksRun(t *testing.T) {
 	}
 }
 
+func TestVerifyTaskSurfacesNeverBoundariesAsWarnings(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-never-warning")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := runDir.WriteArtifact(&state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-never-warning",
+		Boundaries: state.Boundaries{
+			Never: []string{" internal/engine/errors.go "},
+		},
+	}); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+	if err := runDir.WriteTasks([]state.Task{{
+		TaskID:           "task-warning",
+		Status:           state.TaskPending,
+		RequirementIDs:   []string{"AT-FR-001"},
+		RequiredEvidence: []string{"file_exists"},
+		Scope:            state.TaskScope{OwnedPaths: []string{"internal/engine"}},
+	}}); err != nil {
+		t.Fatalf("WriteTasks: %v", err)
+	}
+	if err := runDir.WriteCoverage([]state.RequirementCoverage{{
+		RequirementID:   "AT-FR-001",
+		Status:          "in_progress",
+		CoveringTaskIDs: []string{"task-warning"},
+	}}); err != nil {
+		t.Fatalf("WriteCoverage: %v", err)
+	}
+	if err := runDir.WriteStatus(&state.RunStatus{
+		RunID:              "run-never-warning",
+		State:              state.RunRunning,
+		LastTransitionTime: time.Now(),
+		TaskCountsByState:  map[string]int{"pending": 1},
+	}); err != nil {
+		t.Fatalf("WriteStatus: %v", err)
+	}
+
+	task := &state.Task{
+		TaskID:           "task-warning",
+		RequirementIDs:   []string{"AT-FR-001"},
+		RequiredEvidence: []string{"file_exists"},
+		Scope:            state.TaskScope{OwnedPaths: []string{"internal/engine"}},
+	}
+	report := &state.CompletionReport{
+		TaskID:       task.TaskID,
+		AttemptID:    "attempt-warning",
+		ChangedFiles: []string{filepath.Join(dir, "internal", "engine", "errors.go")},
+	}
+
+	eng := engine.New(runDir, dir)
+	result, err := eng.VerifyTask(context.Background(), task, report)
+	if err != nil {
+		t.Fatalf("VerifyTask: %v", err)
+	}
+	if !result.Pass {
+		t.Fatalf("VerifyTask pass = false, findings = %+v", result.BlockingFindings)
+	}
+	if len(result.BlockingFindings) != 0 {
+		t.Fatalf("BlockingFindings = %+v, want none", result.BlockingFindings)
+	}
+	if len(result.NonBlockingFindings) != 1 {
+		t.Fatalf("NonBlockingFindings len = %d, want 1", len(result.NonBlockingFindings))
+	}
+	if got := result.NonBlockingFindings[0]; got.Category != "boundary_never" || !strings.Contains(got.Summary, "internal/engine/errors.go") {
+		t.Fatalf("NonBlockingFindings[0] = %+v, want boundary_never warning mentioning path", got)
+	}
+
+	status, err := runDir.ReadStatus()
+	if err != nil {
+		t.Fatalf("ReadStatus after VerifyTask: %v", err)
+	}
+	if status.State != state.RunCompleted {
+		t.Fatalf("status state after warning-only VerifyTask = %s, want %s", status.State, state.RunCompleted)
+	}
+
+	var persisted state.VerifierResult
+	resultPath := filepath.Join(runDir.ReportDir(task.TaskID, report.AttemptID), "verifier-result.json")
+	if err := state.ReadJSON(resultPath, &persisted); err != nil {
+		t.Fatalf("ReadJSON(verifier-result): %v", err)
+	}
+	if len(persisted.NonBlockingFindings) != 1 {
+		t.Fatalf("persisted NonBlockingFindings len = %d, want 1", len(persisted.NonBlockingFindings))
+	}
+}
+
 func TestRetryTaskRequeuesBlockedTaskAndRestoresCoverage(t *testing.T) {
 	dir := t.TempDir()
 	runDir := state.NewRunDir(dir, "run-retry")
@@ -1492,6 +1582,169 @@ func TestReviewExecutionPlanRejectsCaseCollidingIDs(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected case_colliding_slice_id finding, got: %+v", review.BlockingFindings)
+	}
+}
+
+func TestReviewExecutionPlanRejectsIntraWaveFileConflict(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-same-wave-conflict")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := runDir.WriteExecutionPlan(&state.ExecutionPlan{
+		SchemaVersion:           "0.1",
+		RunID:                   "run-same-wave-conflict",
+		ArtifactType:            "execution_plan",
+		SourceTechnicalSpecHash: "sha256:test",
+		Status:                  state.ArtifactDrafted,
+		Slices: []state.ExecutionSlice{
+			{SliceID: "slice-001", Title: "A", Goal: "G", RequirementIDs: []string{"AT-FR-001"}, WaveID: "wave-0", FilesLikelyTouched: []string{"internal/engine/plan.go"}, OwnedPaths: []string{"internal/alpha"}, AcceptanceChecks: []string{"check"}, ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"internal/engine/plan.go"}}}, Risk: "low", Size: "small"},
+			{SliceID: "slice-002", Title: "B", Goal: "G", RequirementIDs: []string{"AT-FR-002"}, WaveID: "wave-0", FilesLikelyTouched: []string{"internal/engine/plan.go"}, OwnedPaths: []string{"internal/beta"}, AcceptanceChecks: []string{"check"}, ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"internal/engine/plan.go"}}}, Risk: "low", Size: "small"},
+		},
+		GeneratedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExecutionPlan: %v", err)
+	}
+
+	eng := engine.New(runDir, dir)
+	review, err := eng.ReviewExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("ReviewExecutionPlan: %v", err)
+	}
+	if review.Status != state.ReviewFail {
+		t.Fatal("review should fail for same-wave file conflicts")
+	}
+	found := false
+	for _, f := range review.BlockingFindings {
+		if f.Category == "intra_wave_file_conflict" {
+			found = true
+			if !strings.Contains(f.Summary, "internal/engine/plan.go") {
+				t.Fatalf("expected conflict summary to include canonical conflict path, got %q", f.Summary)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected intra_wave_file_conflict finding, got: %+v", review.BlockingFindings)
+	}
+}
+
+func TestReviewExecutionPlanRejectsIntraWaveDependency(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-same-wave-dep")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := runDir.WriteExecutionPlan(&state.ExecutionPlan{
+		SchemaVersion:           "0.1",
+		RunID:                   "run-same-wave-dep",
+		ArtifactType:            "execution_plan",
+		SourceTechnicalSpecHash: "sha256:test",
+		Status:                  state.ArtifactDrafted,
+		Slices: []state.ExecutionSlice{
+			{SliceID: "slice-001", Title: "A", Goal: "G", RequirementIDs: []string{"AT-FR-001"}, WaveID: "wave-0", OwnedPaths: []string{"a"}, AcceptanceChecks: []string{"check"}, ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"a"}}}, Risk: "low", Size: "small"},
+			{SliceID: "slice-002", Title: "B", Goal: "G", RequirementIDs: []string{"AT-FR-002"}, DependsOn: []string{"slice-001"}, WaveID: "wave-0", OwnedPaths: []string{"b"}, AcceptanceChecks: []string{"check"}, ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"b"}}}, Risk: "low", Size: "small"},
+		},
+		GeneratedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExecutionPlan: %v", err)
+	}
+
+	eng := engine.New(runDir, dir)
+	review, err := eng.ReviewExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("ReviewExecutionPlan: %v", err)
+	}
+	if review.Status != state.ReviewFail {
+		t.Fatal("review should fail for same-wave dependencies")
+	}
+	found := false
+	for _, f := range review.BlockingFindings {
+		if f.Category == "intra_wave_dependency" {
+			found = true
+			if !strings.Contains(f.Summary, "wave-0") {
+				t.Fatalf("expected dependency summary to include wave id, got %q", f.Summary)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected intra_wave_dependency finding, got: %+v", review.BlockingFindings)
+	}
+}
+
+func TestReviewExecutionPlanBuildsSharedFileRegistryAndWarnsOnMissingValidationChecks(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-shared-files")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := runDir.WriteArtifact(&state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-shared-files",
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "Requirement 1"},
+			{ID: "AT-FR-002", Text: "Requirement 2"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+	if err := runDir.WriteExecutionPlan(&state.ExecutionPlan{
+		SchemaVersion:           "0.1",
+		RunID:                   "run-shared-files",
+		ArtifactType:            "execution_plan",
+		SourceTechnicalSpecHash: "sha256:test",
+		Status:                  state.ArtifactDrafted,
+		Slices: []state.ExecutionSlice{
+			{SliceID: "slice-001", Title: "A", Goal: "G", RequirementIDs: []string{"AT-FR-001"}, WaveID: "wave-0", FilesLikelyTouched: []string{"internal/engine/plan.go"}, OwnedPaths: []string{"internal/alpha"}, AcceptanceChecks: []string{"check"}, ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"internal/engine/plan.go"}}}, Risk: "low", Size: "small"},
+			{SliceID: "slice-002", Title: "B", Goal: "G", RequirementIDs: []string{"AT-FR-002"}, WaveID: "wave-1", FilesLikelyTouched: []string{"internal/engine/plan.go"}, OwnedPaths: []string{"internal/beta"}, AcceptanceChecks: []string{"check"}, Risk: "low", Size: "small"},
+		},
+		GeneratedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExecutionPlan: %v", err)
+	}
+
+	eng := engine.New(runDir, dir)
+	review, err := eng.ReviewExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("ReviewExecutionPlan: %v", err)
+	}
+	if review.Status != state.ReviewPass {
+		t.Fatalf("review should pass when only warnings remain, got %s with findings %+v", review.Status, review.BlockingFindings)
+	}
+	if len(review.SharedFileRegistry) != 1 {
+		t.Fatalf("SharedFileRegistry len = %d, want 1", len(review.SharedFileRegistry))
+	}
+	entry := review.SharedFileRegistry[0]
+	if entry.File != "internal/engine/plan.go" {
+		t.Fatalf("SharedFileRegistry[0].File = %q, want internal/engine/plan.go", entry.File)
+	}
+	if !reflect.DeepEqual([]string{"slice-001"}, entry.Wave1Tasks) {
+		t.Fatalf("Wave1Tasks = %v, want [slice-001]", entry.Wave1Tasks)
+	}
+	if !reflect.DeepEqual([]string{"slice-002"}, entry.Wave2Tasks) {
+		t.Fatalf("Wave2Tasks = %v, want [slice-002]", entry.Wave2Tasks)
+	}
+	if entry.Mitigation == "" {
+		t.Fatal("expected shared file mitigation guidance")
+	}
+	warningFound := false
+	for _, w := range review.Warnings {
+		if w.SliceID == "slice-002" && strings.Contains(w.Summary, "no validation checks") {
+			warningFound = true
+			break
+		}
+	}
+	if !warningFound {
+		t.Fatalf("expected missing validation warning for slice-002, got: %+v", review.Warnings)
+	}
+
+	stored, err := runDir.ReadExecutionPlanReview()
+	if err != nil {
+		t.Fatalf("ReadExecutionPlanReview: %v", err)
+	}
+	if !reflect.DeepEqual(review.SharedFileRegistry, stored.SharedFileRegistry) {
+		t.Fatalf("stored SharedFileRegistry = %+v, want %+v", stored.SharedFileRegistry, review.SharedFileRegistry)
 	}
 }
 
@@ -2118,5 +2371,348 @@ Status: Draft
 	}
 	if string(data) != spec {
 		t.Fatalf("canonical doc was modified:\n  got:  %d bytes\n  want: %d bytes", len(data), len(spec))
+	}
+}
+
+const (
+	testWave0 = "wave-0"
+	testWave1 = "wave-1"
+	testWave2 = "wave-2"
+)
+
+func locateRepoRoot(t *testing.T) string {
+	t.Helper()
+	workDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	for {
+		if _, statErr := os.Stat(filepath.Join(workDir, "go.mod")); statErr == nil {
+			return workDir
+		}
+		parent := filepath.Dir(workDir)
+		if parent == workDir {
+			t.Fatalf("could not locate repo root from %q", workDir)
+		}
+		workDir = parent
+	}
+}
+
+func assertExplorationSlice(t *testing.T, slice *state.ExecutionSlice) {
+	t.Helper()
+	if !reflect.DeepEqual(slice.FilesLikelyTouched, []string{"internal/engine/plan.go", "internal/engine/plan_new_test.go"}) {
+		t.Fatalf("FilesLikelyTouched = %v", slice.FilesLikelyTouched)
+	}
+	if !reflect.DeepEqual(slice.ImplementationDetail, state.ImplementationDetail{
+		FilesToModify: []state.FileChange{
+			{Path: "internal/engine/plan.go", Change: "Modify existing implementation surfaced during exploration", IsNew: false},
+			{Path: "internal/engine/plan_new_test.go", Change: "Create implementation file surfaced during exploration", IsNew: true},
+		},
+		SymbolsToUse: []string{"DraftExecutionPlan at internal/engine/plan.go:24"},
+		TestsToAdd:   []string{"TestDraftExecutionPlanIntegratesExplorationDetailAndValidation"},
+	}) {
+		t.Fatalf("ImplementationDetail = %#v", slice.ImplementationDetail)
+	}
+	if !reflect.DeepEqual(slice.ValidationChecks, []state.ValidationCheck{
+		{Type: "files_exist", Paths: []string{"internal/engine/plan_new_test.go"}},
+		{Type: "tests", Tool: "go", Args: []string{"test", "-run", "^TestDraftExecutionPlanIntegratesExplorationDetailAndValidation$", "./internal/engine/..."}},
+		{Type: "command", Tool: "make", Args: []string{"check"}},
+	}) {
+		t.Fatalf("ValidationChecks = %#v", slice.ValidationChecks)
+	}
+}
+
+func TestDraftExecutionPlanPopulatesWaveIDs(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-plan-waves")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-waves",
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "First functional requirement.", SourceSpec: "spec.md", SourceLine: 10},
+			{ID: "AT-FR-002", Text: "Second functional requirement.", SourceSpec: "spec.md", SourceLine: 11},
+			{ID: "AT-FR-003", Text: "Third functional requirement.", SourceSpec: "spec.md", SourceLine: 12},
+		},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	techSpecHash := writeApprovedTechnicalSpec(t, runDir)
+
+	eng := engine.New(runDir, dir)
+	t.Setenv("FABRIKK_CODE_INTEL", filepath.Join(t.TempDir(), "missing-code-intel.py"))
+	eng.InvokeFn = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		return "", os.ErrPermission
+	}
+	plan, err := eng.DraftExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("DraftExecutionPlan: %v", err)
+	}
+
+	if plan.SourceTechnicalSpecHash != techSpecHash {
+		t.Fatalf("SourceTechnicalSpecHash = %q, want %q", plan.SourceTechnicalSpecHash, techSpecHash)
+	}
+	if len(plan.Slices) != 3 {
+		t.Fatalf("slice count = %d, want 3", len(plan.Slices))
+	}
+	for i, want := range []string{testWave0, testWave1, testWave2} {
+		if got := plan.Slices[i].WaveID; got != want {
+			t.Fatalf("slice %d WaveID = %q, want %q", i, got, want)
+		}
+	}
+
+	stored, err := runDir.ReadExecutionPlan()
+	if err != nil {
+		t.Fatalf("ReadExecutionPlan: %v", err)
+	}
+	for i, want := range []string{testWave0, testWave1, testWave2} {
+		if got := stored.Slices[i].WaveID; got != want {
+			t.Fatalf("stored slice %d WaveID = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestDraftExecutionPlanReturnsHumanInputRequiredForAskFirstBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-plan-ask-first")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-ask-first",
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "First functional requirement.", SourceSpec: "spec.md", SourceLine: 10},
+		},
+		Boundaries: state.Boundaries{
+			AskFirst: []string{" confirm rollout window ", "notify compliance"},
+		},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	writeApprovedTechnicalSpec(t, runDir)
+
+	invokeCalled := false
+	eng := engine.New(runDir, dir)
+	eng.InvokeFn = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		invokeCalled = true
+		return "", nil
+	}
+
+	_, err := eng.DraftExecutionPlan(context.Background())
+	if err == nil {
+		t.Fatal("DraftExecutionPlan error = nil, want HumanInputRequiredError")
+	}
+	var humanErr *engine.HumanInputRequiredError
+	if !errors.As(err, &humanErr) {
+		t.Fatalf("DraftExecutionPlan error = %T, want HumanInputRequiredError", err)
+	}
+	want := []string{"confirm rollout window", "notify compliance"}
+	if !reflect.DeepEqual(humanErr.Items, want) {
+		t.Fatalf("HumanInputRequiredError.Items = %v, want %v", humanErr.Items, want)
+	}
+	if invokeCalled {
+		t.Fatal("InvokeFn called despite ask-first boundary")
+	}
+}
+
+func TestDraftExecutionPlanSerializesConflictingOwnedPaths(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-plan-conflicts")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-conflicts",
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "Compile approved specs into the task graph.", SourceSpec: "spec.md", SourceLine: 10},
+			{ID: "AT-TS-001", Text: "Deterministic task graph compilation remains verifiable.", SourceSpec: "spec.md", SourceLine: 11},
+		},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	writeApprovedTechnicalSpec(t, runDir)
+
+	eng := engine.New(runDir, dir)
+	t.Setenv("FABRIKK_CODE_INTEL", filepath.Join(t.TempDir(), "missing-code-intel.py"))
+	eng.InvokeFn = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		return "", os.ErrPermission
+	}
+	plan, err := eng.DraftExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("DraftExecutionPlan: %v", err)
+	}
+	if len(plan.Slices) != 2 {
+		t.Fatalf("slice count = %d, want 2", len(plan.Slices))
+	}
+	if got := plan.Slices[0].WaveID; got != testWave0 {
+		t.Fatalf("slice 0 WaveID = %q, want %q", got, testWave0)
+	}
+	if got := plan.Slices[1].WaveID; got != testWave1 {
+		t.Fatalf("slice 1 WaveID = %q, want %q", got, testWave1)
+	}
+	if got := plan.Slices[1].DependsOn; len(got) != 0 {
+		t.Fatalf("slice 1 DependsOn = %v, want none", got)
+	}
+}
+
+func TestDraftExecutionPlanPrunesLaneOnlyDependenciesWithoutOverlap(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-plan-prune")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-prune",
+		Requirements: []state.Requirement{
+			{ID: "AT-FR-001", Text: "Prepare the CLI command output.", SourceSpec: "spec.md", SourceLine: 10},
+			{ID: "AT-FR-002", Text: "Council synthesis aggregates findings.", SourceSpec: "spec.md", SourceLine: 11},
+		},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	writeApprovedTechnicalSpec(t, runDir)
+
+	eng := engine.New(runDir, dir)
+	t.Setenv("FABRIKK_CODE_INTEL", filepath.Join(t.TempDir(), "missing-code-intel.py"))
+	eng.InvokeFn = func(_ context.Context, _ *agentcli.CLIBackend, _ string, _ int) (string, error) {
+		return "", os.ErrPermission
+	}
+	plan, err := eng.DraftExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("DraftExecutionPlan: %v", err)
+	}
+
+	if len(plan.Slices) != 2 {
+		t.Fatalf("slice count = %d, want 2", len(plan.Slices))
+	}
+	for i := range plan.Slices {
+		if got := plan.Slices[i].WaveID; got != testWave0 {
+			t.Fatalf("slice %d WaveID = %q, want %q", i, got, testWave0)
+		}
+		if got := plan.Slices[i].DependsOn; len(got) != 0 {
+			t.Fatalf("slice %d DependsOn = %v, want none", i, got)
+		}
+	}
+
+	stored, err := runDir.ReadExecutionPlan()
+	if err != nil {
+		t.Fatalf("ReadExecutionPlan: %v", err)
+	}
+	if got := stored.Slices[1].WaveID; got != testWave0 {
+		t.Fatalf("stored slice 1 WaveID = %q, want %q", got, testWave0)
+	}
+	if got := stored.Slices[1].DependsOn; len(got) != 0 {
+		t.Fatalf("stored slice 1 DependsOn = %v, want none", got)
+	}
+}
+
+func TestDraftExecutionPlanIntegratesExplorationDetailAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-plan-exploration")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         "run-plan-exploration",
+		Requirements: []state.Requirement{{
+			ID:         "AT-FR-001",
+			Text:       "Update the plan drafting flow.",
+			SourceSpec: "spec.md",
+			SourceLine: 10,
+		}},
+		QualityGate: &state.QualityGate{Command: "make check", Required: true},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+	writeApprovedTechnicalSpec(t, runDir)
+
+	t.Setenv("FABRIKK_CODE_INTEL", filepath.Join(t.TempDir(), "missing-code-intel.py"))
+	eng := engine.New(runDir, locateRepoRoot(t))
+	eng.InvokeFn = func(_ context.Context, _ *agentcli.CLIBackend, _ string, timeoutSec int) (string, error) {
+		if timeoutSec != 360 {
+			t.Fatalf("timeoutSec = %d, want 360", timeoutSec)
+		}
+		return `{"file_inventory":[{"path":"internal/engine/plan.go","exists":true,"is_new":false,"line_count":120,"language":"go"},{"path":"internal/engine/plan_new_test.go","exists":false,"is_new":true,"line_count":0,"language":"go"}],"symbols":[{"file_path":"internal/engine/plan.go","line":24,"kind":"func","signature":"func (e *Engine) DraftExecutionPlan(ctx context.Context) (*state.ExecutionPlan, error)"}],"test_files":[{"path":"internal/engine/plan_new_test.go","test_names":["TestDraftExecutionPlanIntegratesExplorationDetailAndValidation"],"covers":"internal/engine/plan.go"}],"reuse_points":[{"file_path":"internal/engine/plan.go","line":24,"symbol":"DraftExecutionPlan","relevance":"planner entry point"}]}`, nil
+	}
+
+	plan, err := eng.DraftExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("DraftExecutionPlan: %v", err)
+	}
+	if len(plan.Slices) != 1 {
+		t.Fatalf("slice count = %d, want 1", len(plan.Slices))
+	}
+	assertExplorationSlice(t, &plan.Slices[0])
+}
+
+func TestReviewExecutionPlanFailsWhenArtifactUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	runDir := state.NewRunDir(dir, "run-review-missing-artifact")
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	plan := &state.ExecutionPlan{
+		SchemaVersion: "0.1",
+		RunID:         "run-review-missing-artifact",
+		ArtifactType:  "execution_plan",
+		Status:        state.ArtifactDrafted,
+		Slices: []state.ExecutionSlice{{
+			SliceID:          "slice-001",
+			Title:            "A",
+			Goal:             "G",
+			RequirementIDs:   []string{"AT-FR-001"},
+			WaveID:           "wave-0",
+			OwnedPaths:       []string{"internal/engine"},
+			AcceptanceChecks: []string{"check"},
+			ValidationChecks: []state.ValidationCheck{{Type: "files_exist", Paths: []string{"internal/engine/plan.go"}}},
+			Risk:             "low",
+			Size:             "small",
+		}},
+		GeneratedAt: time.Now().UTC(),
+	}
+	if err := runDir.WriteExecutionPlan(plan); err != nil {
+		t.Fatalf("WriteExecutionPlan: %v", err)
+	}
+	if err := runDir.WriteExecutionPlanMarkdown([]byte("# Execution Plan\n")); err != nil {
+		t.Fatalf("WriteExecutionPlanMarkdown: %v", err)
+	}
+
+	eng := engine.New(runDir, dir)
+	review, err := eng.ReviewExecutionPlan(context.Background())
+	if err != nil {
+		t.Fatalf("ReviewExecutionPlan: %v", err)
+	}
+	if review.Status != state.ReviewFail {
+		t.Fatalf("review status = %s, want fail", review.Status)
+	}
+	found := false
+	for _, finding := range review.BlockingFindings {
+		if finding.Category == "artifact_read_failure" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("BlockingFindings = %+v, want artifact_read_failure", review.BlockingFindings)
 	}
 }

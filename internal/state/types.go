@@ -65,6 +65,60 @@ type LearningEnricher interface {
 	RecordOutcome(ids []string, passed bool) error
 }
 
+// Boundaries defines human-input boundaries for a run (spec section 2.6).
+type Boundaries struct {
+	Always   []string `json:"always,omitempty"`
+	AskFirst []string `json:"ask_first,omitempty"`
+	Never    []string `json:"never,omitempty"`
+}
+
+// EmptyBoundaryItem preserves an explicitly blank boundary entry instead of silently dropping it.
+// It is an internal marker, not a user-facing display value.
+const EmptyBoundaryItem = "\x00fabrikk-boundary-empty"
+
+const boundaryEscapePrefix = "\x00fabrikk-boundary-escaped:"
+
+// IsEmptyBoundaryItem reports whether item is the internal marker for an
+// explicitly blank boundary item.
+func IsEmptyBoundaryItem(item string) bool {
+	return item == EmptyBoundaryItem
+}
+
+// BoundaryItemValue decodes an escaped normalized boundary item back to the
+// original user value. Empty boundary markers remain encoded so callers can
+// handle them explicitly via IsEmptyBoundaryItem.
+func BoundaryItemValue(item string) string {
+	return strings.TrimPrefix(item, boundaryEscapePrefix)
+}
+
+// Normalized returns trimmed boundary items while preserving explicitly empty entries.
+func (b Boundaries) Normalized() Boundaries {
+	return Boundaries{
+		Always:   normalizeBoundaryItems(b.Always),
+		AskFirst: normalizeBoundaryItems(b.AskFirst),
+		Never:    normalizeBoundaryItems(b.Never),
+	}
+}
+
+func normalizeBoundaryItems(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		normalized := strings.TrimSpace(item)
+		if normalized == "" {
+			normalized = EmptyBoundaryItem
+		} else if normalized == EmptyBoundaryItem || strings.HasPrefix(normalized, boundaryEscapePrefix) {
+			normalized = boundaryEscapePrefix + normalized
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
 // RunArtifact is the approved normalized contract for a run (spec section 3.2).
 type RunArtifact struct {
 	SchemaVersion  string          `json:"schema_version"`
@@ -75,6 +129,7 @@ type RunArtifact struct {
 	Clarifications []Clarification `json:"clarifications"`
 	Dependencies   []string        `json:"dependencies"`
 	RiskProfile    string          `json:"risk_profile"`
+	Boundaries     Boundaries      `json:"boundaries"`
 	RoutingPolicy  RoutingPolicy   `json:"routing_policy"`
 	QualityGate    *QualityGate    `json:"quality_gate,omitempty"`
 	ApprovedAt     *time.Time      `json:"approved_at,omitempty"`
@@ -141,29 +196,120 @@ type QualityGate struct {
 	Required       bool   `json:"required"`
 }
 
+// StructuralAnalysis holds deterministic code-intelligence output for the worktree.
+// Nil when code_intel.py is unavailable.
+type StructuralAnalysis struct {
+	Nodes []StructuralNode `json:"nodes"`
+	Edges []StructuralEdge `json:"edges"`
+}
+
+// StructuralNode identifies a code symbol discovered by structural analysis.
+type StructuralNode struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Exported bool   `json:"exported"`
+}
+
+// StructuralEdge relates two structural nodes or files.
+type StructuralEdge struct {
+	From  string  `json:"from"`
+	To    string  `json:"to"`
+	Type  string  `json:"type"`
+	Score float64 `json:"score,omitempty"`
+}
+
+// ExplorationResult holds the LLM's codebase-to-requirements mapping output.
+type ExplorationResult struct {
+	FileInventory []FileInfo     `json:"file_inventory"`
+	Symbols       []SymbolInfo   `json:"symbols"`
+	TestFiles     []TestFileInfo `json:"test_files"`
+	ReusePoints   []ReusePoint   `json:"reuse_points"`
+}
+
+// FileInfo describes a file candidate surfaced during exploration.
+type FileInfo struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	IsNew     bool   `json:"is_new"`
+	LineCount int    `json:"line_count"`
+	Language  string `json:"language"`
+}
+
+// SymbolInfo identifies a concrete symbol relevant to a requirement.
+type SymbolInfo struct {
+	FilePath  string `json:"file_path"`
+	Line      int    `json:"line"`
+	Kind      string `json:"kind"`
+	Signature string `json:"signature"`
+}
+
+// TestFileInfo describes an existing or planned test file.
+type TestFileInfo struct {
+	Path      string   `json:"path"`
+	TestNames []string `json:"test_names"`
+	Covers    string   `json:"covers"`
+}
+
+// ReusePoint points to existing code the plan should build on.
+type ReusePoint struct {
+	FilePath  string `json:"file_path"`
+	Line      int    `json:"line"`
+	Symbol    string `json:"symbol"`
+	Relevance string `json:"relevance"`
+}
+
+// ImplementationDetail captures concrete implementation guidance surfaced during planning.
+type ImplementationDetail struct {
+	FilesToModify []FileChange `json:"files_to_modify,omitempty" yaml:"files_to_modify,omitempty"`
+	SymbolsToAdd  []string     `json:"symbols_to_add,omitempty" yaml:"symbols_to_add,omitempty"`
+	SymbolsToUse  []string     `json:"symbols_to_use,omitempty" yaml:"symbols_to_use,omitempty"`
+	TestsToAdd    []string     `json:"tests_to_add,omitempty" yaml:"tests_to_add,omitempty"`
+}
+
+// IsZero reports whether the detail contains any implementation guidance.
+func (d ImplementationDetail) IsZero() bool {
+	return len(d.FilesToModify) == 0 && len(d.SymbolsToAdd) == 0 && len(d.SymbolsToUse) == 0 && len(d.TestsToAdd) == 0
+}
+
+// FileChange describes one planned file-level modification.
+type FileChange struct {
+	Path   string `json:"path" yaml:"path"`
+	Change string `json:"change" yaml:"change"`
+	IsNew  bool   `json:"is_new,omitempty" yaml:"is_new,omitempty"`
+}
+
 // Task is a single work item in the task graph (spec section 3.4).
 type Task struct {
-	TaskID           string     `json:"task_id"`
-	Slug             string     `json:"slug"`
-	Title            string     `json:"title"`
-	TaskType         string     `json:"task_type"` // implementation, repair, review_followup, clarification_followup
-	Tags             []string   `json:"tags"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	Order            int        `json:"order"`
-	ETag             string     `json:"etag"`
-	LineageID        string     `json:"lineage_id"`
-	RequirementIDs   []string   `json:"requirement_ids"`
-	DependsOn        []string   `json:"depends_on"`
-	Scope            TaskScope  `json:"scope"`
-	Priority         int        `json:"priority"`
-	RiskLevel        string     `json:"risk_level"` // low, medium, high
-	DefaultModel     string     `json:"default_model"`
-	Status           TaskStatus `json:"status"`
-	StatusReason     string     `json:"status_reason,omitempty"`
-	RequiredEvidence []string   `json:"required_evidence"`
-	ParentTaskID     string     `json:"parent_task_id,omitempty"`
-	CreatedFrom      string     `json:"created_from,omitempty"`
+	TaskID               string               `json:"task_id"`
+	Slug                 string               `json:"slug"`
+	Title                string               `json:"title"`
+	TaskType             string               `json:"task_type"` // implementation, repair, review_followup, clarification_followup
+	Tags                 []string             `json:"tags"`
+	CreatedAt            time.Time            `json:"created_at"`
+	UpdatedAt            time.Time            `json:"updated_at"`
+	Order                int                  `json:"order"`
+	ETag                 string               `json:"etag"`
+	LineageID            string               `json:"lineage_id"`
+	RequirementIDs       []string             `json:"requirement_ids"`
+	DependsOn            []string             `json:"depends_on"`
+	Scope                TaskScope            `json:"scope"`
+	FilesLikelyTouched   []string             `json:"files_likely_touched,omitempty"`
+	Priority             int                  `json:"priority"`
+	RiskLevel            string               `json:"risk_level"` // low, medium, high
+	DefaultModel         string               `json:"default_model"`
+	Status               TaskStatus           `json:"status"`
+	StatusReason         string               `json:"status_reason,omitempty"`
+	RequiredEvidence     []string             `json:"required_evidence"`
+	ValidationChecks     []ValidationCheck    `json:"validation_checks,omitempty"`
+	ImplementationDetail ImplementationDetail `json:"implementation_detail,omitzero"`
+	ParentTaskID         string               `json:"parent_task_id,omitempty"`
+	CreatedFrom          string               `json:"created_from,omitempty"`
+
+	// Grouping metadata — set when same-symbol exception groups >1 requirement (spec §2.1).
+	GroupingReason        string   `json:"grouping_reason,omitempty"`
+	GroupedRequirementIDs []string `json:"grouped_requirement_ids,omitempty"`
 
 	// Learning context — injected by engine post-compilation.
 	Intent          string        `json:"intent,omitempty"`
@@ -213,6 +359,16 @@ type LearningRef struct {
 	ID       string `json:"id"`
 	Category string `json:"category"`
 	Summary  string `json:"summary"`
+}
+
+// ValidationCheck defines a single validation check for a task (spec §2.4).
+type ValidationCheck struct {
+	Type    string   `json:"type" yaml:"type"`                       // e.g. "command", "file_exists", "grep"
+	Paths   []string `json:"paths,omitempty" yaml:"paths,omitempty"` // file paths to check
+	File    string   `json:"file,omitempty" yaml:"file,omitempty"`   // single file target
+	Pattern string   `json:"pattern,omitempty" yaml:"pattern,omitempty"`
+	Tool    string   `json:"tool,omitempty" yaml:"tool,omitempty"` // tool to run (e.g. "go test")
+	Args    []string `json:"args,omitempty" yaml:"args,omitempty"` // arguments for the tool
 }
 
 // TaskScope defines the file-level boundaries for a task (spec section 3.4).
@@ -323,13 +479,14 @@ type CommandResult struct {
 
 // VerifierResult is the deterministic verifier output (spec section 3.7).
 type VerifierResult struct {
-	TaskID           string    `json:"task_id"`
-	AttemptID        string    `json:"attempt_id"`
-	EvidenceChecks   []Check   `json:"evidence_checks"`
-	ScopeCheck       Check     `json:"scope_check"`
-	RequirementCheck Check     `json:"requirement_check"`
-	Pass             bool      `json:"pass"`
-	BlockingFindings []Finding `json:"blocking_findings,omitempty"`
+	TaskID              string    `json:"task_id"`
+	AttemptID           string    `json:"attempt_id"`
+	EvidenceChecks      []Check   `json:"evidence_checks"`
+	ScopeCheck          Check     `json:"scope_check"`
+	RequirementCheck    Check     `json:"requirement_check"`
+	Pass                bool      `json:"pass"`
+	BlockingFindings    []Finding `json:"blocking_findings,omitempty"`
+	NonBlockingFindings []Finding `json:"non_blocking_findings,omitempty"`
 }
 
 // Check is a single verification check result.
@@ -428,19 +585,46 @@ type TechnicalSpecReview struct {
 	ReviewedAt        time.Time       `json:"reviewed_at"`
 }
 
+// Wave is a conflict-free execution batch produced by the scheduler. The initial
+// grouping is by dependency depth, but compiler.ComputeWaves shifts tasks whose
+// file scopes collide into later waves, so the Tasks in a Wave are guaranteed to
+// be safe to dispatch in parallel.
+type Wave struct {
+	WaveID string   `json:"wave_id"`
+	Tasks  []string `json:"tasks"`
+}
+
+// FileConflict records two tasks that cannot share a wave because their file scopes overlap.
+type FileConflict struct {
+	FilePath string `json:"file_path"`
+	TaskA    string `json:"task_a"`
+	TaskB    string `json:"task_b"`
+}
+
+// SharedFileEntry records a file overlap that is allowed only because the slices run in different waves.
+type SharedFileEntry struct {
+	File       string   `json:"file"`
+	Wave1Tasks []string `json:"wave1_tasks,omitempty"`
+	Wave2Tasks []string `json:"wave2_tasks,omitempty"`
+	Mitigation string   `json:"mitigation,omitempty"`
+}
+
 // ExecutionSlice is one implementation slice in an approved execution plan.
 type ExecutionSlice struct {
-	SliceID            string   `json:"slice_id"`
-	Title              string   `json:"title"`
-	Goal               string   `json:"goal"`
-	RequirementIDs     []string `json:"requirement_ids"`
-	DependsOn          []string `json:"depends_on,omitempty"`
-	FilesLikelyTouched []string `json:"files_likely_touched,omitempty"`
-	OwnedPaths         []string `json:"owned_paths,omitempty"`
-	AcceptanceChecks   []string `json:"acceptance_checks,omitempty"`
-	Risk               string   `json:"risk"`
-	Size               string   `json:"size"`
-	Notes              string   `json:"notes,omitempty"`
+	SliceID              string               `json:"slice_id"`
+	Title                string               `json:"title"`
+	Goal                 string               `json:"goal"`
+	RequirementIDs       []string             `json:"requirement_ids"`
+	DependsOn            []string             `json:"depends_on,omitempty"`
+	WaveID               string               `json:"wave_id,omitempty"`
+	FilesLikelyTouched   []string             `json:"files_likely_touched,omitempty"`
+	OwnedPaths           []string             `json:"owned_paths,omitempty"`
+	AcceptanceChecks     []string             `json:"acceptance_checks,omitempty"`
+	ValidationChecks     []ValidationCheck    `json:"validation_checks,omitempty"`
+	ImplementationDetail ImplementationDetail `json:"implementation_detail,omitzero"`
+	Risk                 string               `json:"risk"`
+	Size                 string               `json:"size"`
+	Notes                string               `json:"notes,omitempty"`
 }
 
 // ExecutionPlan is the run-scoped implementation decomposition artifact.
@@ -456,16 +640,17 @@ type ExecutionPlan struct {
 
 // ExecutionPlanReview is the council-style review result for an execution plan.
 type ExecutionPlanReview struct {
-	SchemaVersion     string          `json:"schema_version"`
-	RunID             string          `json:"run_id"`
-	ArtifactType      string          `json:"artifact_type"`
-	ExecutionPlanHash string          `json:"execution_plan_hash"`
-	Status            ReviewStatus    `json:"status"`
-	Summary           string          `json:"summary"`
-	BlockingFindings  []ReviewFinding `json:"blocking_findings,omitempty"`
-	Warnings          []ReviewWarning `json:"warnings,omitempty"`
-	Reviewers         []ReviewSummary `json:"reviewers,omitempty"`
-	ReviewedAt        time.Time       `json:"reviewed_at"`
+	SchemaVersion      string            `json:"schema_version"`
+	RunID              string            `json:"run_id"`
+	ArtifactType       string            `json:"artifact_type"`
+	ExecutionPlanHash  string            `json:"execution_plan_hash"`
+	Status             ReviewStatus      `json:"status"`
+	Summary            string            `json:"summary"`
+	BlockingFindings   []ReviewFinding   `json:"blocking_findings,omitempty"`
+	Warnings           []ReviewWarning   `json:"warnings,omitempty"`
+	SharedFileRegistry []SharedFileEntry `json:"shared_file_registry,omitempty"`
+	Reviewers          []ReviewSummary   `json:"reviewers,omitempty"`
+	ReviewedAt         time.Time         `json:"reviewed_at"`
 }
 
 // ArtifactApproval records explicit approval of a generated planning artifact.

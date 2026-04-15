@@ -18,9 +18,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
-      - run: actionlint .github/workflows/*.yml
+      - run: go tool -modfile=tools.mod actionlint .github/workflows/*.yml
 
   vet:
     name: Vet
@@ -40,9 +38,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.11.3
+      - run: go tool -modfile=tools.mod golangci-lint run
 
   fmt:
     name: Format
@@ -52,11 +48,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install gofumpt
-        run: go install mvdan.cc/gofumpt@v0.7.0
       - name: Check formatting
         run: |
-          test -z "$(gofumpt --extra -l .)" || (echo "gofumpt: unformatted files:" && gofumpt --extra -l . && exit 1)
+          test -z "$(go tool -modfile=tools.mod gofumpt --extra -l .)" || (echo "gofumpt: unformatted files:" && go tool -modfile=tools.mod gofumpt --extra -l . && exit 1)
 
   test:
     name: Test
@@ -66,7 +60,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race ./...
+      - run: go test -race -count=1 ./...
 
   build:
     name: Build
@@ -102,6 +96,4 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-      - run: govulncheck ./...
+      - run: go tool -modfile=tools.mod golang.org/x/vuln/cmd/govulncheck ./...
