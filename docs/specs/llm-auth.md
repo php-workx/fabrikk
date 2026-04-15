@@ -202,6 +202,14 @@ import (
 // creating parent directories with strict permissions if needed.
 func DefaultDBPath() (string, error) {
     if env := os.Getenv("FABRIKK_AUTH_DB"); env != "" {
+        parent := filepath.Dir(env)
+        if err := os.MkdirAll(parent, 0o700); err != nil {
+            return "", fmt.Errorf("create %s: %w", parent, err)
+        }
+        // os.MkdirAll does not chmod existing directories — enforce explicitly.
+        if err := os.Chmod(parent, 0o700); err != nil {
+            return "", fmt.Errorf("chmod %s: %w", parent, err)
+        }
         return env, nil
     }
 
@@ -1302,7 +1310,7 @@ The tool discovers available models in two ways:
 2. **Ollama-native fallback:** GET `{baseUrl}/api/tags` (Ollama's own format)
 
 **API calls:**
-Uses the OpenAI Responses API format over Ollama's OpenAI-compatible endpoint:
+Uses the OpenAI Chat Completions format over Ollama's OpenAI-compatible endpoint:
 ```http
 POST http://127.0.0.1:11434/v1/chat/completions
 Content-Type: application/json

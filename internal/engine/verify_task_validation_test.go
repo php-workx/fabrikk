@@ -110,7 +110,9 @@ func TestVerifyTaskRejectsUnapprovedValidationCommandShapes(t *testing.T) {
 		{name: "go exec flag", tool: "go", args: []string{"test", "-exec", "echo"}},
 		{name: "python command string", tool: "python3", args: []string{"-c", "print(1)"}},
 		{name: "npm exec", tool: "npm", args: []string{"exec", "eslint"}},
+		{name: "make default target", tool: "make", args: nil},
 		{name: "make arbitrary target", tool: "make", args: []string{"deploy"}},
+		{name: "just default recipe", tool: "just", args: nil},
 		{name: "just arbitrary recipe", tool: "just", args: []string{"release"}},
 		{name: "shell operator", tool: "go", args: []string{"test", "./...", "|", "cat"}},
 	}
@@ -170,6 +172,33 @@ func TestVerifyTaskRejectsValidationPathsOutsideWorkDir(t *testing.T) {
 
 	task := baseValidationTask()
 	task.ValidationChecks = []state.ValidationCheck{{Type: "files_exist", Paths: []string{outsideFile}}}
+
+	result, err := eng.VerifyTask(context.Background(), task, baseValidationReport())
+	if err != nil {
+		t.Fatalf("VerifyTask: %v", err)
+	}
+	if result.Pass {
+		t.Fatal("VerifyTask unexpectedly passed")
+	}
+	if len(result.BlockingFindings) == 0 || result.BlockingFindings[0].Category != "validation_path" {
+		t.Fatalf("BlockingFindings = %+v, want validation_path rejection", result.BlockingFindings)
+	}
+}
+
+func TestVerifyTaskRejectsSymlinkedValidationPathOutsideWorkDir(t *testing.T) {
+	eng, _, baseDir := setupValidationEngine(t)
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	linkPath := filepath.Join(baseDir, "linked-outside")
+	if err := os.Symlink(outsideDir, linkPath); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	task := baseValidationTask()
+	task.ValidationChecks = []state.ValidationCheck{{Type: "files_exist", Paths: []string{filepath.Join("linked-outside", "outside.txt")}}}
 
 	result, err := eng.VerifyTask(context.Background(), task, baseValidationReport())
 	if err != nil {

@@ -72,10 +72,16 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 }
 
 func (d *Daemon) logf(format string, args ...any) {
+	if d.log == nil {
+		return
+	}
 	_, _ = fmt.Fprintf(d.log, format, args...)
 }
 
 func (d *Daemon) logln(args ...any) {
+	if d.log == nil {
+		return
+	}
 	_, _ = fmt.Fprintln(d.log, args...)
 }
 

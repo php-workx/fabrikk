@@ -112,6 +112,14 @@ func TestNewDaemonDefaultsNonPositiveFreshnessThreshold(t *testing.T) {
 	}
 }
 
+func TestDaemonLoggingHelpersIgnoreNilWriter(t *testing.T) {
+	d := NewDaemon(fixtureDaemonConfig(t))
+	d.log = nil
+
+	d.logf("ignored %s", "message")
+	d.logln("ignored", "message")
+}
+
 func TestDaemon_StartStop(t *testing.T) {
 	t.Setenv("FABRIKK_TEST_CLAUDE_FIXTURE", "1")
 

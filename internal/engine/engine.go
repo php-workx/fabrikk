@@ -703,7 +703,7 @@ func validateTargetValidationArgs(args []string) error {
 		return fmt.Errorf("only one fixed target is approved")
 	}
 	if len(args) == 0 {
-		return nil
+		return fmt.Errorf("default targets are not approved")
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return fmt.Errorf("flags are not approved")
@@ -726,6 +726,10 @@ func resolveWorktreePath(workDir, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve workdir: %w", err)
 	}
+	canonicalWorkDir, err := filepath.EvalSymlinks(absWorkDir)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize workdir: %w", err)
+	}
 	var target string
 	if filepath.IsAbs(path) {
 		target = filepath.Clean(path)
@@ -736,14 +740,46 @@ func resolveWorktreePath(workDir, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	rel, err := filepath.Rel(absWorkDir, absTarget)
+	canonicalTarget, err := canonicalizePathForContainment(absTarget)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize path: %w", err)
+	}
+	rel, err := filepath.Rel(canonicalWorkDir, canonicalTarget)
 	if err != nil {
 		return "", fmt.Errorf("relativize path: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes workdir")
 	}
-	return absTarget, nil
+	return canonicalTarget, nil
+}
+
+func canonicalizePathForContainment(path string) (string, error) {
+	existing := filepath.Clean(path)
+	var missing []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if os.IsNotExist(err) {
+			parent := filepath.Dir(existing)
+			if parent == existing {
+				return "", err
+			}
+			missing = append([]string{filepath.Base(existing)}, missing...)
+			existing = parent
+		} else {
+			return "", err
+		}
+	}
+
+	canonical, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	for _, part := range missing {
+		canonical = filepath.Join(canonical, part)
+	}
+	return canonical, nil
 }
 
 func validationFinding(task *state.Task, index int, category, detail string) *state.Finding {
