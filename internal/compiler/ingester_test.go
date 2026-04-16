@@ -200,6 +200,27 @@ func TestIngestSpecsWithFallbackSkipsOccupiedSyntheticIDs(t *testing.T) {
 	}
 }
 
+func TestIngestSpecsWithFallbackReservesExplicitIDsBeforeSynthesis(t *testing.T) {
+	dir := t.TempDir()
+
+	freeFormSpec := writeSpec(t, dir, "free-form.md", "## Goals\n\n1. Build the free-form capability.\n")
+	explicitSpec := writeSpec(t, dir, "explicit.md", "- **AT-FR-001**: Preserve the explicit requirement.\n")
+
+	reqs, _, err := compiler.IngestSpecsWithFallback([]string{freeFormSpec, explicitSpec})
+	if err != nil {
+		t.Fatalf("IngestSpecsWithFallback: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("got %d reqs, want 2", len(reqs))
+	}
+	if reqs[0].ID != testReqIDFR002 {
+		t.Fatalf("free-form req ID = %q, want AT-FR-002 because AT-FR-001 is reserved", reqs[0].ID)
+	}
+	if reqs[1].ID != testReqIDFR001 {
+		t.Fatalf("explicit req ID = %q, want AT-FR-001", reqs[1].ID)
+	}
+}
+
 func TestIngestSpecsCrossFileDuplicate(t *testing.T) {
 	dir := t.TempDir()
 

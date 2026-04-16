@@ -287,6 +287,13 @@ func TestValidateNormalizedArtifactCandidateFailureClasses(t *testing.T) {
 			category: "missing_requirement_field",
 		},
 		{
+			name: "source specs mismatch",
+			mutate: func(a *state.RunArtifact, m *state.SpecNormalizationSourceManifest) {
+				a.SourceSpecs[0].Fingerprint = "changed"
+			},
+			category: "source_specs_mismatch",
+		},
+		{
 			name: "invalid requirement id",
 			mutate: func(a *state.RunArtifact, m *state.SpecNormalizationSourceManifest) {
 				a.Requirements[0].ID = "REQ-001"

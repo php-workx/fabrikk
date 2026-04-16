@@ -383,6 +383,10 @@ func IngestSpecsWithFallback(paths []string) ([]state.Requirement, []state.Sourc
 	var sources []state.SourceSpec
 	globalSeen := make(map[string]string) // id -> source path
 
+	if err := reserveExplicitRequirementIDs(paths, globalSeen); err != nil {
+		return nil, nil, err
+	}
+
 	for _, path := range paths {
 		reqs, synthesized, err := ingestSpecWithFallback(path)
 		if err != nil {
@@ -394,7 +398,9 @@ func IngestSpecsWithFallback(paths []string) ([]state.Requirement, []state.Sourc
 				r.ID = nextSyntheticRequirementID(globalSeen)
 			}
 			if prev, exists := globalSeen[r.ID]; exists {
-				return nil, nil, fmt.Errorf("requirement %s found in both %s and %s", r.ID, prev, path)
+				if synthesized || prev != path {
+					return nil, nil, fmt.Errorf("requirement %s found in both %s and %s", r.ID, prev, path)
+				}
 			}
 			globalSeen[r.ID] = path
 			allReqs = append(allReqs, r)
@@ -411,6 +417,22 @@ func IngestSpecsWithFallback(paths []string) ([]state.Requirement, []state.Sourc
 	}
 
 	return allReqs, sources, nil
+}
+
+func reserveExplicitRequirementIDs(paths []string, globalSeen map[string]string) error {
+	for _, path := range paths {
+		reqs, _, err := parseExplicitRequirements(path)
+		if err != nil {
+			return err
+		}
+		for _, req := range reqs {
+			if prev, exists := globalSeen[req.ID]; exists {
+				return fmt.Errorf("requirement %s found in both %s and %s", req.ID, prev, path)
+			}
+			globalSeen[req.ID] = path
+		}
+	}
+	return nil
 }
 
 func nextSyntheticRequirementID(globalSeen map[string]string) string {

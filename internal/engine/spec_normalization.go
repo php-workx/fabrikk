@@ -428,6 +428,7 @@ func (e *Engine) validateNormalizedArtifactCandidate(artifact *state.RunArtifact
 		lines:   sourceLinesByPath(manifest),
 		ids:     make(map[string]struct{}, len(artifact.Requirements)),
 	}
+	validator.validateSourceSpecsParity(artifact.SourceSpecs)
 	validator.validateRequirements(artifact.Requirements)
 	validator.validateDependencies(artifact.Dependencies)
 	validator.validateBoundaries(artifact.Boundaries)
@@ -443,6 +444,35 @@ type specNormalizationValidator struct {
 	lines    map[string][]string
 	ids      map[string]struct{}
 	findings []state.ReviewFinding
+}
+
+func (v *specNormalizationValidator) validateSourceSpecsParity(sourceSpecs []state.SourceSpec) {
+	if len(sourceSpecs) != len(v.sources) {
+		v.addFinding("high", "source_specs_mismatch", "", fmt.Sprintf("normalized artifact has %d source_specs, reviewed manifest has %d sources", len(sourceSpecs), len(v.sources)), nil, "Keep source_specs in one-to-one path and fingerprint parity with the reviewed source manifest.")
+	}
+
+	seen := make(map[string]struct{}, len(sourceSpecs))
+	for _, spec := range sourceSpecs {
+		path := strings.TrimSpace(spec.Path)
+		if path == "" {
+			v.addFinding("high", "source_specs_mismatch", "", "normalized artifact contains a source_spec without a path", nil, "Every source_spec must identify a reviewed source manifest path.")
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			v.addFinding("high", "source_specs_mismatch", "", fmt.Sprintf("normalized artifact contains duplicate source_spec path %q", path), nil, "Each reviewed source manifest path must appear exactly once in source_specs.")
+			continue
+		}
+		seen[path] = struct{}{}
+
+		source, ok := v.sources[path]
+		if !ok {
+			v.addFinding("high", "source_specs_mismatch", "", fmt.Sprintf("normalized artifact source_spec path %q is not in the reviewed source manifest", path), nil, "Use only source_spec paths from the reviewed source manifest.")
+			continue
+		}
+		if spec.Fingerprint != source.Fingerprint {
+			v.addFinding("high", "source_specs_mismatch", "", fmt.Sprintf("normalized artifact source_spec %q fingerprint = %q, reviewed fingerprint = %q", path, spec.Fingerprint, source.Fingerprint), nil, "Preserve reviewed source manifest fingerprints exactly in source_specs.")
+		}
+	}
 }
 
 func (v *specNormalizationValidator) validateRequirements(requirements []state.Requirement) {

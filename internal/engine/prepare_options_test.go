@@ -199,7 +199,7 @@ func TestPrepareRoutingAlwaysWithConsentUsesLLM(t *testing.T) {
 
 func TestPrepareRoutingNormalizeNeverForcesOfflineDeterministic(t *testing.T) {
 	dir := t.TempDir()
-	specPath := writeSpecInput(t, dir, "spec.md", "- Import tasks from Markdown bullets.\n")
+	specPath := writeSpecInput(t, dir, "spec.md", "## Goals\n\n- Import tasks from Markdown bullets.\n")
 	eng := New(state.NewRunDir(dir, "placeholder"), dir)
 	opts := DefaultPrepareOptions()
 	opts.NormalizeMode = state.NormalizationNever
@@ -209,14 +209,14 @@ func TestPrepareRoutingNormalizeNeverForcesOfflineDeterministic(t *testing.T) {
 	})
 
 	result, err := eng.PrepareWithOptions(context.Background(), []string{specPath}, opts)
-	if err == nil {
-		t.Fatal("expected deterministic no requirements error")
+	if err != nil {
+		t.Fatalf("PrepareWithOptions: %v", err)
 	}
-	if result != nil {
-		t.Fatalf("result = %+v, want nil on deterministic failure", result)
+	if result.Status != PrepareStatusReady || result.Artifact == nil || len(result.Artifact.Requirements) != 1 {
+		t.Fatalf("result = %+v, want deterministic fallback artifact", result)
 	}
-	if !strings.Contains(err.Error(), "no requirements found") {
-		t.Fatalf("error = %q, want no requirements guidance", err.Error())
+	if !result.Artifact.Normalization.FallbackDeterministic || !result.Artifact.Normalization.UsedDeterministic {
+		t.Fatalf("normalization metadata = %+v, want offline deterministic fallback", result.Artifact.Normalization)
 	}
 }
 
@@ -352,6 +352,45 @@ func TestPrepareLLMConverterFailurePersistsInspectableFailureWithoutRunArtifact(
 	}
 	if status.State != state.RunBlocked || status.CurrentGate != "normalization_conversion" {
 		t.Fatalf("status = %+v, want blocked normalization_conversion gate", status)
+	}
+}
+
+func TestPrepareLLMVerifierErrorPersistsDraftArtifactAndStatus(t *testing.T) {
+	dir := t.TempDir()
+	specPath := writeSpecInput(t, dir, "spec.md", "The system should import tasks from Markdown sentences.\n")
+	eng := New(state.NewRunDir(dir, "placeholder"), dir)
+	opts := llmPrepareOptionsForTest()
+	raw := "not json"
+	stubAgentInvoke(t, func(ctx context.Context, backend *agentcli.CLIBackend, prompt string, timeoutSec int) (string, error) {
+		runID := promptLineValue(prompt, "Run ID: ")
+		switch {
+		case strings.Contains(prompt, "# spec normalization converter"):
+			sourcePath := promptLineValue(prompt, "## Source: ")
+			fingerprint := promptLineValue(prompt, "Fingerprint: ")
+			sourceText := strings.TrimPrefix(promptLineValue(prompt, "1 | "), "1 | ")
+			return specNormalizationArtifactJSONWithText(t, runID, sourcePath, fingerprint, sourceText), nil
+		case strings.Contains(prompt, "# spec normalization verifier"):
+			return raw, nil
+		default:
+			t.Fatalf("unexpected prompt:\n%s", prompt)
+			return "", nil
+		}
+	})
+
+	_, err := eng.PrepareWithOptions(context.Background(), []string{specPath}, opts)
+	if err == nil {
+		t.Fatal("expected verifier JSON failure")
+	}
+	assertFileContains(t, eng.RunDir.SpecNormalizationVerifierRaw(), raw)
+	if _, readErr := eng.RunDir.ReadArtifact(); readErr != nil {
+		t.Fatalf("read run artifact draft: %v", readErr)
+	}
+	status, readErr := eng.RunDir.ReadStatus()
+	if readErr != nil {
+		t.Fatalf("read status: %v", readErr)
+	}
+	if status.State != state.RunBlocked || status.CurrentGate != "normalization_verification" {
+		t.Fatalf("status = %+v, want blocked normalization_verification gate", status)
 	}
 }
 

@@ -107,7 +107,7 @@ func (e *Engine) PrepareWithOptions(ctx context.Context, specPaths []string, opt
 		}
 		return e.prepareWithLLMNormalization(ctx, specPaths, opts)
 	case state.NormalizationNever:
-		return e.prepareDeterministicSpecs(specPaths, opts, false)
+		return e.prepareDeterministicSpecs(specPaths, opts, true)
 	default:
 		return nil, fmt.Errorf("unknown normalization mode %q", opts.NormalizeMode)
 	}
@@ -261,6 +261,9 @@ func (e *Engine) prepareWithLLMNormalization(ctx context.Context, specPaths []st
 		MaxOutputBytes: opts.MaxOutputBytes,
 	})
 	if err != nil {
+		if persistErr := e.persistNormalizationVerifierFailure(runID, artifact, err); persistErr != nil {
+			return nil, errors.Join(err, persistErr)
+		}
 		return nil, err
 	}
 
@@ -299,6 +302,15 @@ func (e *Engine) prepareWithLLMNormalization(ctx context.Context, specPaths []st
 		Blocking:            blocking,
 		NextAction:          nextAction,
 	}, nil
+}
+
+func (e *Engine) persistNormalizationVerifierFailure(runID string, artifact *state.RunArtifact, verifyErr error) error {
+	if artifact != nil {
+		if err := e.RunDir.WriteArtifact(artifact); err != nil {
+			return fmt.Errorf("write normalized run artifact draft after verifier failure: %w", err)
+		}
+	}
+	return e.writePrepareStatus(runID, state.RunBlocked, "normalization_verification", []string{verifyErr.Error()}, "inspect verifier prompt and raw output before retrying")
 }
 
 func prepareAwaitingNormalizationConsent(opts PrepareOptions) *PrepareResult {
