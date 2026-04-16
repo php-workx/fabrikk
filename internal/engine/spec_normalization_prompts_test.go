@@ -3,6 +3,8 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 func TestLoadSpecNormalizationPrompts(t *testing.T) {
@@ -58,5 +60,38 @@ func TestLoadSpecNormalizationPrompts(t *testing.T) {
 		if !strings.Contains(verifier, want) {
 			t.Fatalf("verifier prompt missing %q", want)
 		}
+	}
+}
+
+func TestReviewedInputHashIncludesPromptHashes(t *testing.T) {
+	base := state.SpecNormalizationReviewedInput{
+		SourceManifestHash:     "sha256:manifest",
+		NormalizedArtifactHash: "sha256:artifact",
+		ConverterPromptHash:    "sha256:converter-v1",
+		VerifierPromptHash:     "sha256:verifier-v1",
+	}
+	first, err := hashSpecNormalizationReviewedInput(base)
+	if err != nil {
+		t.Fatalf("hashSpecNormalizationReviewedInput: %v", err)
+	}
+
+	changedConverter := base
+	changedConverter.ConverterPromptHash = "sha256:converter-v2"
+	second, err := hashSpecNormalizationReviewedInput(changedConverter)
+	if err != nil {
+		t.Fatalf("hashSpecNormalizationReviewedInput changed converter: %v", err)
+	}
+	if first == second {
+		t.Fatal("reviewed input hash did not change when converter prompt hash changed")
+	}
+
+	changedVerifier := base
+	changedVerifier.VerifierPromptHash = "sha256:verifier-v2"
+	third, err := hashSpecNormalizationReviewedInput(changedVerifier)
+	if err != nil {
+		t.Fatalf("hashSpecNormalizationReviewedInput changed verifier: %v", err)
+	}
+	if first == third {
+		t.Fatal("reviewed input hash did not change when verifier prompt hash changed")
 	}
 }

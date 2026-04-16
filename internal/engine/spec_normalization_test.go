@@ -336,7 +336,7 @@ func TestVerifyNormalizedArtifactCandidatePassPersistsPromptRawAndReview(t *test
 	bundle := newSpecNormalizationBundle(t, "Users can import tasks.")
 	artifact := baseSpecNormalizationArtifact("run-123", bundle.Manifest.Sources[0].Path, bundle.Manifest.Sources[0].Fingerprint)
 	artifactHash := testNormalizedArtifactHash(t, &artifact)
-	reviewedInputHash := testReviewedInputHash(t, artifactHash, bundle.ManifestHash)
+	reviewedInputHash := testReviewedInputHash(t, bundle, &artifact, artifactHash)
 	raw := specNormalizationReviewJSON(t, "run-123", state.ReviewPass, artifactHash, bundle.ManifestHash, reviewedInputHash, nil)
 
 	var gotPrompt string
@@ -385,7 +385,7 @@ func TestVerifyNormalizedArtifactCandidateStatusesAndFindings(t *testing.T) {
 			bundle := newSpecNormalizationBundle(t, "Users can import tasks.")
 			artifact := baseSpecNormalizationArtifact("run-123", bundle.Manifest.Sources[0].Path, bundle.Manifest.Sources[0].Fingerprint)
 			artifactHash := testNormalizedArtifactHash(t, &artifact)
-			reviewedInputHash := testReviewedInputHash(t, artifactHash, bundle.ManifestHash)
+			reviewedInputHash := testReviewedInputHash(t, bundle, &artifact, artifactHash)
 			findings := []state.ReviewFinding{
 				{FindingID: "snr-001", Severity: "high", Category: "lost_information", Summary: "Lost scope."},
 				{FindingID: "snr-002", Severity: "high", Category: "unsupported_addition", Summary: "Added scope."},
@@ -439,7 +439,7 @@ func TestVerifyNormalizedArtifactCandidateRejectsHashMismatch(t *testing.T) {
 	bundle := newSpecNormalizationBundle(t, "Users can import tasks.")
 	artifact := baseSpecNormalizationArtifact("run-123", bundle.Manifest.Sources[0].Path, bundle.Manifest.Sources[0].Fingerprint)
 	artifactHash := testNormalizedArtifactHash(t, &artifact)
-	reviewedInputHash := testReviewedInputHash(t, artifactHash, bundle.ManifestHash)
+	reviewedInputHash := testReviewedInputHash(t, bundle, &artifact, artifactHash)
 	raw := specNormalizationReviewJSON(t, "run-123", state.ReviewPass, "sha256:wrong", bundle.ManifestHash, reviewedInputHash, nil)
 	stubAgentInvoke(t, func(ctx context.Context, backend *agentcli.CLIBackend, prompt string, timeoutSec int) (string, error) {
 		return raw, nil
@@ -459,7 +459,7 @@ func TestVerifyNormalizedArtifactCandidateRejectsArtifactMutationOutput(t *testi
 	bundle := newSpecNormalizationBundle(t, "Users can import tasks.")
 	artifact := baseSpecNormalizationArtifact("run-123", bundle.Manifest.Sources[0].Path, bundle.Manifest.Sources[0].Fingerprint)
 	artifactHash := testNormalizedArtifactHash(t, &artifact)
-	reviewedInputHash := testReviewedInputHash(t, artifactHash, bundle.ManifestHash)
+	reviewedInputHash := testReviewedInputHash(t, bundle, &artifact, artifactHash)
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(specNormalizationReviewJSON(t, "run-123", state.ReviewPass, artifactHash, bundle.ManifestHash, reviewedInputHash, nil)), &payload); err != nil {
 		t.Fatal(err)
@@ -625,18 +625,12 @@ func testNormalizedArtifactHash(t *testing.T, artifact *state.RunArtifact) strin
 	return "sha256:" + state.SHA256Bytes(data)
 }
 
-func testReviewedInputHash(t *testing.T, artifactHash, manifestHash string) string {
+func testReviewedInputHash(t *testing.T, bundle *specNormalizationSourceBundle, artifact *state.RunArtifact, artifactHash string) string {
 	t.Helper()
 
-	data, err := json.Marshal(struct {
-		NormalizedArtifactHash string `json:"normalized_artifact_hash"`
-		SourceManifestHash     string `json:"source_manifest_hash"`
-	}{
-		NormalizedArtifactHash: artifactHash,
-		SourceManifestHash:     manifestHash,
-	})
+	boundary, err := specNormalizationReviewedBoundary("run-123", bundle, artifact, artifactHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "sha256:" + state.SHA256Bytes(data)
+	return boundary.ReviewedInputHash
 }

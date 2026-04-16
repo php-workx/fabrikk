@@ -677,6 +677,8 @@ type SpecNormalizationReview struct {
 	Summary                string          `json:"summary"`
 	NormalizedArtifactHash string          `json:"normalized_artifact_hash"`
 	SourceManifestHash     string          `json:"source_manifest_hash"`
+	ConverterPromptHash    string          `json:"converter_prompt_hash,omitempty"`
+	VerifierPromptHash     string          `json:"verifier_prompt_hash,omitempty"`
 	ReviewedInputHash      string          `json:"reviewed_input_hash"`
 	ReviewedAt             time.Time       `json:"reviewed_at"`
 	BlockingFindings       []ReviewFinding `json:"blocking_findings,omitempty"`
@@ -766,13 +768,16 @@ type ArtifactApproval struct {
 
 // RunArtifactApproval records explicit approval of a normalized run artifact.
 type RunArtifactApproval struct {
-	SchemaVersion          string    `json:"schema_version"`
-	RunID                  string    `json:"run_id"`
-	ArtifactType           string    `json:"artifact_type"`
-	NormalizedArtifactHash string    `json:"normalized_artifact_hash"`
-	SourceManifestHash     string    `json:"source_manifest_hash"`
-	ReviewedInputHash      string    `json:"reviewed_input_hash"`
-	ApprovedAt             time.Time `json:"approved_at"`
+	SchemaVersion          string       `json:"schema_version"`
+	RunID                  string       `json:"run_id"`
+	ArtifactType           string       `json:"artifact_type"`
+	NormalizedArtifactHash string       `json:"normalized_artifact_hash"`
+	SourceManifestHash     string       `json:"source_manifest_hash"`
+	ReviewedInputHash      string       `json:"reviewed_input_hash"`
+	ReviewStatus           ReviewStatus `json:"review_status"`
+	AcceptedNeedsRevision  bool         `json:"accepted_needs_revision,omitempty"`
+	ApprovedBy             string       `json:"approved_by,omitempty"`
+	ApprovedAt             time.Time    `json:"approved_at"`
 }
 
 // EngineInfo records the engine process metadata (spec section 2.4).

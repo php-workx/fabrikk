@@ -138,11 +138,11 @@ func (e *Engine) verifyNormalizedArtifactCandidate(ctx context.Context, runID st
 	if err != nil {
 		return nil, err
 	}
-	reviewedInputHash, err := hashSpecNormalizationReviewedInput(artifactHash, bundle.ManifestHash)
+	boundary, err := specNormalizationReviewedBoundary(runID, bundle, artifact, artifactHash)
 	if err != nil {
 		return nil, err
 	}
-	prompt, err := buildSpecNormalizationVerifierPrompt(runID, bundle, artifact, artifactHash, reviewedInputHash)
+	prompt, err := buildSpecNormalizationVerifierPrompt(runID, bundle, artifact, artifactHash, boundary.ReviewedInputHash)
 	if err != nil {
 		return nil, err
 	}
@@ -181,13 +181,46 @@ func (e *Engine) verifyNormalizedArtifactCandidate(ctx context.Context, runID st
 	if err := json.Unmarshal([]byte(jsonBlock), &review); err != nil {
 		return nil, fmt.Errorf("parse spec normalization verifier JSON: %w", err)
 	}
-	if err := validateSpecNormalizationReview(runID, artifactHash, bundle.ManifestHash, reviewedInputHash, &review); err != nil {
+	if err := validateSpecNormalizationReview(runID, artifactHash, bundle.ManifestHash, boundary.ReviewedInputHash, &review); err != nil {
 		return nil, err
 	}
+	review.ConverterPromptHash = boundary.ConverterPromptHash
+	review.VerifierPromptHash = boundary.VerifierPromptHash
 	if err := e.RunDir.WriteSpecNormalizationReview(&review); err != nil {
 		return nil, fmt.Errorf("write spec normalization review: %w", err)
 	}
 	return &review, nil
+}
+
+type specNormalizationBoundary struct {
+	ConverterPromptHash string
+	VerifierPromptHash  string
+	ReviewedInputHash   string
+}
+
+func specNormalizationReviewedBoundary(runID string, bundle *specNormalizationSourceBundle, artifact *state.RunArtifact, artifactHash string) (specNormalizationBoundary, error) {
+	converterPrompt, err := buildSpecNormalizationConverterPrompt(runID, bundle)
+	if err != nil {
+		return specNormalizationBoundary{}, err
+	}
+	verifierPromptSeed, err := buildSpecNormalizationVerifierPrompt(runID, bundle, artifact, artifactHash, "")
+	if err != nil {
+		return specNormalizationBoundary{}, err
+	}
+	boundary := specNormalizationBoundary{
+		ConverterPromptHash: hashSpecNormalizationPromptText(converterPrompt),
+		VerifierPromptHash:  hashSpecNormalizationPromptText(verifierPromptSeed),
+	}
+	boundary.ReviewedInputHash, err = hashSpecNormalizationReviewedInput(state.SpecNormalizationReviewedInput{
+		SourceManifestHash:     bundle.ManifestHash,
+		NormalizedArtifactHash: artifactHash,
+		ConverterPromptHash:    boundary.ConverterPromptHash,
+		VerifierPromptHash:     boundary.VerifierPromptHash,
+	})
+	if err != nil {
+		return specNormalizationBoundary{}, err
+	}
+	return boundary, nil
 }
 
 func buildSpecNormalizationConverterPrompt(runID string, bundle *specNormalizationSourceBundle) (string, error) {
@@ -299,14 +332,22 @@ func hashNormalizedArtifactCandidate(artifact *state.RunArtifact) (string, error
 	return sha256Prefix + state.SHA256Bytes(data), nil
 }
 
-func hashSpecNormalizationReviewedInput(artifactHash, manifestHash string) (string, error) {
-	data, err := json.Marshal(struct {
-		NormalizedArtifactHash string `json:"normalized_artifact_hash"`
-		SourceManifestHash     string `json:"source_manifest_hash"`
-	}{
-		NormalizedArtifactHash: artifactHash,
-		SourceManifestHash:     manifestHash,
-	})
+func hashSpecNormalizationPromptText(prompt string) string {
+	return sha256Prefix + state.SHA256Bytes([]byte(normalizeSpecNormalizationPromptForHash(prompt)))
+}
+
+func normalizeSpecNormalizationPromptForHash(prompt string) string {
+	lines := strings.Split(prompt, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "Reviewed input hash: ") {
+			lines[i] = "Reviewed input hash: <self>"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func hashSpecNormalizationReviewedInput(input state.SpecNormalizationReviewedInput) (string, error) {
+	data, err := json.Marshal(input)
 	if err != nil {
 		return "", fmt.Errorf("marshal spec normalization reviewed input: %w", err)
 	}

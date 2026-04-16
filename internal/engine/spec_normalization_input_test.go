@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/php-workx/fabrikk/internal/state"
 )
 
 const (
@@ -78,6 +80,27 @@ func TestBuildSpecNormalizationSourceBundleMultiFileHashStable(t *testing.T) {
 	}
 	if first.Manifest.Sources[0].Path != spec1 || first.Manifest.Sources[1].Path != spec2 {
 		t.Fatalf("source order = %+v, want input order", first.Manifest.Sources)
+	}
+}
+
+func TestSourceManifestHashIgnoresLineNumberedText(t *testing.T) {
+	dir := t.TempDir()
+	spec := writeSpecInput(t, dir, "spec.md", "Alpha\n")
+
+	bundle, err := buildSpecNormalizationSourceBundle(specNormalizationTestRunID, []string{spec}, 1024)
+	if err != nil {
+		t.Fatalf("buildSpecNormalizationSourceBundle: %v", err)
+	}
+	changed := *bundle.Manifest
+	changed.Sources = append([]state.SourceManifestEntry(nil), bundle.Manifest.Sources...)
+	changed.Sources[0].LineNumberedText = "1 | Tampered audit text"
+	hash, err := hashSpecNormalizationSourceManifest(&changed)
+	if err != nil {
+		t.Fatalf("hashSpecNormalizationSourceManifest: %v", err)
+	}
+
+	if hash != bundle.ManifestHash {
+		t.Fatalf("manifest hash changed with line-numbered text: %q != %q", hash, bundle.ManifestHash)
 	}
 }
 

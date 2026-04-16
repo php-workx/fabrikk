@@ -277,7 +277,7 @@ func (e *Engine) prepareWithLLMNormalization(ctx context.Context, specPaths []st
 		runState = state.RunAwaitingClarification
 		gate = "normalization_review"
 		blocking = true
-		nextAction = "revise the source spec or explicitly approve the normalized artifact candidate after review"
+		nextAction = "revise the source spec or approve intentionally with fabrikk artifact approve <run-id> --accept-needs-revision"
 	}
 	if err := e.RunDir.WriteArtifact(artifact); err != nil {
 		return nil, fmt.Errorf("write normalized run artifact draft: %w", err)

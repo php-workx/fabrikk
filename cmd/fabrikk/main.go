@@ -456,7 +456,7 @@ func reviewNextAction(runDir *state.RunDir, artifact *state.RunArtifact) string 
 		case state.ReviewPass:
 			return fmt.Sprintf("fabrikk artifact approve %s", artifact.RunID)
 		case state.ReviewNeedsRevision:
-			return "revise the source spec or intentionally approve the draft after reviewing findings"
+			return fmt.Sprintf("revise the source spec or run fabrikk artifact approve %s --accept-needs-revision after reviewing findings", artifact.RunID)
 		case state.ReviewFail:
 			return "revise the source spec before approval"
 		}
@@ -466,16 +466,25 @@ func reviewNextAction(runDir *state.RunDir, artifact *state.RunArtifact) string 
 
 func cmdArtifact(ctx context.Context, args []string) error {
 	if len(args) < 2 || args[0] != "approve" {
-		return fmt.Errorf("usage: fabrikk artifact approve <run-id>")
+		return fmt.Errorf("usage: fabrikk artifact approve <run-id> [--accept-needs-revision]")
 	}
 	runID := args[1]
+	options := engine.RunArtifactApprovalOptions{}
+	for _, arg := range args[2:] {
+		switch arg {
+		case "--accept-needs-revision":
+			options.AcceptNeedsRevision = true
+		default:
+			return fmt.Errorf("unknown artifact approve flag %q", arg)
+		}
+	}
 	wd, err := workDir()
 	if err != nil {
 		return err
 	}
 	runDir := state.NewRunDir(wd, runID)
 	eng := engine.New(runDir, wd)
-	approval, err := eng.ApproveRunArtifact(ctx, "user")
+	approval, err := eng.ApproveRunArtifactWithOptions(ctx, "user", options)
 	if err != nil {
 		return err
 	}

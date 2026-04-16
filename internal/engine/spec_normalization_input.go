@@ -80,7 +80,16 @@ func buildSpecNormalizationSourceBundle(runID string, specPaths []string, maxByt
 }
 
 func hashSpecNormalizationSourceManifest(manifest *state.SpecNormalizationSourceManifest) (string, error) {
-	data, err := json.Marshal(manifest)
+	if manifest == nil {
+		return "", fmt.Errorf("marshal source manifest: missing manifest")
+	}
+	metadata := *manifest
+	metadata.Sources = make([]state.SourceManifestEntry, len(manifest.Sources))
+	for i, source := range manifest.Sources {
+		source.LineNumberedText = ""
+		metadata.Sources[i] = source
+	}
+	data, err := json.Marshal(metadata)
 	if err != nil {
 		return "", fmt.Errorf("marshal source manifest: %w", err)
 	}

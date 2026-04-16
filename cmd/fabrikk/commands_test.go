@@ -278,7 +278,7 @@ func TestCmdReviewShowsNormalizationEvidence(t *testing.T) {
 		})
 
 		assertContains(t, output, "Normalization review: needs_revision")
-		assertContains(t, output, "revise the source spec or intentionally approve")
+		assertContains(t, output, "fabrikk artifact approve run-revision --accept-needs-revision")
 	})
 
 	t.Run("fail", func(t *testing.T) {
@@ -341,94 +341,116 @@ func TestCmdReviewShowsNormalizationEvidence(t *testing.T) {
 	})
 }
 
-func TestCmdArtifactApprove(t *testing.T) {
-	t.Run("success", func(t *testing.T) {
-		dir := t.TempDir()
-		withWorkingDir(t, dir)
-		writeNormalizationReviewFixture(t, dir, "run-pass", state.ReviewPass, true, false)
+func TestCmdArtifactApproveSuccess(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-pass", state.ReviewPass, true, false)
 
-		output := captureStdout(t, func() {
-			if err := cmdArtifact(context.Background(), []string{"approve", "run-pass"}); err != nil {
-				t.Fatalf("cmdArtifact: %v", err)
-			}
-		})
-
-		assertContains(t, output, "Run artifact approved: run-pass")
-		runDir := state.NewRunDir(dir, "run-pass")
-		if _, err := runDir.ReadRunArtifactApproval(); err != nil {
-			t.Fatalf("read run artifact approval: %v", err)
-		}
-		artifact, err := runDir.ReadArtifact()
-		if err != nil {
-			t.Fatalf("read artifact: %v", err)
-		}
-		if artifact.Normalization.ApprovedAt == nil || artifact.Normalization.ReviewedInputHash == "" {
-			t.Fatalf("normalization metadata = %+v", artifact.Normalization)
+	output := captureStdout(t, func() {
+		if err := cmdArtifact(context.Background(), []string{"approve", "run-pass"}); err != nil {
+			t.Fatalf("cmdArtifact: %v", err)
 		}
 	})
 
-	t.Run("missing review", func(t *testing.T) {
-		dir := t.TempDir()
-		withWorkingDir(t, dir)
-		writeNormalizationReviewFixture(t, dir, "run-missing", state.ReviewPass, false, false)
+	assertContains(t, output, "Run artifact approved: run-pass")
+	runDir := state.NewRunDir(dir, "run-pass")
+	if _, err := runDir.ReadRunArtifactApproval(); err != nil {
+		t.Fatalf("read run artifact approval: %v", err)
+	}
+	artifact, err := runDir.ReadArtifact()
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if artifact.Normalization.ApprovedAt == nil || artifact.Normalization.ReviewedAt == nil || artifact.Normalization.ReviewedInputHash == "" {
+		t.Fatalf("normalization metadata = %+v", artifact.Normalization)
+	}
+}
 
-		err := cmdArtifact(context.Background(), []string{"approve", "run-missing"})
-		if err == nil || !strings.Contains(err.Error(), "normalization review") {
-			t.Fatalf("err = %v, want missing review error", err)
+func TestCmdArtifactApproveRejectsMissingReview(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-missing", state.ReviewPass, false, false)
+
+	err := cmdArtifact(context.Background(), []string{"approve", "run-missing"})
+	if err == nil || !strings.Contains(err.Error(), "normalization review") {
+		t.Fatalf("err = %v, want missing review error", err)
+	}
+}
+
+func TestCmdArtifactApproveRejectsFailingReview(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-fail", state.ReviewFail, true, false)
+
+	err := cmdArtifact(context.Background(), []string{"approve", "run-fail"})
+	if err == nil || !strings.Contains(err.Error(), "not passing") {
+		t.Fatalf("err = %v, want failing review error", err)
+	}
+}
+
+func TestCmdArtifactApproveRejectsStaleSource(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	specPath := writeNormalizationReviewFixture(t, dir, "run-stale", state.ReviewPass, true, false)
+	writeFile(t, specPath, "Changed source.\n")
+
+	err := cmdArtifact(context.Background(), []string{"approve", "run-stale"})
+	if err == nil || !strings.Contains(err.Error(), "source changed") {
+		t.Fatalf("err = %v, want stale source error", err)
+	}
+}
+
+func TestCmdArtifactApproveNeedsRevisionRequiresOverride(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-needs-revision", state.ReviewNeedsRevision, true, false)
+
+	err := cmdArtifact(context.Background(), []string{"approve", "run-needs-revision"})
+	if err == nil || !strings.Contains(err.Error(), "--accept-needs-revision") {
+		t.Fatalf("err = %v, want explicit override guidance", err)
+	}
+}
+
+func TestCmdArtifactApproveNeedsRevisionOverride(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-needs-revision-override", state.ReviewNeedsRevision, true, false)
+
+	output := captureStdout(t, func() {
+		if err := cmdArtifact(context.Background(), []string{"approve", "run-needs-revision-override", "--accept-needs-revision"}); err != nil {
+			t.Fatalf("cmdArtifact: %v", err)
 		}
 	})
 
-	t.Run("failing review", func(t *testing.T) {
-		dir := t.TempDir()
-		withWorkingDir(t, dir)
-		writeNormalizationReviewFixture(t, dir, "run-fail", state.ReviewFail, true, false)
+	assertContains(t, output, "Run artifact approved: run-needs-revision-override")
+	runDir := state.NewRunDir(dir, "run-needs-revision-override")
+	approval, err := runDir.ReadRunArtifactApproval()
+	if err != nil {
+		t.Fatalf("read run artifact approval: %v", err)
+	}
+	if !approval.AcceptedNeedsRevision || approval.ReviewStatus != state.ReviewNeedsRevision {
+		t.Fatalf("approval = %+v, want needs_revision override recorded", approval)
+	}
+}
 
-		err := cmdArtifact(context.Background(), []string{"approve", "run-fail"})
-		if err == nil || !strings.Contains(err.Error(), "not passing") {
-			t.Fatalf("err = %v, want failing review error", err)
-		}
-	})
+func TestCmdArtifactApproveRejectsChangedCandidate(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	writeNormalizationReviewFixture(t, dir, "run-changed", state.ReviewPass, true, false)
+	runDir := state.NewRunDir(dir, "run-changed")
+	candidate, err := runDir.ReadNormalizedArtifactCandidate()
+	if err != nil {
+		t.Fatalf("read candidate: %v", err)
+	}
+	candidate.Requirements[0].Text = "Changed requirement."
+	if err := runDir.WriteNormalizedArtifactCandidate(candidate); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
 
-	t.Run("stale source", func(t *testing.T) {
-		dir := t.TempDir()
-		withWorkingDir(t, dir)
-		specPath := writeNormalizationReviewFixture(t, dir, "run-stale", state.ReviewPass, true, false)
-		writeFile(t, specPath, "Changed source.\n")
-		manifest := state.NewRunDir(dir, "run-stale")
-		m, err := manifest.ReadSpecNormalizationSourceManifest()
-		if err != nil {
-			t.Fatalf("read manifest: %v", err)
-		}
-		m.Sources[0].LineNumberedText = "1 | Changed source."
-		if err := manifest.WriteSpecNormalizationSourceManifest(m); err != nil {
-			t.Fatalf("write manifest: %v", err)
-		}
-
-		err = cmdArtifact(context.Background(), []string{"approve", "run-stale"})
-		if err == nil || !strings.Contains(err.Error(), "source_manifest_hash") {
-			t.Fatalf("err = %v, want stale source error", err)
-		}
-	})
-
-	t.Run("changed candidate", func(t *testing.T) {
-		dir := t.TempDir()
-		withWorkingDir(t, dir)
-		writeNormalizationReviewFixture(t, dir, "run-changed", state.ReviewPass, true, false)
-		runDir := state.NewRunDir(dir, "run-changed")
-		candidate, err := runDir.ReadNormalizedArtifactCandidate()
-		if err != nil {
-			t.Fatalf("read candidate: %v", err)
-		}
-		candidate.Requirements[0].Text = "Changed requirement."
-		if err := runDir.WriteNormalizedArtifactCandidate(candidate); err != nil {
-			t.Fatalf("write candidate: %v", err)
-		}
-
-		err = cmdArtifact(context.Background(), []string{"approve", "run-changed"})
-		if err == nil || !strings.Contains(err.Error(), "normalized_artifact_hash") {
-			t.Fatalf("err = %v, want changed candidate error", err)
-		}
-	})
+	err = cmdArtifact(context.Background(), []string{"approve", "run-changed"})
+	if err == nil || !strings.Contains(err.Error(), "normalized_artifact_hash") {
+		t.Fatalf("err = %v, want changed candidate error", err)
+	}
 }
 
 func TestNormalizationCLISmokePrepareReviewArtifactApprove(t *testing.T) {
@@ -636,10 +658,21 @@ func writeNormalizationReviewFixture(t *testing.T, dir, runID string, status sta
 		if err := runDir.WriteNormalizedArtifactCandidate(artifact); err != nil {
 			t.Fatalf("write normalized candidate: %v", err)
 		}
+		if err := runDir.WriteSpecNormalizationConverterPrompt([]byte("converter")); err != nil {
+			t.Fatalf("write converter prompt: %v", err)
+		}
+		if err := runDir.WriteSpecNormalizationVerifierPrompt([]byte("verifier")); err != nil {
+			t.Fatalf("write verifier prompt: %v", err)
+		}
 		if withReview {
 			artifactHash := testCommandNormalizedArtifactHash(t, artifact)
 			manifestHash := testCommandSourceManifestHash(t, manifest)
-			reviewedInputHash := testCommandReviewedInputHash(t, artifactHash, manifestHash)
+			reviewedInputHash := testCommandReviewedInputHash(t, state.SpecNormalizationReviewedInput{
+				NormalizedArtifactHash: artifactHash,
+				SourceManifestHash:     manifestHash,
+				ConverterPromptHash:    testCommandPromptHash(t, "converter"),
+				VerifierPromptHash:     testCommandPromptHash(t, "verifier"),
+			})
 			findings := []state.ReviewFinding(nil)
 			if status != state.ReviewPass {
 				findings = []state.ReviewFinding{{
@@ -680,22 +713,27 @@ func testCommandNormalizedArtifactHash(t *testing.T, artifact *state.RunArtifact
 
 func testCommandSourceManifestHash(t *testing.T, manifest *state.SpecNormalizationSourceManifest) string {
 	t.Helper()
-	data, err := json.Marshal(manifest)
+	sanitized := *manifest
+	sanitized.Sources = make([]state.SourceManifestEntry, len(manifest.Sources))
+	for i, source := range manifest.Sources {
+		source.LineNumberedText = ""
+		sanitized.Sources[i] = source
+	}
+	data, err := json.Marshal(sanitized)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return "sha256:" + state.SHA256Bytes(data)
 }
 
-func testCommandReviewedInputHash(t *testing.T, artifactHash, manifestHash string) string {
+func testCommandPromptHash(t *testing.T, prompt string) string {
 	t.Helper()
-	data, err := json.Marshal(struct {
-		NormalizedArtifactHash string `json:"normalized_artifact_hash"`
-		SourceManifestHash     string `json:"source_manifest_hash"`
-	}{
-		NormalizedArtifactHash: artifactHash,
-		SourceManifestHash:     manifestHash,
-	})
+	return "sha256:" + state.SHA256Bytes([]byte(prompt))
+}
+
+func testCommandReviewedInputHash(t *testing.T, reviewedInput state.SpecNormalizationReviewedInput) string {
+	t.Helper()
+	data, err := json.Marshal(reviewedInput)
 	if err != nil {
 		t.Fatal(err)
 	}
