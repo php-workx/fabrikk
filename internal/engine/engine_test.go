@@ -198,6 +198,46 @@ func TestPrepareAndCompile(t *testing.T) {
 	}
 }
 
+func TestReconcileRunStatusPreservesArtifactApprovalGate(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-artifact-approval"
+	runDir := state.NewRunDir(dir, runID)
+	if err := runDir.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	artifact := &state.RunArtifact{
+		SchemaVersion: "0.1",
+		RunID:         runID,
+		SourceSpecs:   []state.SourceSpec{{Path: "spec.md", Fingerprint: "sha256:spec"}},
+	}
+	if err := runDir.WriteArtifact(artifact); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+
+	if err := runDir.WriteStatus(&state.RunStatus{
+		RunID:              runID,
+		State:              state.RunAwaitingArtifactApproval,
+		CurrentGate:        "awaiting_artifact_approval",
+		TaskCountsByState:  map[string]int{},
+		LastTransitionTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("WriteStatus: %v", err)
+	}
+
+	eng := engine.New(runDir, dir)
+	status, err := eng.ReconcileRunStatus()
+	if err != nil {
+		t.Fatalf("ReconcileRunStatus: %v", err)
+	}
+	if status.State != state.RunAwaitingArtifactApproval {
+		t.Fatalf("status state after ReconcileRunStatus = %s, want %s", status.State, state.RunAwaitingArtifactApproval)
+	}
+	if status.CurrentGate != "awaiting_artifact_approval" {
+		t.Fatalf("current gate after ReconcileRunStatus = %q, want awaiting_artifact_approval", status.CurrentGate)
+	}
+}
+
 // AT-TS-001: Preparing the same artifact twice yields the same tasks.
 func TestCompileDeterminism(t *testing.T) {
 	dir := t.TempDir()

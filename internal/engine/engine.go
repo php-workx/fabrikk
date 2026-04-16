@@ -65,7 +65,61 @@ func New(runDir *state.RunDir, workDir string) *Engine {
 
 // Prepare ingests spec files and creates a draft run artifact (spec section 7.1).
 func (e *Engine) Prepare(ctx context.Context, specPaths []string) (*state.RunArtifact, error) {
-	reqs, sources, err := compiler.IngestSpecs(specPaths)
+	result, err := e.PrepareWithOptions(ctx, specPaths, DefaultPrepareOptions())
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.Artifact == nil {
+		nextAction := "prepare completed without a run artifact"
+		if result != nil && result.NextAction != "" {
+			nextAction = result.NextAction
+		}
+		return nil, fmt.Errorf("%s", nextAction)
+	}
+	return result.Artifact, nil
+}
+
+// PrepareWithOptions ingests spec files and returns an inspectable prepare result.
+func (e *Engine) PrepareWithOptions(ctx context.Context, specPaths []string, opts PrepareOptions) (*PrepareResult, error) {
+	opts = opts.withDefaults()
+
+	scan, err := compiler.ScanExplicitRequirementIDs(specPaths)
+	if err != nil {
+		return nil, fmt.Errorf("ingest specs: %w", err)
+	}
+
+	switch opts.NormalizeMode {
+	case state.NormalizationAuto:
+		if scan.AllFilesHaveExplicitIDs {
+			return e.prepareDeterministicSpecs(specPaths, opts, false)
+		}
+		if !opts.LLMConsent {
+			return prepareAwaitingNormalizationConsent(opts), nil
+		}
+		return e.prepareWithLLMNormalization(ctx, specPaths, opts)
+	case state.NormalizationAlways:
+		if !opts.LLMConsent {
+			return prepareAwaitingNormalizationConsent(opts), nil
+		}
+		return e.prepareWithLLMNormalization(ctx, specPaths, opts)
+	case state.NormalizationNever:
+		return e.prepareDeterministicSpecs(specPaths, opts, false)
+	default:
+		return nil, fmt.Errorf("unknown normalization mode %q", opts.NormalizeMode)
+	}
+}
+
+func (e *Engine) prepareDeterministicSpecs(specPaths []string, opts PrepareOptions, fallback bool) (*PrepareResult, error) {
+	var (
+		reqs    []state.Requirement
+		sources []state.SourceSpec
+		err     error
+	)
+	if fallback {
+		reqs, sources, err = compiler.IngestSpecsWithFallback(specPaths)
+	} else {
+		reqs, sources, err = compiler.IngestSpecs(specPaths)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ingest specs: %w", err)
 	}
@@ -84,7 +138,12 @@ func (e *Engine) Prepare(ctx context.Context, specPaths []string) (*state.RunArt
 		RunID:         runID,
 		SourceSpecs:   sources,
 		Requirements:  reqs,
-		RiskProfile:   "standard",
+		Normalization: state.NormalizationMetadata{
+			Mode:                  opts.NormalizeMode,
+			UsedDeterministic:     true,
+			FallbackDeterministic: fallback,
+		},
+		RiskProfile: "standard",
 		RoutingPolicy: state.RoutingPolicy{
 			DefaultImplementer: "claude-sonnet",
 		},
@@ -121,7 +180,172 @@ func (e *Engine) Prepare(ctx context.Context, specPaths []string) (*state.RunArt
 		Detail:    "awaiting_approval",
 	})
 
-	return artifact, nil
+	return &PrepareResult{
+		RunID:      runID,
+		Artifact:   artifact,
+		Status:     PrepareStatusReady,
+		RunDir:     e.RunDir,
+		Blocking:   false,
+		NextAction: "review and approve the prepared run artifact",
+	}, nil
+}
+
+func (e *Engine) prepareWithLLMNormalization(ctx context.Context, specPaths []string, opts PrepareOptions) (*PrepareResult, error) {
+	runID := fmt.Sprintf("run-%d", time.Now().Unix())
+
+	e.RunDir = state.NewRunDir(e.WorkDir, runID)
+	if err := e.RunDir.Init(); err != nil {
+		return nil, fmt.Errorf("init run dir: %w", err)
+	}
+
+	bundle, err := buildSpecNormalizationSourceBundle(runID, specPaths, opts.MaxInputBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.RunDir.WriteSpecNormalizationSourceManifest(bundle.Manifest); err != nil {
+		return nil, fmt.Errorf("write spec normalization source manifest: %w", err)
+	}
+
+	artifact, err := e.convertSpecsToArtifact(ctx, runID, bundle, specNormalizationConverterOptions{
+		BackendName:    opts.ConverterBackendName,
+		TimeoutSeconds: opts.ConverterTimeoutSeconds,
+		MaxOutputBytes: opts.MaxOutputBytes,
+	})
+	if err != nil {
+		if opts.FallbackDeterministic {
+			return e.prepareDeterministicSpecs(specPaths, opts, true)
+		}
+		_ = e.writePrepareStatus(runID, state.RunBlocked, "normalization_conversion", []string{err.Error()}, "inspect converter prompt and raw output before retrying")
+		return nil, err
+	}
+
+	artifact.Normalization = state.NormalizationMetadata{
+		Mode:             opts.NormalizeMode,
+		UsedLLM:          true,
+		ConsentSource:    opts.LLMConsentSource,
+		ConverterBackend: opts.ConverterBackendName,
+		VerifierBackend:  opts.VerifierBackendName,
+	}
+	if err := e.RunDir.WriteNormalizedArtifactCandidate(artifact); err != nil {
+		return nil, fmt.Errorf("write normalized artifact candidate: %w", err)
+	}
+
+	findings, err := e.validateNormalizedArtifactCandidate(artifact, bundle.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	if len(findings) > 0 {
+		if err := e.RunDir.WriteArtifact(artifact); err != nil {
+			return nil, fmt.Errorf("write normalized run artifact draft: %w", err)
+		}
+		if err := e.writePrepareStatus(runID, state.RunBlocked, "normalization_validation", reviewFindingSummaries(findings), "inspect spec-normalization-validation.json and revise the normalized artifact candidate"); err != nil {
+			return nil, err
+		}
+		return &PrepareResult{
+			RunID:      runID,
+			Artifact:   artifact,
+			Status:     PrepareStatusBlocked,
+			RunDir:     e.RunDir,
+			Blocking:   true,
+			NextAction: "inspect spec-normalization-validation.json and revise the normalized artifact candidate",
+		}, nil
+	}
+
+	review, err := e.verifyNormalizedArtifactCandidate(ctx, runID, bundle, artifact, specNormalizationVerifierOptions{
+		BackendName:    opts.VerifierBackendName,
+		TimeoutSeconds: opts.VerifierTimeoutSeconds,
+		MaxOutputBytes: opts.MaxOutputBytes,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	status := PrepareStatusAwaitingArtifactApproval
+	runState := state.RunAwaitingArtifactApproval
+	gate := "awaiting_artifact_approval"
+	blocking := false
+	nextAction := "review and approve the normalized run artifact candidate"
+	switch review.Status {
+	case state.ReviewFail:
+		status = PrepareStatusBlocked
+		runState = state.RunBlocked
+		gate = "normalization_review"
+		blocking = true
+		nextAction = "inspect spec normalization review findings before approving"
+	case state.ReviewNeedsRevision:
+		status = PrepareStatusAwaitingUserInput
+		runState = state.RunAwaitingClarification
+		gate = "normalization_review"
+		blocking = true
+		nextAction = "revise the source spec or explicitly approve the normalized artifact candidate after review"
+	}
+	if err := e.RunDir.WriteArtifact(artifact); err != nil {
+		return nil, fmt.Errorf("write normalized run artifact draft: %w", err)
+	}
+	if err := e.writePrepareStatus(runID, runState, gate, reviewFindingSummaries(review.BlockingFindings), nextAction); err != nil {
+		return nil, err
+	}
+
+	return &PrepareResult{
+		RunID:               runID,
+		Artifact:            artifact,
+		NormalizationReview: review,
+		Status:              status,
+		RunDir:              e.RunDir,
+		Blocking:            blocking,
+		NextAction:          nextAction,
+	}, nil
+}
+
+func prepareAwaitingNormalizationConsent(opts PrepareOptions) *PrepareResult {
+	return &PrepareResult{
+		Status:   PrepareStatusAwaitingUserInput,
+		Blocking: true,
+		NextAction: fmt.Sprintf(
+			"free-form specs require explicit LLM normalization consent; rerun with --normalize always --allow-llm-normalization or use --normalize never for offline deterministic parsing (current mode: %s)",
+			opts.NormalizeMode,
+		),
+	}
+}
+
+func (e *Engine) writePrepareStatus(runID string, runState state.RunState, gate string, blockers []string, nextAction string) error {
+	if e == nil || e.RunDir == nil {
+		return fmt.Errorf("write prepare status: missing run directory")
+	}
+	now := time.Now()
+	status := &state.RunStatus{
+		RunID:               runID,
+		State:               runState,
+		CurrentGate:         gate,
+		TaskCountsByState:   map[string]int{},
+		OpenBlockers:        blockers,
+		NextAutomaticAction: nextAction,
+		LastTransitionTime:  now,
+	}
+	if err := e.RunDir.WriteStatus(status); err != nil {
+		return fmt.Errorf("write status: %w", err)
+	}
+	_ = e.RunDir.AppendEvent(state.Event{
+		Timestamp: now,
+		Type:      "run_state_transition",
+		RunID:     runID,
+		Detail:    string(runState),
+	})
+	return nil
+}
+
+func reviewFindingSummaries(findings []state.ReviewFinding) []string {
+	blockers := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		if finding.Summary != "" {
+			blockers = append(blockers, finding.Summary)
+			continue
+		}
+		if finding.Category != "" {
+			blockers = append(blockers, finding.Category)
+		}
+	}
+	return blockers
 }
 
 // Approve marks the run artifact as approved and computes the artifact hash (spec section 6.2).
@@ -1232,6 +1456,9 @@ func inferredRunStatus(current *state.RunStatus, artifact *state.RunArtifact, ta
 		if artifact.ApprovedAt != nil {
 			return inferredStatus{state: state.RunApproved, gate: "approved", ok: true}
 		}
+		if current != nil && preserveUnapprovedArtifactStatus(current.State) {
+			return inferredStatus{state: current.State, gate: current.CurrentGate, blockers: current.OpenBlockers, ok: true}
+		}
 		return inferredStatus{state: state.RunAwaitingApproval, gate: "awaiting_approval", ok: true}
 	}
 
@@ -1240,6 +1467,15 @@ func inferredRunStatus(current *state.RunStatus, artifact *state.RunArtifact, ta
 	}
 
 	return inferredStatus{state: state.RunPreparing, gate: "preparing", ok: true}
+}
+
+func preserveUnapprovedArtifactStatus(runState state.RunState) bool {
+	switch runState {
+	case state.RunAwaitingArtifactApproval, state.RunAwaitingClarification, state.RunBlocked:
+		return true
+	default:
+		return false
+	}
 }
 
 func statusNeedsRefresh(current *state.RunStatus, nextState state.RunState, gate string, blockers []string, tasks []state.Task) bool {
