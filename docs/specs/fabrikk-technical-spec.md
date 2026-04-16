@@ -564,22 +564,23 @@ If migration is required, it must happen before dispatching any worker.
 
 v1 command surface:
 
-- `fabrikk prepare --spec <path> [--spec <path>...]`
+- `fabrikk prepare --spec <path> [--spec <path>...] [--normalize auto|always|never] [--allow-llm-normalization]`
 - `fabrikk review <run-id>`
-- `fabrikk approve <run-id> [--launch]`
-- `fabrikk launch <run-id>`
+- `fabrikk artifact approve <run-id> [--accept-needs-revision]`
+- `fabrikk tech-spec draft|review|approve <run-id>`
+- `fabrikk plan draft|review|approve <run-id>`
+- `fabrikk approve <run-id>`
 - `fabrikk tasks <run-id>`
 - `fabrikk ready <run-id>`
 - `fabrikk blocked <run-id>`
 - `fabrikk next <run-id>`
 - `fabrikk progress <run-id>`
 - `fabrikk status [<run-id>]`
-- `fabrikk explain <run-id>`
-- `fabrikk resume <run-id>`
+- `fabrikk report <run-id> <task-id> --from <path>`
+- `fabrikk retry <run-id> <task-id>`
 - `fabrikk verify <run-id> <task-id>`
-- `fabrikk council <run-id> <task-id>`
-- `fabrikk defer <run-id> <requirement-id> --reason <text>`
-- `fabrikk stop <run-id>`
+- `fabrikk learn ...`
+- `fabrikk context <run-id> <task-id>`
 
 ### 5.2 Command semantics
 
@@ -598,11 +599,16 @@ The approval summary must include:
 - risk classification
 - proposed task breakdown preview
 
-`fabrikk approve <run-id> [--launch]`
+`fabrikk artifact approve <run-id> [--accept-needs-revision]`
 
-- records explicit approval for the prepared run
-- with `--launch`, immediately starts the approved run after approval succeeds
-- `--launch` is the default operator fast path in v1
+- records explicit approval for an LLM-normalized run artifact
+- refuses stale source specs, changed prompt artifacts, changed normalized candidates, and failing reviews
+- allows `needs_revision` only when the operator passes `--accept-needs-revision`
+
+`fabrikk approve <run-id>`
+
+- records final approval after technical spec and execution plan gates are satisfied
+- compiles approved planning artifacts into dispatchable task state
 
 `fabrikk status`
 

@@ -58,7 +58,7 @@ func assertHelpOutput(t *testing.T, output string) {
 	}
 	// Verify all commands are listed.
 	for _, cmd := range []string{
-		"prepare", "review", "tech-spec", "plan", "approve",
+		"prepare", "review", "artifact", "tech-spec", "plan", "approve",
 		"status", "verify", "retry", "report",
 		"tasks", "ready", "blocked", "next", "progress",
 		"learn", "context",

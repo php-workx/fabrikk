@@ -31,11 +31,11 @@ The result: agents are autonomous *within* their stage, but the process is mecha
 
 ## Stage 1: Spec Review
 
-**Input:** One or more spec files in any format.
+**Input:** One or more spec files. Canonical AT-* specs stay deterministic; free-form specs require explicit LLM normalization consent.
 **Output:** A normalized run artifact with stable requirement IDs.
-**Gate:** User approval before execution begins.
+**Gate:** `fabrikk artifact approve <run-id>` before planning continues.
 
-The spec review stage takes human-authored specs and normalizes them into a structured run artifact. This artifact becomes the execution contract — the single source of truth for the entire run.
+The spec review stage takes human-authored specs and normalizes them into a structured run artifact. Free-form specs are converted by an LLM, independently verified against the original source, and approved only if the reviewed source, prompts, and normalized artifact still match. This artifact becomes the execution contract — the single source of truth for the entire run.
 
 ### What the run artifact contains
 
@@ -53,7 +53,7 @@ The spec review stage takes human-authored specs and normalizes them into a stru
   - *Ask First:* decisions requiring human input (orchestrator blocks)
   - *Never:* explicit out-of-scope items (orchestrator rejects)
 
-The scope mode is committed at approval time. An agent cannot silently expand scope if the mode is HOLD SCOPE.
+The scope mode is committed at artifact approval time. An agent cannot silently expand scope if the mode is HOLD SCOPE.
 
 ---
 

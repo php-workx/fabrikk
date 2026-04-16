@@ -172,20 +172,24 @@ Auto-select review intensity based on scope (quick / standard / deep). Codex and
 # Build
 just build
 
-# Prepare a run from your spec
-./bin/fabrikk prepare docs/specs/my-feature-spec.md
+# Prepare a run from a canonical AT-* spec
+./bin/fabrikk prepare --spec docs/specs/my-feature-spec.md
 
-# Approve the normalized run artifact
-./bin/fabrikk approve <run-id>
+# Prepare a free-form spec with explicit LLM normalization consent
+./bin/fabrikk prepare --spec docs/specs/my-feature-spec.md --normalize always --allow-llm-normalization
 
-# Launch autonomous execution
-./bin/fabrikk run <run-id>
+# Review and approve the normalized run artifact
+./bin/fabrikk review <run-id>
+./bin/fabrikk artifact approve <run-id>
+
+# If the verifier reports needs_revision, either revise the spec or approve intentionally
+./bin/fabrikk artifact approve <run-id> --accept-needs-revision
 
 # Check status anytime
 ./bin/fabrikk status <run-id>
 
-# Resume after interruption
-./bin/fabrikk run <run-id>  # picks up from last checkpoint
+# Find the next ready task
+./bin/fabrikk next <run-id>
 ```
 
 ## Architecture
@@ -199,9 +203,9 @@ CLI (cmd/fabrikk/)
   +-- State (internal/state/)        -- File-based types, RunDir I/O, atomic writes
 ```
 
-- **Zero external dependencies** — stdlib only, single binary
+- **Single Go CLI** — pinned project tools and dependencies are tracked in the repository
 - **State lives on disk** — all run state in `.fabrikk/runs/<run-id>/` as JSON/JSONL
-- **Compiler is deterministic** — no LLM involvement in task graph generation
+- **Compiler is deterministic** — task graph generation starts from the approved run artifact
 - **Councilflow** — parallel fan-out to persona reviewers across multiple rounds
 
 ## Documentation

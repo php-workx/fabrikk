@@ -28,6 +28,7 @@ var helpGroups = []helpGroup{
 		Commands: []helpCommand{
 			{"prepare", "Ingest specs and create a draft run"},
 			{"review", "Show the run artifact for review"},
+			{"artifact", "Approve a normalized run artifact"},
 			{"tech-spec", "Manage run-scoped technical specs"},
 			{"plan", "Manage run-scoped execution plans"},
 			{"approve", "Approve and compile tasks"},
