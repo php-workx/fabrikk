@@ -564,7 +564,7 @@ If migration is required, it must happen before dispatching any worker.
 
 v1 command surface:
 
-- `fabrikk prepare --spec <path> [--spec <path>...] [--normalize auto|always|never] [--allow-llm-normalization]`
+- `fabrikk prepare --spec <path> [--spec <path>...] [--normalize auto|always|never] [--allow-llm-normalization] [--trust-project-config]`
 - `fabrikk review <run-id>`
 - `fabrikk artifact approve <run-id> [--accept-needs-revision]`
 - `fabrikk tech-spec draft|review|approve <run-id>`

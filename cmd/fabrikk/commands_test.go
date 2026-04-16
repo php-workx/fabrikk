@@ -70,6 +70,7 @@ func TestParsePrepareFlagsNormalization(t *testing.T) {
 		"--spec", "spec.md",
 		"--normalize", "always",
 		"--allow-llm-normalization",
+		"--trust-project-config",
 		"--fallback-deterministic",
 		"--converter-backend", agentcli.BackendClaude,
 		"--verifier-backend", agentcli.BackendCodex,
@@ -85,6 +86,9 @@ func TestParsePrepareFlagsNormalization(t *testing.T) {
 	}
 	if !flags.options.LLMConsent || flags.options.LLMConsentSource != consentSourceCLI {
 		t.Fatalf("LLM consent = %v/%q, want true/cli", flags.options.LLMConsent, flags.options.LLMConsentSource)
+	}
+	if !flags.trustProjectConfig {
+		t.Fatal("trustProjectConfig = false, want true")
 	}
 	if !flags.options.FallbackDeterministic {
 		t.Fatal("fallback deterministic = false, want true")
@@ -109,10 +113,10 @@ func TestParsePrepareFlagsNormalization(t *testing.T) {
 }
 
 func TestTrustedPrepareConfigConsent(t *testing.T) {
-	t.Run("enabled config grants consent", func(t *testing.T) {
+	t.Run("enabled config grants consent only when trusted", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, filepath.Join(dir, "fabrikk.yaml"), "spec_normalization:\n  allow_llm_normalization: true\n")
-		flags, err := parsePrepareFlags([]string{"--spec", "spec.md", "--normalize", "always"})
+		flags, err := parsePrepareFlags([]string{"--spec", "spec.md", "--normalize", "always", "--trust-project-config"})
 		if err != nil {
 			t.Fatalf("parsePrepareFlags: %v", err)
 		}
@@ -127,10 +131,28 @@ func TestTrustedPrepareConfigConsent(t *testing.T) {
 		}
 	})
 
+	t.Run("untrusted config does not grant consent", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "fabrikk.yaml"), "spec_normalization:\n  allow_llm_normalization: true\n")
+		flags, err := parsePrepareFlags([]string{"--spec", "spec.md", "--normalize", "always"})
+		if err != nil {
+			t.Fatalf("parsePrepareFlags: %v", err)
+		}
+		if err := applyTrustedPrepareConfig(dir, &flags); err != nil {
+			t.Fatalf("applyTrustedPrepareConfig: %v", err)
+		}
+		if flags.options.LLMConsent {
+			t.Fatalf("consent = %v, want false without --trust-project-config", flags.options.LLMConsent)
+		}
+		if err := validatePrepareFlags(flags); err == nil {
+			t.Fatal("validatePrepareFlags without consent error = nil, want error")
+		}
+	})
+
 	t.Run("cli flag remains one off source", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, filepath.Join(dir, "fabrikk.yaml"), "spec_normalization:\n  allow_llm_normalization: true\n")
-		flags, err := parsePrepareFlags([]string{"--spec", "spec.md", "--normalize", "always", "--allow-llm-normalization"})
+		flags, err := parsePrepareFlags([]string{"--spec", "spec.md", "--normalize", "always", "--allow-llm-normalization", "--trust-project-config"})
 		if err != nil {
 			t.Fatalf("parsePrepareFlags: %v", err)
 		}
@@ -217,13 +239,16 @@ func TestCmdPrepareReportsNormalizationOutcomes(t *testing.T) {
 		withWorkingDir(t, dir)
 		spec := writeFileWithName(t, dir, "spec.md", "The system should import tasks from Markdown sentences.\n")
 
-		err := cmdPrepare(context.Background(), []string{"--spec", spec})
-		if err == nil {
-			t.Fatal("expected no-consent error")
-		}
-		if !strings.Contains(err.Error(), "--allow-llm-normalization") {
-			t.Fatalf("error = %q, want consent guidance", err.Error())
-		}
+		output := captureStdout(t, func() {
+			if err := cmdPrepare(context.Background(), []string{"--spec", spec}); err != nil {
+				t.Fatalf("cmdPrepare: %v", err)
+			}
+		})
+
+		assertContains(t, output, "Prepare paused.")
+		assertContains(t, output, "Status: awaiting_user_input")
+		assertContains(t, output, "Blocking: true")
+		assertContains(t, output, "--allow-llm-normalization")
 	})
 
 	t.Run("deterministic fallback warning", func(t *testing.T) {

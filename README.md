@@ -178,6 +178,9 @@ just build
 # Prepare a free-form spec with explicit LLM normalization consent
 ./bin/fabrikk prepare --spec docs/specs/my-feature-spec.md --normalize always --allow-llm-normalization
 
+# Or use project config only after explicitly trusting this checkout
+./bin/fabrikk prepare --spec docs/specs/my-feature-spec.md --normalize always --trust-project-config
+
 # Review and approve the normalized run artifact
 ./bin/fabrikk review <run-id>
 ./bin/fabrikk artifact approve <run-id>

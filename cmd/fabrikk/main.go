@@ -181,11 +181,11 @@ func cmdPrepare(ctx context.Context, args []string) error {
 		return err
 	}
 	if result == nil || result.Artifact == nil {
-		nextAction := "prepare did not produce a run artifact"
 		if result != nil && result.NextAction != "" {
-			nextAction = result.NextAction
+			printPreparePending(result)
+			return nil
 		}
-		return fmt.Errorf("%s", nextAction)
+		return fmt.Errorf("prepare did not produce a run artifact")
 	}
 	artifact := result.Artifact
 
@@ -204,6 +204,15 @@ func cmdPrepare(ctx context.Context, args []string) error {
 	fmt.Printf("Next: %s\n", prepareNextAction(result))
 
 	return nil
+}
+
+func printPreparePending(result *engine.PrepareResult) {
+	fmt.Println("Prepare paused.")
+	fmt.Printf("Status: %s\n", result.Status)
+	if result.Blocking {
+		fmt.Println("Blocking: true")
+	}
+	fmt.Printf("Next: %s\n", result.NextAction)
 }
 
 func printPrepareNormalizationSummary(result *engine.PrepareResult) {
@@ -236,8 +245,9 @@ func prepareNextAction(result *engine.PrepareResult) string {
 }
 
 type prepareFlags struct {
-	specPaths []string
-	options   engine.PrepareOptions
+	specPaths          []string
+	options            engine.PrepareOptions
+	trustProjectConfig bool
 }
 
 func parsePrepareFlags(args []string) (prepareFlags, error) {
@@ -272,6 +282,8 @@ func parsePrepareFlags(args []string) (prepareFlags, error) {
 		case "--allow-llm-normalization":
 			flags.options.LLMConsent = true
 			flags.options.LLMConsentSource = consentSourceCLI
+		case "--trust-project-config":
+			flags.trustProjectConfig = true
 		case "--fallback-deterministic":
 			flags.options.FallbackDeterministic = true
 		case "--converter-backend":
@@ -303,7 +315,7 @@ func parsePrepareFlags(args []string) (prepareFlags, error) {
 
 func validatePrepareFlags(flags prepareFlags) error {
 	if flags.options.NormalizeMode == state.NormalizationAlways && !flags.options.LLMConsent {
-		return fmt.Errorf("--normalize always requires --allow-llm-normalization or trusted project config")
+		return fmt.Errorf("--normalize always requires --allow-llm-normalization or --trust-project-config with allow_llm_normalization enabled")
 	}
 	return nil
 }
@@ -316,7 +328,7 @@ type prepareProjectConfig struct {
 }
 
 func applyTrustedPrepareConfig(wd string, flags *prepareFlags) error {
-	if flags == nil || flags.options.LLMConsent {
+	if flags == nil || flags.options.LLMConsent || !flags.trustProjectConfig {
 		return nil
 	}
 	data, err := os.ReadFile(filepath.Join(wd, "fabrikk.yaml"))

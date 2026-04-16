@@ -2,7 +2,7 @@
 
 The repository already has a writable run directory.
 
-The user can provide model consent through either a one-time flag or trusted project config.
+The user can provide model consent through either a one-time flag or an explicitly trusted project config.
 
 # Requirement
 
