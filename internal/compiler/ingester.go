@@ -414,10 +414,12 @@ func IngestSpecsWithFallback(paths []string) ([]state.Requirement, []state.Sourc
 }
 
 func nextSyntheticRequirementID(globalSeen map[string]string) string {
-	for i := 1; ; i++ {
+	const maxSequentialSyntheticRequirementID = 999999
+	for i := 1; i <= maxSequentialSyntheticRequirementID; i++ {
 		id := fmt.Sprintf("AT-FR-%03d", i)
 		if _, exists := globalSeen[id]; !exists {
 			return id
 		}
 	}
+	return fmt.Sprintf("AT-FR-%03d", maxSequentialSyntheticRequirementID+len(globalSeen)+1)
 }

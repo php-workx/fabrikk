@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -182,8 +183,14 @@ func TestFinalApproveSemanticsUnchanged(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected final Approve to still require an approved execution plan")
 	}
-	if !strings.Contains(err.Error(), "approved execution plan required") {
+	if !errors.Is(err, ErrApprovedExecutionPlanRequired) {
 		t.Fatalf("error = %q, want existing execution plan approval requirement", err.Error())
+	}
+}
+
+func TestPreserveUnapprovedArtifactStatusIncludesFinalApprovalGate(t *testing.T) {
+	if !preserveUnapprovedArtifactStatus(state.RunAwaitingApproval) {
+		t.Fatal("RunAwaitingApproval should be preserved while artifact remains unapproved")
 	}
 }
 

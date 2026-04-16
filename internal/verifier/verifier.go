@@ -23,6 +23,10 @@ func Verify(ctx context.Context, task *state.Task, report *state.CompletionRepor
 	// 1. Quality gate (spec section 11.3: runs first, blocks model review on failure).
 	gateResult, gateErr := RunQualityGate(ctx, gate, workDir)
 	if gateErr != nil {
+		gateDetail := fmt.Sprintf("quality gate failed before producing a command result: %v", gateErr)
+		if gateResult != nil {
+			gateDetail = gateResult.Command + " exited " + fmt.Sprint(gateResult.ExitCode)
+		}
 		result.Pass = false
 		result.BlockingFindings = append(result.BlockingFindings, state.Finding{
 			FindingID: fmt.Sprintf("%s-quality-gate", task.TaskID),
@@ -34,7 +38,7 @@ func Verify(ctx context.Context, task *state.Task, report *state.CompletionRepor
 		result.EvidenceChecks = append(result.EvidenceChecks, state.Check{
 			Name:   "quality_gate",
 			Pass:   false,
-			Detail: gateResult.Command + " exited " + fmt.Sprint(gateResult.ExitCode),
+			Detail: gateDetail,
 		})
 		return result, nil
 	}

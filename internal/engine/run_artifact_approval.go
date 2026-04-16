@@ -181,22 +181,20 @@ func validateSpecNormalizationSourcesCurrent(manifest *state.SpecNormalizationSo
 		return fmt.Errorf("source changed: missing source manifest")
 	}
 	for _, source := range manifest.Sources {
-		data, err := os.ReadFile(source.Path)
+		snapshot, err := readSpecNormalizationSourceSnapshot(source.Path)
 		if err != nil {
 			return fmt.Errorf("source changed: read %s: %w", source.Path, err)
 		}
-		fingerprint := state.SHA256Bytes(data)
-		if fingerprint != source.Fingerprint {
-			return fmt.Errorf("source changed: %s fingerprint = %q, reviewed fingerprint = %q", source.Path, fingerprint, source.Fingerprint)
+		if snapshot.Fingerprint != source.Fingerprint {
+			return fmt.Errorf("source changed: %s fingerprint = %q, reviewed fingerprint = %q", source.Path, snapshot.Fingerprint, source.Fingerprint)
 		}
-		if int64(len(data)) != source.ByteSize {
-			return fmt.Errorf("source changed: %s byte_size = %d, reviewed byte_size = %d", source.Path, len(data), source.ByteSize)
+		if snapshot.ByteSize != source.ByteSize {
+			return fmt.Errorf("source changed: %s byte_size = %d, reviewed byte_size = %d", source.Path, snapshot.ByteSize, source.ByteSize)
 		}
-		lineNumbered, lineCount := lineNumberSource(data)
-		if lineCount != source.LineCount {
-			return fmt.Errorf("source changed: %s line_count = %d, reviewed line_count = %d", source.Path, lineCount, source.LineCount)
+		if snapshot.LineCount != source.LineCount {
+			return fmt.Errorf("source changed: %s line_count = %d, reviewed line_count = %d", source.Path, snapshot.LineCount, source.LineCount)
 		}
-		if source.LineNumberedText != "" && lineNumbered != source.LineNumberedText {
+		if source.LineNumberedText != "" && snapshot.LineNumberedText != source.LineNumberedText {
 			return fmt.Errorf("source changed: %s line-numbered content differs from reviewed source manifest", source.Path)
 		}
 	}

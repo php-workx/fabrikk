@@ -2,20 +2,31 @@ package engine
 
 import (
 	"bufio"
-	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/php-workx/fabrikk/internal/state"
 )
 
+const maxSpecNormalizationSourceLineBytes = 10 << 20
+
 type specNormalizationSourceBundle struct {
 	Manifest     *state.SpecNormalizationSourceManifest
 	ManifestHash string
 	PromptInput  string
 	TotalBytes   int64
+}
+
+type specNormalizationSourceSnapshot struct {
+	Fingerprint      string
+	ByteSize         int64
+	LineCount        int
+	LineNumberedText string
 }
 
 func buildSpecNormalizationSourceBundle(runID string, specPaths []string, maxBytes int64) (*specNormalizationSourceBundle, error) {
@@ -28,27 +39,21 @@ func buildSpecNormalizationSourceBundle(runID string, specPaths []string, maxByt
 	var prompt strings.Builder
 	var totalBytes int64
 	for _, path := range specPaths {
-		data, err := os.ReadFile(path)
+		snapshot, err := readSpecNormalizationSourceSnapshot(path)
 		if err != nil {
 			return nil, fmt.Errorf("read source spec %s: %w", path, err)
 		}
-		totalBytes += int64(len(data))
+		totalBytes += snapshot.ByteSize
 		if maxBytes > 0 && totalBytes > maxBytes {
 			return nil, fmt.Errorf("source bundle is %d bytes, above limit %d bytes; split the spec into smaller files or use explicit AT-* requirement IDs", totalBytes, maxBytes)
 		}
 
-		fingerprint, err := state.SHA256File(path)
-		if err != nil {
-			return nil, fmt.Errorf("hash source spec %s: %w", path, err)
-		}
-		lineNumbered, lineCount := lineNumberSource(data)
-
 		manifest.Sources = append(manifest.Sources, state.SourceManifestEntry{
 			Path:             path,
-			Fingerprint:      fingerprint,
-			ByteSize:         int64(len(data)),
-			LineCount:        lineCount,
-			LineNumberedText: lineNumbered,
+			Fingerprint:      snapshot.Fingerprint,
+			ByteSize:         snapshot.ByteSize,
+			LineCount:        snapshot.LineCount,
+			LineNumberedText: snapshot.LineNumberedText,
 		})
 
 		if prompt.Len() > 0 {
@@ -57,13 +62,13 @@ func buildSpecNormalizationSourceBundle(runID string, specPaths []string, maxByt
 		prompt.WriteString("## Source: ")
 		prompt.WriteString(path)
 		prompt.WriteString("\nFingerprint: ")
-		prompt.WriteString(fingerprint)
+		prompt.WriteString(snapshot.Fingerprint)
 		prompt.WriteString("\nByte size: ")
-		fmt.Fprintf(&prompt, "%d", len(data))
+		fmt.Fprintf(&prompt, "%d", snapshot.ByteSize)
 		prompt.WriteString("\nLine count: ")
-		fmt.Fprintf(&prompt, "%d", lineCount)
+		fmt.Fprintf(&prompt, "%d", snapshot.LineCount)
 		prompt.WriteString("\n\n")
-		prompt.WriteString(lineNumbered)
+		prompt.WriteString(snapshot.LineNumberedText)
 	}
 
 	manifestHash, err := hashSpecNormalizationSourceManifest(manifest)
@@ -96,8 +101,33 @@ func hashSpecNormalizationSourceManifest(manifest *state.SpecNormalizationSource
 	return sha256Prefix + state.SHA256Bytes(data), nil
 }
 
-func lineNumberSource(data []byte) (numbered string, count int) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+func readSpecNormalizationSourceSnapshot(path string) (specNormalizationSourceSnapshot, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return specNormalizationSourceSnapshot{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return specNormalizationSourceSnapshot{}, err
+	}
+	hasher := sha256.New()
+	lineNumbered, lineCount, err := lineNumberSourceReader(io.TeeReader(f, hasher))
+	if err != nil {
+		return specNormalizationSourceSnapshot{}, err
+	}
+	return specNormalizationSourceSnapshot{
+		Fingerprint:      hex.EncodeToString(hasher.Sum(nil)),
+		ByteSize:         info.Size(),
+		LineCount:        lineCount,
+		LineNumberedText: lineNumbered,
+	}, nil
+}
+
+func lineNumberSourceReader(r io.Reader) (numbered string, count int, err error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSpecNormalizationSourceLineBytes)
 	var out strings.Builder
 	line := 0
 	for scanner.Scan() {
@@ -107,5 +137,8 @@ func lineNumberSource(data []byte) (numbered string, count int) {
 		}
 		fmt.Fprintf(&out, "%d | %s", line, scanner.Text())
 	}
-	return out.String(), line
+	if err := scanner.Err(); err != nil {
+		return "", 0, err
+	}
+	return out.String(), line, nil
 }

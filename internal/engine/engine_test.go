@@ -395,8 +395,8 @@ func TestApproveRequiresApprovedExecutionPlan(t *testing.T) {
 	if err == nil {
 		t.Fatal("Approve() error = nil, want execution plan approval error")
 	}
-	if !strings.Contains(err.Error(), "approved execution plan required") {
-		t.Fatalf("Approve() error = %q, want 'approved execution plan required' context", err)
+	if !errors.Is(err, engine.ErrApprovedExecutionPlanRequired) {
+		t.Fatalf("Approve() error = %q, want ErrApprovedExecutionPlanRequired", err)
 	}
 
 	// Verify run artifact was NOT marked as approved (no state corruption).

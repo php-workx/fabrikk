@@ -15,6 +15,7 @@ import (
 const (
 	defaultSpecNormalizationConverterTimeoutSec = 300
 	defaultSpecNormalizationMaxOutputBytes      = 10 << 20
+	sourceExcerptContextLines                   = 5
 )
 
 var normalizedRequirementIDPattern = regexp.MustCompile(`^AT-(?:FR|TS|NFR|AS)-\d{3}$`)
@@ -284,6 +285,7 @@ func extractSpecNormalizationArtifactJSON(raw string) string {
 		if candidate != "" {
 			return candidate
 		}
+		// Always advance past the unmatched opener so malformed prefixes cannot stall extraction.
 		offset = start + 1
 	}
 	return ""
@@ -551,8 +553,8 @@ func sourceExcerptMatches(lines []string, ref state.SourceRef) bool {
 	if excerpt == "" {
 		return false
 	}
-	start := max(ref.LineStart-2, 1)
-	end := min(ref.LineEnd+2, len(lines))
+	start := max(ref.LineStart-sourceExcerptContextLines, 1)
+	end := min(ref.LineEnd+sourceExcerptContextLines, len(lines))
 	if start > end || start <= 0 {
 		return false
 	}

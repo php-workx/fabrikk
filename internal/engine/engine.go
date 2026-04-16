@@ -32,6 +32,10 @@ const (
 	errValidationPathCategory = "validation_path"
 )
 
+// ErrApprovedExecutionPlanRequired is returned when final run approval is attempted
+// before an execution plan has been reviewed and approved.
+var ErrApprovedExecutionPlanRequired = errors.New("approved execution plan required")
+
 // Engine is the Phase 1 run engine (spec section 18.3).
 // Serial execution, foreground, no council, no detached mode.
 type Engine struct {
@@ -362,7 +366,7 @@ func (e *Engine) Approve(ctx context.Context) error {
 	// and a subsequent Compile failure would leave the run marked approved
 	// with no way to compile.
 	if _, err := e.readApprovedExecutionPlan(); err != nil {
-		return fmt.Errorf("cannot approve run: approved execution plan required: %w", err)
+		return fmt.Errorf("cannot approve run: %w: %v", ErrApprovedExecutionPlanRequired, err)
 	}
 
 	// Compute artifact hash for immutability enforcement (spec section 3.2).
@@ -682,6 +686,7 @@ func (e *Engine) runValidationCommand(ctx context.Context, task *state.Task, ind
 	runCtx, cancel := context.WithTimeout(ctx, validationCommandTimeout)
 	defer cancel()
 
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.CommandContext(runCtx, check.Tool, check.Args...) //nolint:gosec // validation checks execute allowlisted local developer tools without shell interpretation
 	cmd.Dir = e.WorkDir
 	var stdout, stderr bytes.Buffer
@@ -1471,7 +1476,7 @@ func inferredRunStatus(current *state.RunStatus, artifact *state.RunArtifact, ta
 
 func preserveUnapprovedArtifactStatus(runState state.RunState) bool {
 	switch runState {
-	case state.RunAwaitingArtifactApproval, state.RunAwaitingClarification, state.RunBlocked:
+	case state.RunAwaitingApproval, state.RunAwaitingArtifactApproval, state.RunAwaitingClarification, state.RunBlocked:
 		return true
 	default:
 		return false

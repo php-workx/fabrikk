@@ -119,6 +119,25 @@ func TestBuildSpecNormalizationSourceBundleRejectsOversizedInput(t *testing.T) {
 	}
 }
 
+func TestBuildSpecNormalizationSourceBundleAcceptsLongLines(t *testing.T) {
+	dir := t.TempDir()
+	longLine := strings.Repeat("x", 70*1024)
+	spec := writeSpecInput(t, dir, "long.md", longLine+"\n")
+
+	bundle, err := buildSpecNormalizationSourceBundle(specNormalizationTestRunID, []string{spec}, int64(len(longLine)+1024))
+	if err != nil {
+		t.Fatalf("buildSpecNormalizationSourceBundle: %v", err)
+	}
+
+	source := bundle.Manifest.Sources[0]
+	if source.LineCount != 1 {
+		t.Fatalf("line count = %d, want 1", source.LineCount)
+	}
+	if !strings.Contains(source.LineNumberedText, "1 | "+longLine) {
+		t.Fatal("line-numbered text does not contain the long source line")
+	}
+}
+
 func writeSpecInput(t *testing.T, dir, name, content string) string {
 	t.Helper()
 

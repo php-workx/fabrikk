@@ -1,8 +1,10 @@
 package compiler_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/php-workx/fabrikk/internal/compiler"
@@ -176,6 +178,25 @@ func TestIngestSpecsWithFallbackRenumbersSynthesizedIDsAcrossMultipleFiles(t *te
 	}
 	if reqs[0].ID != testReqIDFR001 || reqs[1].ID != testReqIDFR002 {
 		t.Fatalf("IDs = %q, %q; want AT-FR-001, AT-FR-002", reqs[0].ID, reqs[1].ID)
+	}
+}
+
+func TestIngestSpecsWithFallbackSkipsOccupiedSyntheticIDs(t *testing.T) {
+	dir := t.TempDir()
+
+	var explicit strings.Builder
+	for i := 1; i <= 999; i++ {
+		fmt.Fprintf(&explicit, "- **AT-FR-%03d**: Explicit requirement %d.\n", i, i)
+	}
+	explicitSpec := writeSpec(t, dir, "explicit.md", explicit.String())
+	freeFormSpec := writeSpec(t, dir, "free-form.md", "## Goals\n\n1. Build the overflow capability.\n")
+
+	reqs, _, err := compiler.IngestSpecsWithFallback([]string{explicitSpec, freeFormSpec})
+	if err != nil {
+		t.Fatalf("IngestSpecsWithFallback: %v", err)
+	}
+	if got := reqs[len(reqs)-1].ID; got != "AT-FR-1000" {
+		t.Fatalf("synthetic ID = %q, want AT-FR-1000", got)
 	}
 }
 

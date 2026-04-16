@@ -147,6 +147,36 @@ func TestVerifyQualityGateBlocksReview(t *testing.T) {
 	}
 }
 
+func TestVerifyQualityGateRunErrorDoesNotPanic(t *testing.T) {
+	task := &state.Task{
+		TaskID:           "task-1",
+		RequirementIDs:   []string{"AT-FR-001"},
+		RequiredEvidence: []string{"quality_gate_pass"},
+	}
+
+	report := &state.CompletionReport{
+		TaskID:    "task-1",
+		AttemptID: "attempt-1",
+	}
+
+	gate := &state.QualityGate{
+		Command:        "true",
+		TimeoutSeconds: 10,
+		Required:       true,
+	}
+
+	result, err := verifier.Verify(context.Background(), task, report, gate, filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.Pass {
+		t.Fatal("expected fail when quality gate cannot start")
+	}
+	if len(result.EvidenceChecks) == 0 || !strings.Contains(result.EvidenceChecks[0].Detail, "quality gate failed before producing a command result") {
+		t.Fatalf("evidence checks = %+v, want startup failure detail", result.EvidenceChecks)
+	}
+}
+
 func TestVerifyFailsWhenRequiredCommandFails(t *testing.T) {
 	task := &state.Task{
 		TaskID:           "task-1",

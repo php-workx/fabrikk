@@ -73,6 +73,16 @@ trailing text`
 	}
 }
 
+func TestExtractSpecNormalizationArtifactJSONSkipsMalformedPrefixes(t *testing.T) {
+	want := `{"schema_version":"0.1"}`
+	raw := strings.Repeat("{not json ", 2000) + want
+
+	got := extractSpecNormalizationArtifactJSON(raw)
+	if got != want {
+		t.Fatalf("JSON block = %q, want %q", got, want)
+	}
+}
+
 func TestConvertSpecsToArtifactMalformedJSONPersistsRaw(t *testing.T) {
 	runDir := newSpecNormalizationRunDir(t)
 	bundle := newSpecNormalizationBundle(t, "Malformed response case.")
@@ -197,6 +207,27 @@ func TestConvertSpecsToArtifactRejectsApprovalFields(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "approval fields") {
 		t.Fatalf("error = %q, want approval field context", err.Error())
+	}
+}
+
+func TestSourceExcerptMatchesWiderContextWindow(t *testing.T) {
+	lines := []string{
+		"Primary requirement starts here.",
+		"Context line 2.",
+		"Context line 3.",
+		"Context line 4.",
+		"Context line 5.",
+		"Source evidence appears five lines later.",
+	}
+	ref := state.SourceRef{
+		Path:      "spec.md",
+		LineStart: 1,
+		LineEnd:   1,
+		Excerpt:   "Source evidence appears five lines later.",
+	}
+
+	if !sourceExcerptMatches(lines, ref) {
+		t.Fatal("source excerpt did not match within the wider context window")
 	}
 }
 
