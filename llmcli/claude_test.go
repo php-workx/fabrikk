@@ -147,7 +147,7 @@ func TestBuildClaudeEnv_Ollama(t *testing.T) {
 		assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:11434")
 		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
 		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
-		assertEnvAbsent(t, env)
+		assertOllamaAPIKeyAbsent(t, env)
 	})
 
 	t.Run("OllamaCloud", func(t *testing.T) {
@@ -642,8 +642,8 @@ func assertEnvContains(t *testing.T, env []string, entry string) {
 	t.Errorf("env does not contain %q; env = %v", entry, env)
 }
 
-// assertEnvAbsent verifies that no entry with the given prefix appears in env.
-func assertEnvAbsent(t *testing.T, env []string) {
+// assertOllamaAPIKeyAbsent verifies that no OLLAMA_API_KEY entry appears in env.
+func assertOllamaAPIKeyAbsent(t *testing.T, env []string) {
 	t.Helper()
 	const prefix = "OLLAMA_API_KEY="
 	for _, e := range env {

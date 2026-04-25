@@ -571,7 +571,7 @@ func TestCodexExec_TimeoutCancelsSubprocess(t *testing.T) {
 				Text: "hello",
 			}},
 		}}},
-		llmclient.WithTimeout(50*time.Millisecond),
+		llmclient.WithTimeout(150*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
@@ -730,10 +730,12 @@ func drainSubprocessChan(t *testing.T, ch <-chan llmclient.Event) []llmclient.Ev
 	}
 }
 
-// assertNotUnderDir fails the test if path starts with parent.
+// assertNotUnderDir fails the test if path is inside parent.
 func assertNotUnderDir(t *testing.T, path, parent string) {
 	t.Helper()
-	if len(path) >= len(parent) && path[:len(parent)] == parent {
+	rel, err := filepath.Rel(parent, path)
+	cleanRel := filepath.Clean(rel)
+	if err == nil && (cleanRel == "." || (cleanRel != ".." && !strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)))) {
 		t.Errorf("path %q is inside restricted directory %q", path, parent)
 	}
 }

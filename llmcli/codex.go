@@ -94,8 +94,7 @@ func (b *CodexBackend) Stream(
 		ch, err = streamTextProcess(streamCtx, spec, codexExecFidelity(cfg, streaming), cleanupFn)
 	}
 	if err != nil {
-		cancelTimeout()
-		cleanup()
+		cleanupFn()
 		return nil, fmt.Errorf("llmcli codex: %w", err)
 	}
 

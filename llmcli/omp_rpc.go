@@ -3,6 +3,7 @@ package llmcli
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -192,7 +193,10 @@ func (b *OmpRPCBackend) ensureStarted(ctx context.Context, cfg llmclient.Request
 	defer b.mu.Unlock()
 	routingKey := "default"
 	if cfg.Ollama != nil {
-		routingKey = ollamaEffectiveBaseURL(*cfg.Ollama) + "|" + cfg.Ollama.APIKey
+		routingKey = "ollama:" +
+			base64.RawURLEncoding.EncodeToString([]byte(ollamaEffectiveBaseURL(*cfg.Ollama))) +
+			":" +
+			base64.RawURLEncoding.EncodeToString([]byte(cfg.Ollama.APIKey))
 	}
 	if b.proc != nil && b.routingKey == routingKey {
 		return b.proc, nil

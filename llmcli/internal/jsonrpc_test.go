@@ -248,6 +248,17 @@ func TestReadFrame_RejectsOversizedHeader(t *testing.T) {
 	}
 }
 
+func TestReadFrame_RejectsOversizedHeaderLineIncrementally(t *testing.T) {
+	const limit = 64
+	raw := strings.Repeat("X", 1024) + "\n"
+	r := bufio.NewReaderSize(strings.NewReader(raw), 16)
+
+	_, err := ReadFrame(r, limit, testMaxBody)
+	if !errors.Is(err, ErrHeaderTooLarge) {
+		t.Fatalf("ReadFrame err = %v; want ErrHeaderTooLarge", err)
+	}
+}
+
 // ─── Multi-frame sequential reads ────────────────────────────────────────────
 
 // TestReadFrame_SequentialFrames verifies that ReadFrame can be called multiple

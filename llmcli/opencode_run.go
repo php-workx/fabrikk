@@ -119,7 +119,7 @@ type openCodeConfig struct {
 }
 
 // writeTempOpenCodeConfig creates an isolated XDG config directory containing
-// an opencode config file at <tmpDir>/opencode/config.json. Setting
+// an opencode config file at <tmpDir>/opencode/opencode.json. Setting
 // XDG_CONFIG_HOME to the returned xdgConfigHome path in the subprocess
 // environment causes opencode to read the ephemeral config instead of the
 // user's real config.
@@ -143,7 +143,7 @@ func writeTempOpenCodeConfig(
 
 	cleanupFn := func() { _ = os.RemoveAll(tmpDir) }
 
-	// opencode reads its config from $XDG_CONFIG_HOME/opencode/config.json.
+	// opencode reads its config from $XDG_CONFIG_HOME/opencode/opencode.json.
 	openCodeDir := filepath.Join(tmpDir, "opencode")
 	if dirErr := os.Mkdir(openCodeDir, 0o700); dirErr != nil {
 		cleanupFn()
@@ -175,7 +175,7 @@ func writeTempOpenCodeConfig(
 		return "", func() {}, fmt.Errorf("marshal opencode config: %w", jsonErr)
 	}
 
-	configPath := filepath.Join(openCodeDir, "config.json")
+	configPath := filepath.Join(openCodeDir, "opencode.json")
 	if writeErr := os.WriteFile(configPath, data, 0o600); writeErr != nil {
 		cleanupFn()
 		return "", func() {}, fmt.Errorf("write opencode config: %w", writeErr)

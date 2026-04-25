@@ -55,14 +55,9 @@ func ReadFrame(r *bufio.Reader, maxHeaderBytes, maxBodyBytes int) ([]byte, error
 	headerBytesRead := 0
 
 	for {
-		line, err := r.ReadString('\n')
+		line, err := readFrameHeaderLine(r, &headerBytesRead, maxHeaderBytes)
 		if err != nil {
 			return nil, err
-		}
-
-		headerBytesRead += len(line)
-		if headerBytesRead > maxHeaderBytes {
-			return nil, ErrHeaderTooLarge
 		}
 
 		// Strip trailing CRLF or bare LF.
@@ -107,6 +102,27 @@ func ReadFrame(r *bufio.Reader, maxHeaderBytes, maxBodyBytes int) ([]byte, error
 	}
 
 	return body, nil
+}
+
+func readFrameHeaderLine(r *bufio.Reader, headerBytesRead *int, maxHeaderBytes int) (string, error) {
+	var line strings.Builder
+	for {
+		fragment, err := r.ReadSlice('\n')
+		*headerBytesRead += len(fragment)
+		if *headerBytesRead > maxHeaderBytes {
+			return "", ErrHeaderTooLarge
+		}
+		if len(fragment) > 0 {
+			line.Write(fragment)
+		}
+		if err == nil {
+			return line.String(), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return "", err
+	}
 }
 
 // jsonrpcRequest is the wire format for an outbound JSON-RPC 2.0 request.

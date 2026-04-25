@@ -532,6 +532,17 @@ func TestErrorEvent(t *testing.T) {
 	if ev.ErrorMessage != err.Error() {
 		t.Errorf("ErrorMessage = %q, want %q", ev.ErrorMessage, err.Error())
 	}
+	if ev.ErrorType != "error" {
+		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, "error")
+	}
+}
+
+func TestErrorEvent_DeadlineErrorType(t *testing.T) {
+	ev := errorEvent(context.DeadlineExceeded)
+
+	if ev.ErrorType != "deadline_exceeded" {
+		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, "deadline_exceeded")
+	}
 }
 
 // TestErrorEvent_NilError verifies that errorEvent with a nil error produces an
@@ -545,5 +556,8 @@ func TestErrorEvent_NilError(t *testing.T) {
 
 	if ev.ErrorMessage != "" {
 		t.Errorf("nil error should produce empty ErrorMessage, got %q", ev.ErrorMessage)
+	}
+	if ev.ErrorType != "none" {
+		t.Errorf("nil error should produce ErrorType none, got %q", ev.ErrorType)
 	}
 }

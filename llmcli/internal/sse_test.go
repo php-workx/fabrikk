@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const sseTestPayload = "payload"
+
 // sseReader returns a *bufio.Reader over the given raw SSE stream text.
 func sseReader(s string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(s))
@@ -134,14 +136,39 @@ func TestReadEvent_HeartbeatThenEvent(t *testing.T) {
 // TestReadEvent_CommentLinesIgnored verifies that SSE comment lines (starting
 // with ':') are silently ignored.
 func TestReadEvent_CommentLinesIgnored(t *testing.T) {
-	const raw = ": this is a comment\ndata: payload\n\n"
+	const raw = ": this is a comment\ndata: " + sseTestPayload + "\n\n"
 
 	ev, err := ReadEvent(sseReader(raw), 4096)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(ev.Data) != "payload" {
-		t.Errorf("Data: got %q; want %q", ev.Data, "payload")
+	if string(ev.Data) != sseTestPayload {
+		t.Errorf("Data: got %q; want %q", ev.Data, sseTestPayload)
+	}
+}
+
+func TestReadEvent_CommentOnlyBlockSkipped(t *testing.T) {
+	const raw = ": keepalive\n\ndata: " + sseTestPayload + "\n\n"
+
+	ev, err := ReadEvent(sseReader(raw), 4096)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(ev.Data) != sseTestPayload {
+		t.Errorf("Data: got %q; want %q", ev.Data, sseTestPayload)
+	}
+}
+
+func TestReadEvent_OversizeOnlyBlockSkipped(t *testing.T) {
+	oversizeLine := "data: " + strings.Repeat("x", 200) + "\n\n"
+	raw := oversizeLine + "data: " + sseTestPayload + "\n\n"
+
+	ev, err := ReadEvent(sseReader(raw), 64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(ev.Data) != sseTestPayload {
+		t.Errorf("Data: got %q; want %q", ev.Data, sseTestPayload)
 	}
 }
 

@@ -68,10 +68,10 @@ func ReadEvent(r *bufio.Reader, maxBytes int) (SSEEvent, error) {
 			return ev, nil
 		}
 
-		hasAnyField = true
-
 		// Parse "field: value" or "field" (no colon → value is empty string).
-		applySSEField(&ev, &dataLines, line)
+		if applySSEField(&ev, &dataLines, line) {
+			hasAnyField = true
+		}
 	}
 }
 
@@ -83,8 +83,8 @@ func handleReadEventError(
 	hasAnyField *bool,
 ) (done bool, retEv SSEEvent, retErr error) {
 	if errors.Is(err, ErrLineTooLong) {
-		// Oversize line: field is dropped but we keep reading the event.
-		*hasAnyField = true
+		// Oversize line: field is dropped but does not make an otherwise-empty
+		// event block dispatchable on its own.
 		return false, SSEEvent{}, nil
 	}
 	if !errors.Is(err, io.EOF) {
@@ -94,8 +94,9 @@ func handleReadEventError(
 	if len(line) > 0 {
 		// ReadBoundedLine returned a partial line AND io.EOF together
 		// (no trailing newline). Process the field before returning.
-		*hasAnyField = true
-		applySSEField(ev, dataLines, line)
+		if applySSEField(ev, dataLines, line) {
+			*hasAnyField = true
+		}
 	}
 	if !*hasAnyField && len(*dataLines) == 0 {
 		// Empty stream or only blank lines seen.
@@ -106,7 +107,7 @@ func handleReadEventError(
 	return true, *ev, io.EOF
 }
 
-func applySSEField(ev *SSEEvent, dataLines *[][]byte, line []byte) {
+func applySSEField(ev *SSEEvent, dataLines *[][]byte, line []byte) bool {
 	fieldName, value := splitSSEField(line)
 
 	switch string(fieldName) {
@@ -114,17 +115,22 @@ func applySSEField(ev *SSEEvent, dataLines *[][]byte, line []byte) {
 		cp := make([]byte, len(value))
 		copy(cp, value)
 		*dataLines = append(*dataLines, cp)
+		return true
 	case "event":
 		ev.Event = string(value)
+		return true
 	case "id":
 		ev.ID = string(value)
+		return true
 	case "retry":
 		if ms, parseErr := strconv.ParseInt(string(value), 10, 64); parseErr == nil {
 			ev.Retry = time.Duration(ms) * time.Millisecond
+			return true
 		}
-		// Lines starting with ':' are SSE comments; ignored.
-		// Unknown field names are also ignored per the spec.
 	}
+	// Lines starting with ':' are SSE comments; ignored.
+	// Unknown field names are also ignored per the spec.
+	return false
 }
 
 // splitSSEField splits an SSE line into field name and value.

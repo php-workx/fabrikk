@@ -126,19 +126,24 @@ func OllamaLocalModels(ctx context.Context, cfg llmclient.OllamaConfig) ([]strin
 //
 // env is not mutated; a fresh slice is returned.
 func applyClaudeOllamaEnv(env []string, cfg llmclient.OllamaConfig) []string {
-	baseURL := ollamaEffectiveBaseURL(cfg)
-
-	result := make([]string, len(env), len(env)+4)
-	copy(result, env)
-	result = append(result,
-		"ANTHROPIC_BASE_URL="+baseURL,
-		"ANTHROPIC_AUTH_TOKEN=ollama",
-		"ANTHROPIC_API_KEY=",
-	)
-	if cfg.APIKey != "" {
-		result = append(result, "OLLAMA_API_KEY="+cfg.APIKey)
+	overrides := map[string]string{
+		"ANTHROPIC_API_KEY":    "",
+		"ANTHROPIC_AUTH_TOKEN": "ollama",
+		"ANTHROPIC_BASE_URL":   ollamaEffectiveBaseURL(cfg),
 	}
-	return result
+	if cfg.APIKey != "" {
+		overrides["OLLAMA_API_KEY"] = cfg.APIKey
+	}
+
+	filtered := make([]string, 0, len(env)+len(overrides))
+	for _, entry := range env {
+		key := envKey(entry)
+		if strings.HasPrefix(key, "ANTHROPIC_") || key == "OLLAMA_API_KEY" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return applyEnvOverridesLast(filtered, overrides)
 }
 
 // applyCodexAppServerOllamaEnv returns a new env slice (built from env) with
@@ -243,7 +248,7 @@ type openCodeOllamaProvider struct {
 }
 
 // openCodeOllamaConfigJSON is the top-level JSON object written to
-// $XDG_CONFIG_HOME/opencode/config.json for Ollama routing.
+// $XDG_CONFIG_HOME/opencode/opencode.json for Ollama routing.
 type openCodeOllamaConfigJSON struct {
 	// Model is the model identifier in "ollama/<name>" format when cfg.Model
 	// is non-empty; omitted otherwise so OpenCode uses its default.
@@ -252,7 +257,7 @@ type openCodeOllamaConfigJSON struct {
 	Providers map[string]openCodeOllamaProvider `json:"providers,omitempty"`
 }
 
-// writeOpenCodeOllamaConfig writes a temporary OpenCode config.json with an
+// writeOpenCodeOllamaConfig writes a temporary OpenCode opencode.json with an
 // Ollama provider block. The caller passes the returned path as XDG_CONFIG_HOME
 // when spawning opencode so that it reads the ephemeral config instead of the
 // user's real config.
@@ -269,7 +274,7 @@ func writeOpenCodeOllamaConfig(cfg llmclient.OllamaConfig) (path string, cleanup
 	}
 	cleanupFn := func() { _ = os.RemoveAll(tmpDir) }
 
-	// OpenCode reads config from $XDG_CONFIG_HOME/opencode/config.json.
+	// OpenCode reads config from $XDG_CONFIG_HOME/opencode/opencode.json.
 	openCodeDir := filepath.Join(tmpDir, "opencode")
 	if dirErr := os.Mkdir(openCodeDir, 0o700); dirErr != nil {
 		cleanupFn()
@@ -283,10 +288,10 @@ func writeOpenCodeOllamaConfig(cfg llmclient.OllamaConfig) (path string, cleanup
 		return "", func() {}, fmt.Errorf("marshal opencode config: %w", jsonErr)
 	}
 
-	configPath := filepath.Join(openCodeDir, "config.json")
+	configPath := filepath.Join(openCodeDir, "opencode.json")
 	if writeErr := os.WriteFile(configPath, data, 0o600); writeErr != nil {
 		cleanupFn()
-		return "", func() {}, fmt.Errorf("write opencode config.json: %w", writeErr)
+		return "", func() {}, fmt.Errorf("write opencode opencode.json: %w", writeErr)
 	}
 
 	return tmpDir, cleanupFn, nil

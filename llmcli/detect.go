@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // CliInfo describes an AI coding CLI tool that was detected on the system.
@@ -63,7 +64,7 @@ func DetectAvailable() []CliInfo {
 }
 
 // probeTimeout is the per-binary timeout for version probing.
-const probeTimeout = 5e9 // 5 * time.Second, avoids time import
+const probeTimeout = 5 * time.Second
 
 // probeVersion runs `path --version` and returns the trimmed output.
 // Returns an empty string if the command fails, produces no output, or the

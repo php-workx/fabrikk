@@ -119,6 +119,9 @@ type Event struct {
 	// ErrorMessage describes the error on error events.
 	ErrorMessage string `json:"errorMessage,omitempty"`
 
+	// ErrorType is a stable coarse classification for error events.
+	ErrorType string `json:"errorType,omitempty"`
+
 	// Reason is the stop reason on done events.
 	Reason StopReason `json:"reason,omitempty"`
 

@@ -445,7 +445,9 @@ func TestOpenCodeHTTP_PromptAsyncErrorClosesBody(t *testing.T) {
 	}
 	// Also accept no events if the channel was closed without error (the
 	// server was gone before SSE opened).
-	_ = hasError
+	if !hasError && len(events) != 0 {
+		t.Fatalf("Stream/waitForEvents got %d events without EventError after prompt_async failure: %v", len(events), events)
+	}
 }
 
 // TestOpenCodeHTTPRegistry_StructuredUnknown verifies that "opencode-serve" is

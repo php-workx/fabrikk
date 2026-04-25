@@ -193,7 +193,7 @@ func TestApplyClaudeOllamaEnv(t *testing.T) {
 		assertEnvContains(t, env, "ANTHROPIC_BASE_URL="+ollamaLocalBaseURL)
 		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
 		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
-		assertEnvAbsent(t, env)
+		assertOllamaAPIKeyAbsent(t, env)
 	})
 
 	t.Run("LocalExplicit", func(t *testing.T) {
@@ -203,7 +203,7 @@ func TestApplyClaudeOllamaEnv(t *testing.T) {
 		assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:11434")
 		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
 		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
-		assertEnvAbsent(t, env)
+		assertOllamaAPIKeyAbsent(t, env)
 	})
 
 	t.Run("Cloud", func(t *testing.T) {
@@ -217,6 +217,28 @@ func TestApplyClaudeOllamaEnv(t *testing.T) {
 		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
 		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
 		assertEnvContains(t, env, "OLLAMA_API_KEY=cloud-key-abc")
+	})
+
+	t.Run("RemovesStaleOverrides", func(t *testing.T) {
+		stale := []string{
+			"PATH=/usr/bin",
+			"ANTHROPIC_BASE_URL=http://stale",
+			"ANTHROPIC_API_KEY=stale",
+			"ANTHROPIC_EXTRA=stale",
+			"OLLAMA_API_KEY=stale",
+		}
+		env := applyClaudeOllamaEnv(stale, llmclient.OllamaConfig{})
+
+		assertEnvContains(t, env, "PATH=/usr/bin")
+		assertEnvContains(t, env, "ANTHROPIC_BASE_URL="+ollamaLocalBaseURL)
+		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
+		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
+		assertOllamaAPIKeyAbsent(t, env)
+		for _, entry := range env {
+			if entry == "ANTHROPIC_EXTRA=stale" {
+				t.Fatalf("stale Anthropic env entry was preserved: %v", env)
+			}
+		}
 	})
 
 	t.Run("DoesNotMutateBase", func(t *testing.T) {
@@ -248,7 +270,7 @@ func TestApplyCodexAppServerOllamaEnv(t *testing.T) {
 		// Codex uses the OpenAI-compatible endpoint (/v1 suffix).
 		assertEnvContains(t, env, "OPENAI_BASE_URL="+ollamaLocalBaseURL+"/v1")
 		assertEnvContains(t, env, "OPENAI_API_KEY=ollama")
-		assertEnvAbsent(t, env)
+		assertOllamaAPIKeyAbsent(t, env)
 	})
 
 	t.Run("Cloud", func(t *testing.T) {
@@ -304,7 +326,7 @@ func TestApplyOmpOllamaEnv(t *testing.T) {
 		assertEnvContains(t, env, "ANTHROPIC_BASE_URL="+ollamaLocalBaseURL)
 		assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=ollama")
 		assertEnvContains(t, env, "ANTHROPIC_API_KEY=")
-		assertEnvAbsent(t, env)
+		assertOllamaAPIKeyAbsent(t, env)
 	})
 
 	t.Run("Cloud", func(t *testing.T) {
@@ -462,31 +484,31 @@ func TestWriteOpenCodeOllamaConfig_DoesNotTouchHomeConfig(t *testing.T) {
 		assertNotUnderDir(t, path, filepath.Join(homeDir, ".fabrikk"))
 	}
 
-	// The config.json must exist at path/opencode/config.json.
-	configPath := filepath.Join(path, "opencode", "config.json")
+	// The opencode.json must exist at path/opencode/opencode.json.
+	configPath := filepath.Join(path, "opencode", "opencode.json")
 	raw, readErr := os.ReadFile(configPath)
 	if readErr != nil {
 		cleanup()
-		t.Fatalf("read config.json: %v", readErr)
+		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
 	// Must be valid JSON.
 	var parsed openCodeOllamaConfigJSON
 	if jsonErr := json.Unmarshal(raw, &parsed); jsonErr != nil {
 		cleanup()
-		t.Fatalf("config.json is not valid JSON: %v\ncontents: %s", jsonErr, raw)
+		t.Fatalf("opencode.json is not valid JSON: %v\ncontents: %s", jsonErr, raw)
 	}
 
 	// Verify provider is present.
 	if _, ok := parsed.Providers["ollama"]; !ok {
 		cleanup()
-		t.Errorf("config.json missing 'ollama' provider; providers: %v", parsed.Providers)
+		t.Errorf("opencode.json missing 'ollama' provider; providers: %v", parsed.Providers)
 	}
 
 	// Verify model is written in the expected format.
 	if parsed.Model != "ollama/qwen3.5" {
 		cleanup()
-		t.Errorf("config.json model = %q, want %q", parsed.Model, "ollama/qwen3.5")
+		t.Errorf("opencode.json model = %q, want %q", parsed.Model, "ollama/qwen3.5")
 	}
 
 	// After cleanup the temp directory must be gone.
@@ -507,20 +529,20 @@ func TestWriteOpenCodeOllamaConfig_CloudAPIKey(t *testing.T) {
 	}
 	defer cleanup()
 
-	configPath := filepath.Join(path, "opencode", "config.json")
+	configPath := filepath.Join(path, "opencode", "opencode.json")
 	raw, readErr := os.ReadFile(configPath)
 	if readErr != nil {
-		t.Fatalf("read config.json: %v", readErr)
+		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
 	var parsed openCodeOllamaConfigJSON
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("parse config.json: %v", err)
+		t.Fatalf("parse opencode.json: %v", err)
 	}
 
 	provider, ok := parsed.Providers["ollama"]
 	if !ok {
-		t.Fatal("config.json missing 'ollama' provider")
+		t.Fatal("opencode.json missing 'ollama' provider")
 	}
 	if provider.APIKey != "cloud-opencode-key" {
 		t.Errorf("provider.APIKey = %q, want %q", provider.APIKey, "cloud-opencode-key")
@@ -544,7 +566,7 @@ func TestWriteOpenCodeOllamaConfig_NoModelOmitsField(t *testing.T) {
 	}
 	defer cleanup()
 
-	configPath := filepath.Join(path, "opencode", "config.json")
+	configPath := filepath.Join(path, "opencode", "opencode.json")
 	raw, _ := os.ReadFile(configPath)
 
 	var parsed openCodeOllamaConfigJSON

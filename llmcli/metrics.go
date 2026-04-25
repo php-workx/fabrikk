@@ -77,6 +77,7 @@ var DefaultObserver Observer = NoopObserver{} //nolint:gochecknoglobals // inten
 const (
 	defaultModelLabel = "default"
 	genericErrorType  = "error"
+	noErrorType       = "none"
 )
 
 func effectiveObservedModel(cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig value mirrors Stream option handling.
@@ -127,7 +128,10 @@ func observeStream(backend, model string, started time.Time, in <-chan llmclient
 				terminalSeen = true
 			case llmclient.EventError:
 				success = false
-				errType = LabelErrorType(fmt.Errorf("%s", ev.ErrorMessage))
+				errType = ev.ErrorType
+				if errType == "" {
+					errType = LabelErrorType(fmt.Errorf("%s", ev.ErrorMessage))
+				}
 				terminalSeen = true
 			}
 		}
@@ -184,7 +188,7 @@ func LabelEventType(et llmclient.EventType) string { return string(et) }
 //   - anything else → "error"
 func LabelErrorType(err error) string {
 	if err == nil {
-		return "none"
+		return noErrorType
 	}
 
 	switch {
@@ -193,6 +197,6 @@ func LabelErrorType(err error) string {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline_exceeded"
 	default:
-		return "error"
+		return genericErrorType
 	}
 }

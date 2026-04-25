@@ -3,6 +3,7 @@ package llmcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func TestBuildOpenCodeRunArgs_RunSubcommandAndPrompt(t *testing.T) {
 // ─── writeTempOpenCodeConfig ──────────────────────────────────────────────────
 
 // TestOpenCodeRun_ConfigCleanup verifies that writeTempOpenCodeConfig creates
-// a config.json under <tmpDir>/opencode/, that the config is outside user
+// an opencode.json under <tmpDir>/opencode/, that the config is outside user
 // config directories, and that the directory is removed by the cleanup
 // function.
 func TestOpenCodeRun_ConfigCleanup(t *testing.T) {
@@ -69,19 +70,19 @@ func TestOpenCodeRun_ConfigCleanup(t *testing.T) {
 		t.Fatalf("writeTempOpenCodeConfig: %v", err)
 	}
 
-	// config.json must exist at the expected location.
-	configPath := filepath.Join(xdgHome, "opencode", "config.json")
+	// opencode.json must exist at the expected location.
+	configPath := filepath.Join(xdgHome, "opencode", "opencode.json")
 	data, readErr := os.ReadFile(configPath)
 	if readErr != nil {
 		cleanup()
-		t.Fatalf("read config.json: %v", readErr)
+		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
 	// Config must be valid JSON containing model and systemPrompt.
 	var parsed openCodeConfig
 	if jsonErr := json.Unmarshal(data, &parsed); jsonErr != nil {
 		cleanup()
-		t.Fatalf("unmarshal config.json: %v", jsonErr)
+		t.Fatalf("unmarshal opencode.json: %v", jsonErr)
 	}
 	if parsed.Model != model {
 		t.Errorf("config.Model = %q, want %q", parsed.Model, model)
@@ -114,15 +115,15 @@ func TestOpenCodeRun_ConfigCleanup_EmptyFields(t *testing.T) {
 	}
 	defer cleanup()
 
-	configPath := filepath.Join(xdgHome, "opencode", "config.json")
+	configPath := filepath.Join(xdgHome, "opencode", "opencode.json")
 	data, readErr := os.ReadFile(configPath)
 	if readErr != nil {
-		t.Fatalf("read config.json: %v", readErr)
+		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
 	var parsed openCodeConfig
 	if jsonErr := json.Unmarshal(data, &parsed); jsonErr != nil {
-		t.Fatalf("unmarshal config.json: %v", jsonErr)
+		t.Fatalf("unmarshal opencode.json: %v", jsonErr)
 	}
 	if parsed.Model != "" {
 		t.Errorf("model should be empty, got %q", parsed.Model)
@@ -291,6 +292,9 @@ func TestOpenCodeRun_RequiredUnsupportedOptionReturnsError(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected ErrUnsupportedOption for %q, got nil", opt)
 			}
+			if !errors.Is(err, llmclient.ErrUnsupportedOption) {
+				t.Fatalf("expected ErrUnsupportedOption for %q, got %v", opt, err)
+			}
 		})
 	}
 }
@@ -320,15 +324,15 @@ func TestOpenCodeRun_ConfigCleanup_Ollama(t *testing.T) {
 	}
 	defer cleanup()
 
-	configPath := filepath.Join(xdgHome, "opencode", "config.json")
+	configPath := filepath.Join(xdgHome, "opencode", "opencode.json")
 	data, readErr := os.ReadFile(configPath)
 	if readErr != nil {
-		t.Fatalf("read config.json: %v", readErr)
+		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("unmarshal config.json: %v", err)
+		t.Fatalf("unmarshal opencode.json: %v", err)
 	}
 	if parsed["model"] != "ollama/qwen3.5" {
 		t.Fatalf("config model = %v, want %q", parsed["model"], "ollama/qwen3.5")

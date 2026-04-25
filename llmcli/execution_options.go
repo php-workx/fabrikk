@@ -99,6 +99,8 @@ func applyEnvOverridesLast(base []string, overrides map[string]string) []string 
 	return out
 }
 
+// envKey returns an empty key for malformed entries with no name before '='.
+// Callers treat that as "not addressable" and preserve the entry unchanged.
 func envKey(entry string) string {
 	idx := strings.IndexByte(entry, '=')
 	if idx <= 0 {

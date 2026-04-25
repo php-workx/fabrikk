@@ -563,7 +563,9 @@ func handleClaudeContentBlock(
 	case "tool_use":
 		var args map[string]interface{}
 		if len(block.Input) > 0 {
-			_ = json.Unmarshal(block.Input, &args)
+			if err := json.Unmarshal(block.Input, &args); err != nil {
+				args = map[string]interface{}{"_raw": string(block.Input)}
+			}
 		}
 		tc := &llmclient.ToolCall{
 			ID:        block.ID,

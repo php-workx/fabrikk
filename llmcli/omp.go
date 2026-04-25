@@ -278,6 +278,9 @@ func parseOmpLines(
 		if frame.Type == ompFrameTypeReady && state.startEmitted {
 			continue
 		}
+		if !state.startEmitted && frame.Type != ompFrameTypeReady {
+			continue
+		}
 
 		done, err := ompDispatchFrame(ctx, frame, out, te, state)
 		if err != nil || done {

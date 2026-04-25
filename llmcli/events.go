@@ -121,5 +121,6 @@ func errorEvent(err error) llmclient.Event {
 	return llmclient.Event{
 		Type:         llmclient.EventError,
 		ErrorMessage: msg,
+		ErrorType:    LabelErrorType(err),
 	}
 }
