@@ -55,6 +55,7 @@ type OpenCodeHTTPBackend struct {
 	mu      sync.Mutex
 	srv     *supervisor // non-nil when we own the server process
 	baseURL string      // e.g. "http://127.0.0.1:4096"; set after ensureServer
+	port    int         // port backing baseURL; 0 means externally injected/test URL
 
 	// password is the HTTP basic-auth secret read from
 	// OPENCODE_SERVER_PASSWORD. Empty means no auth is set.
@@ -144,7 +145,7 @@ func (b *OpenCodeHTTPBackend) Stream(
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
 	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
-	if err := llmclient.EnforceRequired(cfg, openCodeHTTPStaticCapabilities(b.info.Version)); err != nil {
+	if err := checkOpenCodeHTTPRequiredOptions(cfg); err != nil {
 		cancelTimeout()
 		return nil, err
 	}
@@ -161,9 +162,12 @@ func (b *OpenCodeHTTPBackend) Stream(
 	}
 
 	// Schema discovery is best-effort — we're schema-gated regardless.
-	if b.schemaDiscovered.Load() == 0 {
-		_ = b.discoverSchema(streamCtx)
-		b.schemaDiscovered.Store(1)
+	if b.schemaDiscovered.CompareAndSwap(0, 1) {
+		go func() {
+			discoverCtx, cancel := context.WithTimeout(streamCtx, openCodeReadyAttemptTimeout)
+			defer cancel()
+			_ = b.discoverSchema(discoverCtx)
+		}()
 	}
 
 	// 1. Open SSE stream BEFORE sending the prompt.
@@ -240,35 +244,49 @@ func (b *OpenCodeHTTPBackend) Stream(
 
 // ensureServer makes sure a server is available at the given port.
 //
-// If b.baseURL is already set (pre-configured or adopted in a previous call),
-// the server is assumed ready — no spawn or port check is performed.
+// If b.baseURL is already set for this port (pre-configured or adopted in a
+// previous call), the server is assumed ready.
 // If we already own a live process, it is reused. If the port is already in
 // use (external instance), we adopt it. Otherwise we spawn a new process.
 func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Already have an owned live process.
 	if b.srv != nil {
 		select {
 		case <-b.srv.done:
 			// Process exited; fall through to respawn.
 			b.srv = nil
+			b.baseURL = ""
+			b.port = 0
 		default:
-			return nil
+			if b.port == port {
+				return nil
+			}
+			b.srv.terminate(nil)
+			_ = b.srv.wait()
+			b.srv = nil
+			b.baseURL = ""
+			b.port = 0
 		}
 	}
 
 	// Pre-configured base URL (test injection or caller-supplied external server).
-	if b.baseURL != "" {
+	if b.baseURL != "" && (b.port == 0 || b.port == port) {
 		return nil
 	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	// Check if an external server is already listening on the port.
 	if isPortInUse(port) {
 		// Adopt the external server; do not spawn our own.
-		b.baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-		return b.waitReady(ctx)
+		if err := b.waitReady(ctx, url); err != nil {
+			return err
+		}
+		b.baseURL = url
+		b.port = port
+		return nil
 	}
 
 	// Spawn the server.
@@ -300,15 +318,21 @@ func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error 
 		}
 	}()
 
-	b.srv = s
-	b.baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := b.waitReady(ctx, url); err != nil {
+		s.terminate(err)
+		_ = s.wait()
+		return err
+	}
 
-	return b.waitReady(ctx)
+	b.srv = s
+	b.baseURL = url
+	b.port = port
+	return nil
 }
 
 // waitReady polls GET /event until the server emits a "server.connected" SSE
 // event or the deadline (openCodeReadyTimeout) is exceeded.
-func (b *OpenCodeHTTPBackend) waitReady(ctx context.Context) error {
+func (b *OpenCodeHTTPBackend) waitReady(ctx context.Context, baseURL string) error {
 	deadline := time.Now().Add(openCodeReadyTimeout)
 
 	for time.Now().Before(deadline) {
@@ -317,7 +341,7 @@ func (b *OpenCodeHTTPBackend) waitReady(ctx context.Context) error {
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, openCodeReadyAttemptTimeout)
-		req, _ := http.NewRequestWithContext(attemptCtx, http.MethodGet, b.baseURL+"/event", http.NoBody)
+		req, _ := http.NewRequestWithContext(attemptCtx, http.MethodGet, baseURL+"/event", http.NoBody)
 		b.setAuth(req)
 		req.Header.Set("Accept", "text/event-stream")
 
@@ -356,7 +380,7 @@ func (b *OpenCodeHTTPBackend) waitReady(ctx context.Context) error {
 		}
 	}
 
-	return fmt.Errorf("opencode serve: readiness timeout after %s at %s", openCodeReadyTimeout, b.baseURL)
+	return fmt.Errorf("opencode serve: readiness timeout after %s at %s", openCodeReadyTimeout, baseURL)
 }
 
 // scanForServerConnected reads lines from body until a "server.connected" data
@@ -516,6 +540,10 @@ func isPortInUse(port int) bool {
 // deadline exceeded error.
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func checkOpenCodeHTTPRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, openCodeHTTPStaticCapabilities(""))
 }
 
 // — SSE stream parser ---------------------------------------------------------

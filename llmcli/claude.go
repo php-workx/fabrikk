@@ -261,8 +261,7 @@ func checkClaudeRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:go
 }
 
 // lastUserMessage returns the concatenated text of the last user-role message
-// in input, falling back to SystemPrompt when no user messages are present.
-// Returns empty string when input is nil.
+// in input. Returns empty string when input is nil or no user text is present.
 func lastUserMessage(input *llmclient.Context) string {
 	if input == nil {
 		return ""
@@ -282,7 +281,7 @@ func lastUserMessage(input *llmclient.Context) string {
 			return strings.Join(parts, "\n")
 		}
 	}
-	return input.SystemPrompt
+	return ""
 }
 
 // claudeStaticCapabilities returns the capabilities advertised for the Claude
@@ -350,6 +349,7 @@ type claudeParseState struct {
 	contentIndex  int
 	assembledMsg  *llmclient.AssistantMessage
 	startEmitted  bool
+	resultEmitted bool
 	startFidelity *llmclient.Fidelity
 }
 
@@ -371,7 +371,7 @@ func parseClaudeStream(
 		line, readErr := internal.ReadBoundedLine(r, maxClaudeLineBytes)
 
 		if readErr != nil {
-			skip, retErr := claudeHandleReadError(readErr, state.startEmitted)
+			skip, retErr := claudeHandleReadError(readErr, state.startEmitted, state.resultEmitted)
 			if skip {
 				continue
 			}
@@ -398,12 +398,15 @@ func parseClaudeStream(
 // Returns (skip=true, nil) when the line should be skipped and the loop should
 // continue. Returns (skip=false, err) when the loop should return err (which
 // may be nil for normal EOF).
-func claudeHandleReadError(err error, startEmitted bool) (skip bool, retErr error) {
+func claudeHandleReadError(err error, startEmitted, resultEmitted bool) (skip bool, retErr error) {
 	if errors.Is(err, io.EOF) {
 		if !startEmitted {
 			return false, io.ErrUnexpectedEOF
 		}
-		return false, nil
+		if resultEmitted {
+			return false, nil
+		}
+		return false, io.ErrUnexpectedEOF
 	}
 	if errors.Is(err, internal.ErrLineTooLong) {
 		return true, nil // skip oversize line, keep going
@@ -428,6 +431,7 @@ func claudeDispatchFrame(
 		return false, claudeOnAssistantFrame(ctx, frame, out, state)
 	case "result":
 		handleClaudeResultFrame(ctx, frame, state.assembledMsg, te)
+		state.resultEmitted = true
 		return true, nil
 	}
 	// "user" (tool results) and unknown types are informational — skip.

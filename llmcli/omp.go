@@ -253,10 +253,7 @@ func parseOmpLines(
 
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				if !state.startEmitted {
-					return io.ErrUnexpectedEOF
-				}
-				return nil
+				return io.ErrUnexpectedEOF
 			}
 			if errors.Is(readErr, internal.ErrLineTooLong) {
 				continue // skip oversize line, keep parsing

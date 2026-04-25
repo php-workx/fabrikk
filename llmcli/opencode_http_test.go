@@ -170,7 +170,7 @@ func TestOpenCodeHTTP_WaitReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := b.waitReady(ctx); err != nil {
+	if err := b.waitReady(ctx, b.baseURL); err != nil {
 		t.Fatalf("waitReady: unexpected error: %v", err)
 	}
 }
@@ -192,7 +192,7 @@ func TestOpenCodeHTTP_WaitReadyTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
 	defer cancel()
 
-	err := b.waitReady(ctx)
+	err := b.waitReady(ctx, b.baseURL)
 	if err == nil {
 		t.Fatal("waitReady: expected timeout error, got nil")
 	}

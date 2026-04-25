@@ -155,12 +155,10 @@ func ExampleClaudeBackend_Stream() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	b, err := SelectBackend(ctx, Requirements{
-		MinStreaming: llmclient.StreamingStructured,
-	})
-	if errors.Is(err, ErrNoBackendAvailable) {
+	b, err := SelectBackendByName("claude")
+	if errors.Is(err, ErrUnknownBackend) {
 		// No CLI installed in this environment; skip gracefully.
-		fmt.Println("no backend available; skipping stream example")
+		fmt.Println("claude backend unavailable; skipping stream example")
 		return
 	}
 

@@ -3,6 +3,8 @@ package llmcli
 import (
 	"bufio"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -258,6 +260,20 @@ func TestOmpPrint_MalformedJSONLineSkipped(t *testing.T) {
 	last := events[len(events)-1]
 	if last.Type != llmclient.EventDone {
 		t.Errorf("last event = %q; want done (malformed line should be skipped)", last.Type)
+	}
+}
+
+func TestOmpPrint_EOFBeforeTerminalFrameIsUnexpected(t *testing.T) {
+	r := ompJSONLReader(
+		`{"type":"ready","session_id":"s1"}`,
+		`{"type":"text_delta","content":"partial"}`,
+	)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("parseOmpStream error = %v; want io.ErrUnexpectedEOF", err)
 	}
 }
 

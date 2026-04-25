@@ -37,12 +37,11 @@ var knownCLIs = []struct{ name, binary string }{
 // DetectAvailable scans for known AI coding CLI tools on PATH and returns the
 // ones that are available, in the canonical priority order (claude, codex,
 // opencode, omp). Version probing is attempted for each found binary using a
-// background context with the caller's responsibility to time out via a parent
-// context if needed. Each version probe uses its own 5-second deadline
-// internally.
+// per-binary 5-second deadline.
 //
-// DetectAvailable never returns an error; CLIs that are not found or whose
-// version probe fails are silently omitted.
+// DetectAvailable never returns an error. CLIs that are not found are omitted.
+// If a version probe fails or times out, the CLI is still returned with
+// CliInfo.Version set to the empty string.
 func DetectAvailable() []CliInfo {
 	var out []CliInfo
 	for _, c := range knownCLIs {

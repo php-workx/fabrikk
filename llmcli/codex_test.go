@@ -587,6 +587,10 @@ func TestCodexExec_TimeoutCancelsSubprocess(t *testing.T) {
 func TestCodexExec_EnvironmentAndRawCapture(t *testing.T) {
 	exe := testExecutable(t)
 	b := NewCodexBackend(CliInfo{Path: exe})
+	wantCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
 
 	var mu sync.Mutex
 	captured := map[llmclient.RawStream][]byte{}
@@ -627,6 +631,9 @@ func TestCodexExec_EnvironmentAndRawCapture(t *testing.T) {
 	done := findEvent(t, events, llmclient.EventDone)
 	if done.Message == nil || !strings.Contains(done.Message.Content[0].Text, "env=codex-env") {
 		t.Fatalf("done message = %#v; want env output", done.Message)
+	}
+	if !strings.Contains(done.Message.Content[0].Text, "cwd="+wantCWD) {
+		t.Fatalf("done message = %#v; want inherited cwd %q", done.Message, wantCWD)
 	}
 
 	mu.Lock()

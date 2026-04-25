@@ -14,9 +14,10 @@ import (
 // Structured streaming, tool events, thinking blocks, and usage reporting are
 // not supported; neither is multi-turn session resumption.
 //
-// The system prompt (if any) is written to a temporary AGENTS.md file whose
-// directory is used as the subprocess working directory. The file is removed
-// once the subprocess exits.
+// When no working directory is provided, the system prompt (if any) is written
+// to a temporary AGENTS.md file whose directory is used as the subprocess
+// working directory. The file is removed once the subprocess exits. Plain
+// requests without a system prompt inherit the caller's working directory.
 //
 // CodexBackend implements [llmclient.Backend].
 type CodexBackend struct {
@@ -36,10 +37,11 @@ func (b *CodexBackend) Capabilities() llmclient.Capabilities {
 // Stream spawns `codex exec <prompt>`, reads the plain-text response, and
 // returns a channel of normalized [llmclient.Event] values.
 //
-// If input.SystemPrompt is non-empty a temporary AGENTS.md is created outside
-// any user config directory. The subprocess working directory is set to the
-// directory containing AGENTS.md so that Codex picks it up as the system
-// prompt. The temporary directory is removed after the subprocess exits.
+// If input.SystemPrompt is non-empty and no working directory is provided, a
+// temporary AGENTS.md is created outside any user config directory. The
+// subprocess working directory is set to the directory containing AGENTS.md so
+// that Codex picks it up as the system prompt. The temporary directory is
+// removed after the subprocess exits.
 //
 // The channel is closed after exactly one terminal event (done or error).
 // Cancelling ctx terminates the subprocess and produces a StopCancelled done
@@ -60,7 +62,7 @@ func (b *CodexBackend) Stream(
 
 	workDir := ""
 	cleanup := func() {}
-	if cfg.WorkingDirectory == "" {
+	if cfg.WorkingDirectory == "" && input != nil && input.SystemPrompt != "" {
 		var err error
 		workDir, cleanup, err = writeTempAgentsFile(input)
 		if err != nil {
@@ -151,9 +153,6 @@ func codexExecPrompt(input *llmclient.Context, cfg llmclient.RequestConfig) stri
 // file with the content of input.SystemPrompt. The directory is safe to use
 // as the `codex exec` working directory: Codex reads AGENTS.md from the CWD
 // as the system prompt.
-//
-// When input is nil or has an empty SystemPrompt, an empty AGENTS.md is still
-// written so that the subprocess always has a consistent working directory.
 //
 // The returned cleanup function removes the entire temporary directory and must
 // be called exactly once after the subprocess exits.
