@@ -39,7 +39,13 @@ func newTerminalEmitter(ch chan<- llmclient.Event) *terminalEmitter {
 func (te *terminalEmitter) done(ctx context.Context, msg *llmclient.AssistantMessage, usage *llmclient.Usage, reason llmclient.StopReason) {
 	te.once.Do(func() {
 		defer close(te.ch)
-		emit(ctx, te.ch, doneEvent(msg, usage, reason))
+		ev := doneEvent(msg, usage, reason)
+		select {
+		case te.ch <- ev:
+			return
+		default:
+		}
+		emit(ctx, te.ch, ev)
 	})
 }
 

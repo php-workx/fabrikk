@@ -79,7 +79,7 @@ const (
 	genericErrorType  = "error"
 )
 
-func effectiveObservedModel(cfg llmclient.RequestConfig) string {
+func effectiveObservedModel(cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig value mirrors Stream option handling.
 	if cfg.Ollama != nil && cfg.Ollama.Model != "" {
 		return cfg.Ollama.Model
 	}
@@ -93,7 +93,7 @@ func observeAvailability(backend string, available bool) bool {
 	return available
 }
 
-func observeStreamStart(backend string, cfg llmclient.RequestConfig) (string, time.Time) {
+func observeStreamStart(backend string, cfg llmclient.RequestConfig) (string, time.Time) { //nolint:gocritic // RequestConfig value mirrors Stream option handling.
 	model := effectiveObservedModel(cfg)
 	DefaultObserver.OnStreamStart(backend, model)
 	return model, time.Now()

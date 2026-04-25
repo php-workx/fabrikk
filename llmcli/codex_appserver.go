@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -262,8 +262,10 @@ func (b *CodexAppServerBackend) Stream(
 	opts ...llmclient.Option,
 ) (<-chan llmclient.Event, error) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
 	if err := checkCodexAppServerRequiredOptions(cfg); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
@@ -271,29 +273,42 @@ func (b *CodexAppServerBackend) Stream(
 	// Fast path: a pre-cancelled context must be rejected before we consume
 	// the semaphore token, because Go's select is non-deterministic when
 	// multiple cases are ready simultaneously.
-	if err := ctx.Err(); err != nil {
+	if err := streamCtx.Err(); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 
 	// Acquire turn semaphore — blocks if another turn is in-flight.
 	select {
 	case <-b.turnCh:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-streamCtx.Done():
+		cancelTimeout()
+		return nil, streamCtx.Err()
 	}
 
 	ch := make(chan llmclient.Event, 16)
 	te := newTerminalEmitter(ch)
 
 	go func() {
+		defer cancelTimeout()
 		defer func() { b.turnCh <- struct{}{} }() // always release semaphore
 		defer te.close()                          // safety guard
 
-		proc, err := b.ensureProcess(ctx, cfg)
+		proc, err := b.ensureProcess(streamCtx, cfg)
 		if err != nil {
-			te.error(ctx, fmt.Errorf("llmcli codex-appserver: ensure process: %w", err))
+			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: ensure process: %w", err))
 			return
 		}
+
+		cancelWatchDone := make(chan struct{})
+		go func() {
+			select {
+			case <-streamCtx.Done():
+				b.restartAfterProtocolError(streamCtx.Err())
+			case <-cancelWatchDone:
+			}
+		}()
+		defer close(cancelWatchDone)
 
 		id := b.nextID.Add(1)
 		prompt := lastUserMessage(input)
@@ -310,19 +325,19 @@ func (b *CodexAppServerBackend) Stream(
 
 		if err := internal.WriteRequest(proc.stdin, id, "turn", params); err != nil {
 			b.restartAfterProtocolError(err)
-			te.error(ctx, fmt.Errorf("llmcli codex-appserver: write turn request: %w", err))
+			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: write turn request: %w", err))
 			return
 		}
 
 		// Emit start event. The session ID is echoed from options; the server
 		// may include a canonical session ID in a future notification.
 		fidelity := codexAppServerFidelity(cfg)
-		if !emit(ctx, ch, startEvent(cfg.SessionID, fidelity)) {
-			te.done(ctx, nil, nil, llmclient.StopCancelled)
+		if !emit(streamCtx, ch, startEvent(cfg.SessionID, fidelity)) {
+			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
 			return
 		}
 
-		b.readTurnEvents(ctx, proc, ch, te)
+		b.readTurnEvents(streamCtx, proc, ch, te)
 	}()
 
 	return observeStream(b.Name(), model, started, ch), nil
@@ -330,15 +345,19 @@ func (b *CodexAppServerBackend) Stream(
 
 // ensureProcess returns the current healthy process, or starts a fresh one if
 // none is running. Caller must not hold procMu.
-func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient.RequestConfig) (*codexProcess, error) {
+func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient.RequestConfig) (*codexProcess, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
 	b.procMu.Lock()
 	defer b.procMu.Unlock()
 
-	env := os.Environ()
+	overrides := map[string]string(nil)
 	routingKey := "default"
 	if cfg.Ollama != nil {
-		env = applyCodexAppServerOllamaEnv(env, *cfg.Ollama)
+		overrides = codexAppServerOllamaEnvOverrides(*cfg.Ollama)
 		routingKey = ollamaOpenAIBaseURL(*cfg.Ollama) + "|" + cfg.Ollama.APIKey
+	}
+	env := resolveProcessEnv(cfg, overrides)
+	if cfg.EnvironmentSet || len(cfg.EnvironmentOverlay) > 0 {
+		routingKey += "|env:" + strings.Join(env, "\x00")
 	}
 
 	if b.proc != nil && b.healthy && b.proc.alive() && b.routingKey == routingKey {
@@ -408,6 +427,10 @@ func (b *CodexAppServerBackend) readTurnEvents(
 
 		body, err := internal.ReadFrame(proc.stdout, maxCodexHeaderBytes, maxCodexBodyBytes)
 		if err != nil {
+			if ctx.Err() != nil {
+				te.done(ctx, nil, nil, llmclient.StopCancelled)
+				return
+			}
 			if errors.Is(err, io.EOF) {
 				// Process closed stdout without a done notification — treat as
 				// successful end of turn.
@@ -521,23 +544,13 @@ func (b *CodexAppServerBackend) dispatchCodexFrame(
 
 // checkCodexAppServerRequiredOptions returns ErrUnsupportedOption if any option
 // in cfg.RequiredOptions is not supported by the Codex app-server backend.
-func checkCodexAppServerRequiredOptions(cfg llmclient.RequestConfig) error {
-	supported := map[llmclient.OptionName]struct{}{
-		llmclient.OptionModel:   {},
-		llmclient.OptionSession: {},
-		llmclient.OptionOllama:  {},
-	}
-	for name := range cfg.RequiredOptions {
-		if _, ok := supported[name]; !ok {
-			return fmt.Errorf("%w: %s", llmclient.ErrUnsupportedOption, name)
-		}
-	}
-	return nil
+func checkCodexAppServerRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, codexAppServerStaticCapabilities(""))
 }
 
 // codexAppServerFidelity returns the Fidelity for the start event, reflecting
 // which options were actually applied.
-func codexAppServerFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
+func codexAppServerFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	optResults := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		optResults[llmclient.OptionModel] = llmclient.OptionApplied
@@ -551,10 +564,7 @@ func codexAppServerFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
 	if cfg.CodexProfile != "" {
 		optResults[llmclient.OptionCodexProfile] = llmclient.OptionUnsupported
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(optResults) > 0 {
-		optionResults = optResults
-	}
+	optionResults := mergeOptionResults(optResults, executionOptionResults(cfg, codexAppServerStaticCapabilities("")))
 
 	return &llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
@@ -574,9 +584,12 @@ func codexAppServerStaticCapabilities(version string) llmclient.Capabilities {
 		MultiTurn:     true,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:   llmclient.OptionSupportFull,
-			llmclient.OptionSession: llmclient.OptionSupportFull,
-			llmclient.OptionOllama:  llmclient.OptionSupportFull,
+			llmclient.OptionModel:              llmclient.OptionSupportFull,
+			llmclient.OptionSession:            llmclient.OptionSupportFull,
+			llmclient.OptionOllama:             llmclient.OptionSupportFull,
+			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
+			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
 		},
 	}
 }

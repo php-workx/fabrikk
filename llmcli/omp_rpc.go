@@ -187,7 +187,7 @@ func (b *OmpRPCBackend) Stream(
 }
 
 // ensureStarted returns the running proc, starting the omp process if needed.
-func (b *OmpRPCBackend) ensureStarted(ctx context.Context, cfg llmclient.RequestConfig) (*ompRPCProc, error) {
+func (b *OmpRPCBackend) ensureStarted(ctx context.Context, cfg llmclient.RequestConfig) (*ompRPCProc, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	routingKey := "default"
@@ -359,7 +359,7 @@ func ompRPCStaticCapabilities(version string) llmclient.Capabilities {
 
 // ompRPCFidelity constructs the Fidelity for an omp RPC turn, reflecting which
 // options were applied (model and host tools when present).
-func ompRPCFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
+func ompRPCFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	results := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		results[llmclient.OptionModel] = llmclient.OptionApplied
@@ -373,20 +373,16 @@ func ompRPCFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
 	if cfg.Ollama != nil {
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(results) > 0 {
-		optionResults = results
-	}
 	return &llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlHost,
-		OptionResults: optionResults,
+		OptionResults: mergeOptionResults(results, executionOptionResults(cfg, ompRPCStaticCapabilities(""))),
 	}
 }
 
 // checkOmpRPCRequiredOptions returns ErrUnsupportedOption if any required
 // option is not supported by the omp RPC backend.
-func checkOmpRPCRequiredOptions(cfg llmclient.RequestConfig) error {
+func checkOmpRPCRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
 	supported := map[llmclient.OptionName]struct{}{
 		llmclient.OptionModel:     {},
 		llmclient.OptionSession:   {},

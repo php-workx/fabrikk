@@ -168,6 +168,39 @@ func TestSelectBackendByName_ReturnsErrUnknownBackend(t *testing.T) {
 	}
 }
 
+func TestNewBackendByName_ConstructsWithoutDetection(t *testing.T) {
+	f := makeFactory("fake-backend", "missing-binary", PreferClaude, structuredCaps("fake-backend"), true)
+	restore := resetBackendFactoriesForTest(f)
+	defer restore()
+
+	b, err := NewBackendByName("fake-backend", CliInfo{
+		Name:    "fake",
+		Binary:  "missing-binary",
+		Path:    "/custom/fake",
+		Version: "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("NewBackendByName: %v", err)
+	}
+	if b.Name() != "fake-backend" {
+		t.Errorf("backend name = %q, want fake-backend", b.Name())
+	}
+}
+
+func TestNewBackendByName_ReturnsUnknownBackendShape(t *testing.T) {
+	restore := resetBackendFactoriesForTest()
+	defer restore()
+
+	_, err := NewBackendByName("missing", CliInfo{Path: "/custom/fake"})
+	if !errors.Is(err, ErrUnknownBackend) {
+		t.Errorf("NewBackendByName(missing): got %v, want ErrUnknownBackend", err)
+	}
+	var bne *BackendNotFoundError
+	if !errors.As(err, &bne) {
+		t.Errorf("NewBackendByName(missing): error should be *BackendNotFoundError, got %T", err)
+	}
+}
+
 // TestSelectBackend_StreamingFidelityLevels verifies the streaming fidelity
 // ordering: BufferedOnly < TextChunk < StructuredUnknown < Structured.
 func TestSelectBackend_StreamingFidelityLevels(t *testing.T) {

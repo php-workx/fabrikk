@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/php-workx/fabrikk/llmcli/internal"
@@ -54,24 +53,26 @@ func (b *OmpBackend) Stream(
 	opts ...llmclient.Option,
 ) (<-chan llmclient.Event, error) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
 	if err := checkOmpPrintRequiredOptions(cfg); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
 
 	args := buildOmpPrintArgs(input, cfg)
-	env := os.Environ()
-	if cfg.Ollama != nil {
-		env = applyOmpOllamaEnv(env, *cfg.Ollama)
-	}
+	env := resolveProcessEnv(cfg, claudeOllamaEnvOverrides(cfg))
 
-	s, err := startSupervised(ctx, processSpec{
-		Command: b.info.Path,
-		Args:    args,
-		Env:     env,
+	s, err := startSupervised(streamCtx, processSpec{
+		Command:    b.info.Path,
+		Args:       args,
+		Env:        env,
+		Dir:        cfg.WorkingDirectory,
+		RawCapture: cfg.RawCapture,
 	})
 	if err != nil {
+		cancelTimeout()
 		return nil, fmt.Errorf("llmcli omp: start subprocess: %w", err)
 	}
 
@@ -79,9 +80,10 @@ func (b *OmpBackend) Stream(
 	te := newTerminalEmitter(ch)
 
 	go func() {
+		defer cancelTimeout()
 		defer te.close() // safety guard; real terminal comes from parser or wait goroutine
 
-		parseErr := parseOmpStream(ctx, s.Stdout, ch, te, ompPrintFidelity(cfg))
+		parseErr := parseOmpStream(streamCtx, s.Stdout, ch, te, ompPrintFidelity(cfg))
 
 		// Drain stdout so cmd.Wait does not deadlock on a live reader.
 		_, _ = io.Copy(io.Discard, s.Stdout)
@@ -93,10 +95,10 @@ func (b *OmpBackend) Stream(
 			!errors.Is(parseErr, context.Canceled) &&
 			!errors.Is(parseErr, context.DeadlineExceeded):
 			te.error(ctx, fmt.Errorf("llmcli omp: parse: %w", parseErr))
-		case ctx.Err() != nil:
-			te.done(ctx, nil, nil, llmclient.StopCancelled)
+		case streamCtx.Err() != nil:
+			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
 		case waitErr != nil:
-			te.error(ctx, fmt.Errorf("llmcli omp: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
+			te.error(streamCtx, fmt.Errorf("llmcli omp: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
 		default:
 			// Normal exit — parseOmpStream already emitted done via te.
 		}
@@ -106,7 +108,7 @@ func (b *OmpBackend) Stream(
 }
 
 // buildOmpPrintArgs constructs the argument list for `omp -p --mode json ...`.
-func buildOmpPrintArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string {
+func buildOmpPrintArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
 	prompt := lastUserMessage(input)
 	args := []string{"-p", prompt, "--mode", "json"}
 
@@ -124,18 +126,8 @@ func buildOmpPrintArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []
 
 // checkOmpPrintRequiredOptions returns ErrUnsupportedOption if any required
 // option is not supported by the omp print backend.
-func checkOmpPrintRequiredOptions(cfg llmclient.RequestConfig) error {
-	supported := map[llmclient.OptionName]struct{}{
-		llmclient.OptionModel:   {},
-		llmclient.OptionSession: {},
-		llmclient.OptionOllama:  {},
-	}
-	for name := range cfg.RequiredOptions {
-		if _, ok := supported[name]; !ok {
-			return fmt.Errorf("%w: %s", llmclient.ErrUnsupportedOption, name)
-		}
-	}
-	return nil
+func checkOmpPrintRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, ompPrintStaticCapabilities(""))
 }
 
 // ompPrintStaticCapabilities returns the capabilities advertised for the omp
@@ -151,9 +143,14 @@ func ompPrintStaticCapabilities(version string) llmclient.Capabilities {
 		Usage:         true,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:   llmclient.OptionSupportFull,
-			llmclient.OptionSession: llmclient.OptionSupportFull,
-			llmclient.OptionOllama:  llmclient.OptionSupportFull,
+			llmclient.OptionModel:              llmclient.OptionSupportFull,
+			llmclient.OptionSession:            llmclient.OptionSupportFull,
+			llmclient.OptionOllama:             llmclient.OptionSupportFull,
+			llmclient.OptionWorkingDirectory:   llmclient.OptionSupportFull,
+			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
+			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
 }
@@ -381,7 +378,7 @@ func ompOnReady(ctx context.Context, frame ompFrame, out chan<- llmclient.Event,
 	return nil
 }
 
-func ompPrintFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
+func ompPrintFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	optResults := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		optResults[llmclient.OptionModel] = llmclient.OptionApplied
@@ -392,10 +389,7 @@ func ompPrintFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
 	if cfg.Ollama != nil {
 		optResults[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(optResults) > 0 {
-		optionResults = optResults
-	}
+	optionResults := mergeOptionResults(optResults, executionOptionResults(cfg, ompPrintStaticCapabilities("")))
 
 	return &llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,

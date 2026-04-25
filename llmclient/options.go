@@ -1,6 +1,9 @@
 package llmclient
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // OptionName identifies a functional option. Used in RequiredOptions,
 // Capabilities.OptionSupport, and Fidelity.OptionResults.
@@ -13,9 +16,31 @@ const (
 	OptionTemperature  OptionName = "temperature"
 	OptionOllama       OptionName = "ollama"
 	OptionCodexProfile OptionName = "codexProfile"
+	OptionCodexJSONL   OptionName = "codexJSONL"
 	OptionHostTools    OptionName = "hostTools"
 	OptionOpenCodePort OptionName = "openCodePort"
+
+	OptionWorkingDirectory   OptionName = "workingDirectory"
+	OptionEnvironment        OptionName = "environment"
+	OptionEnvironmentOverlay OptionName = "environmentOverlay"
+	OptionTimeout            OptionName = "timeout"
+	OptionReasoningEffort    OptionName = "reasoningEffort"
+	OptionRawCapture         OptionName = "rawCapture"
 )
+
+// RawStream identifies which subprocess stream produced a raw captured chunk.
+type RawStream string
+
+const (
+	// RawStreamStdout identifies bytes captured from subprocess stdout.
+	RawStreamStdout RawStream = "stdout"
+	// RawStreamStderr identifies bytes captured from subprocess stderr.
+	RawStreamStderr RawStream = "stderr"
+)
+
+// RawCaptureFunc receives cloned stdout/stderr chunks from subprocess
+// backends before llmcli normalizes stdout into events or trims stderr tails.
+type RawCaptureFunc func(stream RawStream, data []byte)
 
 // OptionResult is returned in Fidelity.OptionResults to report how the
 // backend handled each option passed to Stream.
@@ -82,11 +107,40 @@ type RequestConfig struct {
 	// CodexProfile selects a named Codex config profile.
 	CodexProfile string
 
+	// CodexJSONL requests Codex exec JSONL stdout mode for callers that need
+	// raw Codex events while still receiving normalized llmclient events.
+	CodexJSONL bool
+
 	// HostTools is the list of host-defined tools injected for this request.
 	HostTools []Tool
 
 	// OpenCodePort is the port for an existing OpenCode serve process.
 	OpenCodePort int
+
+	// WorkingDirectory is the project/worktree directory for subprocess
+	// backends that support per-call working-directory control.
+	WorkingDirectory string
+
+	// Environment is the complete subprocess environment when EnvironmentSet
+	// is true. It is copied before storage and before subprocess execution.
+	Environment []string
+
+	// EnvironmentSet distinguishes an explicitly empty replacement environment
+	// from the default "inherit os.Environ()" behavior.
+	EnvironmentSet bool
+
+	// EnvironmentOverlay is applied over Environment or os.Environ before
+	// backend-required environment overrides.
+	EnvironmentOverlay map[string]string
+
+	// Timeout is a per-request deadline layered on top of the caller context.
+	Timeout time.Duration
+
+	// ReasoningEffort requests a backend-specific reasoning effort level.
+	ReasoningEffort string
+
+	// RawCapture receives cloned stdout/stderr chunks from subprocess backends.
+	RawCapture RawCaptureFunc
 
 	// RequiredOptions is the set of options that must be applied for the
 	// request to proceed. If any are unsupported, Stream returns
@@ -156,6 +210,13 @@ func WithCodexProfile(name string) Option {
 	}
 }
 
+// WithCodexJSONL requests Codex exec JSONL stdout mode when supported.
+func WithCodexJSONL(enabled bool) Option {
+	return func(cfg *RequestConfig) {
+		cfg.CodexJSONL = enabled
+	}
+}
+
 // WithHostTools injects custom tool definitions to be executed by the host
 // rather than the CLI. Recognized by omp RPC backend; reported unsupported by
 // others.
@@ -174,6 +235,54 @@ func WithOpenCodePort(port int) Option {
 	}
 }
 
+// WithWorkingDirectory sets the project/worktree directory for backends that
+// support per-request working-directory control.
+func WithWorkingDirectory(dir string) Option {
+	return func(cfg *RequestConfig) {
+		cfg.WorkingDirectory = dir
+	}
+}
+
+// WithEnvironment replaces the subprocess environment for backends that
+// support per-request environment control. The input slice is copied.
+func WithEnvironment(env []string) Option {
+	return func(cfg *RequestConfig) {
+		cfg.Environment = append([]string(nil), env...)
+		cfg.EnvironmentSet = true
+	}
+}
+
+// WithEnvironmentOverlay overlays key/value pairs onto the base subprocess
+// environment for backends that support environment control. The input map is
+// copied.
+func WithEnvironmentOverlay(env map[string]string) Option {
+	return func(cfg *RequestConfig) {
+		cfg.EnvironmentOverlay = copyStringMap(env)
+	}
+}
+
+// WithTimeout adds a per-request timeout layered on top of the caller context.
+func WithTimeout(timeout time.Duration) Option {
+	return func(cfg *RequestConfig) {
+		cfg.Timeout = timeout
+	}
+}
+
+// WithReasoningEffort requests a backend-specific reasoning effort level.
+func WithReasoningEffort(level string) Option {
+	return func(cfg *RequestConfig) {
+		cfg.ReasoningEffort = level
+	}
+}
+
+// WithRawCapture registers a synchronous callback for raw stdout/stderr chunks
+// from subprocess backends.
+func WithRawCapture(capture RawCaptureFunc) Option {
+	return func(cfg *RequestConfig) {
+		cfg.RawCapture = capture
+	}
+}
+
 // EnforceRequired validates that every option listed in cfg.RequiredOptions is
 // supported (OptionSupportFull or OptionSupportPartial) by the capabilities
 // advertised in caps. If any required option maps to OptionSupportNone or is
@@ -182,7 +291,7 @@ func WithOpenCodePort(port int) Option {
 // Backends should call EnforceRequired after ApplyOptions and before spawning
 // any subprocess, so that callers using WithRequiredOptions get a fast, clean
 // failure rather than a subprocess error.
-func EnforceRequired(cfg RequestConfig, caps Capabilities) error {
+func EnforceRequired(cfg RequestConfig, caps Capabilities) error { //nolint:gocritic // public API takes RequestConfig by value for copy-on-apply semantics.
 	for name := range cfg.RequiredOptions {
 		support, ok := caps.OptionSupport[name]
 		if !ok || support == OptionSupportNone {
@@ -194,8 +303,15 @@ func EnforceRequired(cfg RequestConfig, caps Capabilities) error {
 
 // ApplyOptions applies opts to a copy of base and returns the resulting
 // RequestConfig. Backends call this at the start of Stream.
-func ApplyOptions(base RequestConfig, opts []Option) RequestConfig {
+func ApplyOptions(base RequestConfig, opts []Option) RequestConfig { //nolint:gocritic // public API intentionally copies RequestConfig values.
 	cfg := base
+	cfg.Environment = append([]string(nil), base.Environment...)
+	cfg.EnvironmentOverlay = copyStringMap(base.EnvironmentOverlay)
+	cfg.HostTools = append([]Tool(nil), base.HostTools...)
+	if base.Ollama != nil {
+		ollama := *base.Ollama
+		cfg.Ollama = &ollama
+	}
 	if base.RequiredOptions == nil {
 		cfg.RequiredOptions = make(map[OptionName]struct{})
 	} else {
@@ -211,4 +327,15 @@ func ApplyOptions(base RequestConfig, opts []Option) RequestConfig {
 		}
 	}
 	return cfg
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

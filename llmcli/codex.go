@@ -50,30 +50,51 @@ func (b *CodexBackend) Stream(
 	opts ...llmclient.Option,
 ) (<-chan llmclient.Event, error) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
 	if err := checkCodexExecRequiredOptions(cfg); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
 
-	workDir, cleanup, err := writeTempAgentsFile(input)
-	if err != nil {
-		return nil, fmt.Errorf("llmcli codex: temp AGENTS.md: %w", err)
+	workDir := ""
+	cleanup := func() {}
+	if cfg.WorkingDirectory == "" {
+		var err error
+		workDir, cleanup, err = writeTempAgentsFile(input)
+		if err != nil {
+			cancelTimeout()
+			return nil, fmt.Errorf("llmcli codex: temp AGENTS.md: %w", err)
+		}
 	}
 
 	streaming := llmclient.StreamingBufferedOnly
-	if probePipeStreaming(ctx, b.info.Path, nil) {
+	if probePipeStreaming(streamCtx, b.info.Path, nil) {
 		streaming = llmclient.StreamingTextChunk
 	}
 
 	spec := processSpec{
-		Command: b.info.Path,
-		Args:    buildCodexExecArgs(input, cfg),
-		Dir:     workDir,
+		Command:    b.info.Path,
+		Args:       buildCodexExecArgs(input, cfg),
+		Env:        resolveProcessEnv(cfg, nil),
+		Dir:        workDir,
+		RawCapture: cfg.RawCapture,
 	}
 
-	ch, err := streamTextProcess(ctx, spec, codexExecFidelity(cfg, streaming), cleanup)
+	var ch <-chan llmclient.Event
+	var err error
+	cleanupFn := func() {
+		defer cancelTimeout()
+		cleanup()
+	}
+	if cfg.CodexJSONL {
+		ch, err = streamCodexJSONLProcess(streamCtx, spec, codexExecFidelity(cfg, streaming), cleanupFn)
+	} else {
+		ch, err = streamTextProcess(streamCtx, spec, codexExecFidelity(cfg, streaming), cleanupFn)
+	}
 	if err != nil {
+		cancelTimeout()
 		cleanup()
 		return nil, fmt.Errorf("llmcli codex: %w", err)
 	}
@@ -86,12 +107,23 @@ func (b *CodexBackend) Stream(
 // The system prompt is supplied via AGENTS.md in the subprocess working
 // directory rather than through a flag (codex exec has no --system-prompt
 // flag). writeTempAgentsFile must be called before invoking the subprocess.
-func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string {
-	prompt := lastUserMessage(input)
+func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
+	prompt := codexExecPrompt(input, cfg)
 
 	// --approval-policy full-auto prevents interactive approval prompts in
 	// programmatic invocations where there is no human operator at the terminal.
-	args := []string{"exec", prompt, "--approval-policy", "full-auto"}
+	var args []string
+	if cfg.WorkingDirectory != "" {
+		args = append(args, "-C", cfg.WorkingDirectory)
+	}
+	if cfg.ReasoningEffort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+cfg.ReasoningEffort)
+	}
+	args = append(args, "exec")
+	if cfg.CodexJSONL {
+		args = append(args, "--json")
+	}
+	args = append(args, prompt, "--approval-policy", "full-auto")
 
 	model := cfg.Model
 	if cfg.Ollama != nil {
@@ -106,6 +138,14 @@ func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) [
 	}
 
 	return args
+}
+
+func codexExecPrompt(input *llmclient.Context, cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
+	prompt := lastUserMessage(input)
+	if cfg.WorkingDirectory == "" || input == nil || input.SystemPrompt == "" {
+		return prompt
+	}
+	return "System instructions:\n" + input.SystemPrompt + "\n\nUser request:\n" + prompt
 }
 
 // writeTempAgentsFile creates a temporary directory containing an AGENTS.md
@@ -146,17 +186,8 @@ func writeTempAgentsFile(input *llmclient.Context) (dir string, cleanup func(), 
 
 // checkCodexExecRequiredOptions returns ErrUnsupportedOption if any option in
 // cfg.RequiredOptions is not supported by the codex-exec backend.
-func checkCodexExecRequiredOptions(cfg llmclient.RequestConfig) error {
-	supported := map[llmclient.OptionName]struct{}{
-		llmclient.OptionModel:  {},
-		llmclient.OptionOllama: {},
-	}
-	for name := range cfg.RequiredOptions {
-		if _, ok := supported[name]; !ok {
-			return fmt.Errorf("%w: %s", llmclient.ErrUnsupportedOption, name)
-		}
-	}
-	return nil
+func checkCodexExecRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, codexExecStaticCapabilities(""))
 }
 
 // codexExecStaticCapabilities returns the static capabilities advertised for
@@ -169,13 +200,20 @@ func codexExecStaticCapabilities(version string) llmclient.Capabilities {
 		Streaming:     llmclient.StreamingBufferedOnly,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:  llmclient.OptionSupportFull,
-			llmclient.OptionOllama: llmclient.OptionSupportFull,
+			llmclient.OptionModel:              llmclient.OptionSupportFull,
+			llmclient.OptionOllama:             llmclient.OptionSupportFull,
+			llmclient.OptionWorkingDirectory:   llmclient.OptionSupportFull,
+			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
+			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionReasoningEffort:    llmclient.OptionSupportFull,
+			llmclient.OptionCodexJSONL:         llmclient.OptionSupportFull,
+			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
 }
 
-func codexExecFidelity(cfg llmclient.RequestConfig, streaming llmclient.StreamingFidelity) *llmclient.Fidelity {
+func codexExecFidelity(cfg llmclient.RequestConfig, streaming llmclient.StreamingFidelity) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	results := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		results[llmclient.OptionModel] = llmclient.OptionApplied
@@ -183,10 +221,7 @@ func codexExecFidelity(cfg llmclient.RequestConfig, streaming llmclient.Streamin
 	if cfg.Ollama != nil {
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(results) > 0 {
-		optionResults = results
-	}
+	optionResults := mergeOptionResults(results, executionOptionResults(cfg, codexExecStaticCapabilities("")))
 	return &llmclient.Fidelity{
 		Streaming:     streaming,
 		ToolControl:   llmclient.ToolControlNone,

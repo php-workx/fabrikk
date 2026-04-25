@@ -152,21 +152,20 @@ func applyClaudeOllamaEnv(env []string, cfg llmclient.OllamaConfig) []string {
 //
 // env is not mutated; a fresh slice is returned.
 func applyCodexAppServerOllamaEnv(env []string, cfg llmclient.OllamaConfig) []string {
-	openaiURL := ollamaOpenAIBaseURL(cfg)
+	return applyEnvOverridesLast(env, codexAppServerOllamaEnvOverrides(cfg))
+}
 
-	result := make([]string, len(env), len(env)+4)
-	copy(result, env)
-	result = append(result, "OPENAI_BASE_URL="+openaiURL)
-
-	if cfg.APIKey != "" {
-		result = append(result,
-			"OPENAI_API_KEY="+cfg.APIKey,
-			"OLLAMA_API_KEY="+cfg.APIKey,
-		)
-	} else {
-		result = append(result, "OPENAI_API_KEY=ollama")
+func codexAppServerOllamaEnvOverrides(cfg llmclient.OllamaConfig) map[string]string {
+	overrides := map[string]string{
+		"OPENAI_BASE_URL": ollamaOpenAIBaseURL(cfg),
 	}
-	return result
+	if cfg.APIKey != "" {
+		overrides["OPENAI_API_KEY"] = cfg.APIKey
+		overrides["OLLAMA_API_KEY"] = cfg.APIKey
+	} else {
+		overrides["OPENAI_API_KEY"] = "ollama"
+	}
+	return overrides
 }
 
 // applyOmpOllamaEnv returns a new env slice (built from env) with Anthropic

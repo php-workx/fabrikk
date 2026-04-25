@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/php-workx/fabrikk/llmclient"
 )
 
 // TestMain allows the test binary to double as a subprocess fixture. When
@@ -45,6 +49,17 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	case "exit_zero":
+		os.Exit(0)
+	case "inspect_process":
+		cwd, _ := os.Getwd()
+		_, _ = fmt.Fprintf(os.Stdout, "cwd=%s\nenv=%s\n", cwd, os.Getenv("LLMCLI_TEST_ENV_VALUE"))
+		_, _ = fmt.Fprint(os.Stderr, "inspect-stderr\n")
+		os.Exit(0)
+	case "codex_jsonl":
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"item.completed","item":{"type":"command_execution"}}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"item.completed","item":{"type":"agent_message","text":"VERK_RESULT: {\"status\":\"done\",\"completion_code\":\"ok\"}"}}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":3,"output_tokens":7,"total_tokens":18}}`)
+		_, _ = fmt.Fprintln(os.Stderr, "jsonl-stderr")
 		os.Exit(0)
 	}
 
@@ -222,5 +237,83 @@ func TestSupervisor_CapturesStderrTail(t *testing.T) {
 	tail := s.stderrTail()
 	if !strings.Contains(tail, stderrMsg) {
 		t.Errorf("stderrTail() = %q; want it to contain %q", tail, stderrMsg)
+	}
+}
+
+func TestSupervisor_AppliesDirEnvAndRawCapture(t *testing.T) {
+	exe := testExecutable(t)
+	dir := t.TempDir()
+	wantDir, evalErr := filepath.EvalSymlinks(dir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, evalErr)
+	}
+
+	var mu sync.Mutex
+	captured := map[llmclient.RawStream][]byte{}
+	capture := func(stream llmclient.RawStream, data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured[stream] = append(captured[stream], data...)
+	}
+
+	spec := processSpec{
+		Command: exe,
+		Env: append(baseEnv(),
+			"LLMCLI_TEST_FIXTURE=inspect_process",
+			"LLMCLI_TEST_ENV_VALUE=from-env",
+		),
+		Dir:        dir,
+		RawCapture: capture,
+	}
+
+	s, err := startSupervised(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("startSupervised: %v", err)
+	}
+	stdoutBytes, _ := io.ReadAll(s.Stdout)
+	if err := s.wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	stdout := string(stdoutBytes)
+	if !strings.Contains(stdout, "cwd="+wantDir) {
+		t.Errorf("stdout = %q; want cwd %q", stdout, wantDir)
+	}
+	if !strings.Contains(stdout, "env=from-env") {
+		t.Errorf("stdout = %q; want env value", stdout)
+	}
+	if !strings.Contains(s.stderrTail(), "inspect-stderr") {
+		t.Errorf("stderr tail = %q; want inspect-stderr", s.stderrTail())
+	}
+
+	mu.Lock()
+	rawStdout := string(captured[llmclient.RawStreamStdout])
+	rawStderr := string(captured[llmclient.RawStreamStderr])
+	mu.Unlock()
+	if !strings.Contains(rawStdout, "env=from-env") {
+		t.Errorf("raw stdout = %q; want env output", rawStdout)
+	}
+	if !strings.Contains(rawStderr, "inspect-stderr") {
+		t.Errorf("raw stderr = %q; want inspect-stderr", rawStderr)
+	}
+}
+
+func TestResolveProcessEnvPrecedence(t *testing.T) {
+	cfg := llmclient.DefaultRequestConfig()
+	cfg.Environment = []string{"A=1", "B=base", "D=base", "B=duplicate"}
+	cfg.EnvironmentSet = true
+	cfg.EnvironmentOverlay = map[string]string{
+		"B": "overlay",
+		"C": "overlay",
+	}
+
+	env := resolveProcessEnv(cfg, map[string]string{
+		"C": "override",
+		"D": "override",
+	})
+
+	want := []string{"A=1", "B=overlay", "C=override", "D=override"}
+	if strings.Join(env, "\n") != strings.Join(want, "\n") {
+		t.Errorf("env = %v, want %v", env, want)
 	}
 }

@@ -58,14 +58,17 @@ func (b *OpenCodeRunBackend) Stream(
 	opts ...llmclient.Option,
 ) (<-chan llmclient.Event, error) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
 	if err := checkOpenCodeRunRequiredOptions(cfg); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
 
 	xdgConfigHome, cleanup, err := writeTempOpenCodeConfig(input, cfg)
 	if err != nil {
+		cancelTimeout()
 		return nil, fmt.Errorf("llmcli opencode: temp config: %w", err)
 	}
 
@@ -75,13 +78,19 @@ func (b *OpenCodeRunBackend) Stream(
 	}
 
 	spec := processSpec{
-		Command: b.info.Path,
-		Args:    buildOpenCodeRunArgs(input, cfg),
-		Env:     buildOpenCodeRunEnv(os.Environ(), xdgConfigHome),
+		Command:    b.info.Path,
+		Args:       buildOpenCodeRunArgs(input, cfg),
+		Env:        resolveProcessEnv(cfg, map[string]string{"XDG_CONFIG_HOME": xdgConfigHome}),
+		Dir:        cfg.WorkingDirectory,
+		RawCapture: cfg.RawCapture,
 	}
 
-	ch, err := streamTextProcess(ctx, spec, openCodeRunFidelity(cfg, streaming), cleanup)
+	ch, err := streamTextProcess(streamCtx, spec, openCodeRunFidelity(cfg, streaming), func() {
+		defer cancelTimeout()
+		cleanup()
+	})
 	if err != nil {
+		cancelTimeout()
 		cleanup()
 		return nil, fmt.Errorf("llmcli opencode: %w", err)
 	}
@@ -93,7 +102,7 @@ func (b *OpenCodeRunBackend) Stream(
 //
 // opencode run does not accept flags for system prompt or model; those are
 // supplied through the config file written by writeTempOpenCodeConfig.
-func buildOpenCodeRunArgs(input *llmclient.Context, _ llmclient.RequestConfig) []string {
+func buildOpenCodeRunArgs(input *llmclient.Context, _ llmclient.RequestConfig) []string { //nolint:gocritic // signature kept stable for existing helper tests.
 	return []string{"run", lastUserMessage(input)}
 }
 
@@ -121,6 +130,8 @@ type openCodeConfig struct {
 // The temporary directory is created via os.MkdirTemp and is placed in the
 // OS-default temp location — never inside ~/.config/opencode, ~/.codex, or
 // ~/.fabrikk.
+//
+//nolint:gocritic // RequestConfig value keeps config generation side-effect-free.
 func writeTempOpenCodeConfig(
 	input *llmclient.Context,
 	cfg llmclient.RequestConfig,
@@ -189,17 +200,8 @@ func buildOpenCodeRunEnv(base []string, xdgConfigHome string) []string {
 
 // checkOpenCodeRunRequiredOptions returns ErrUnsupportedOption if any option
 // in cfg.RequiredOptions is not supported by the opencode-run backend.
-func checkOpenCodeRunRequiredOptions(cfg llmclient.RequestConfig) error {
-	supported := map[llmclient.OptionName]struct{}{
-		llmclient.OptionModel:  {},
-		llmclient.OptionOllama: {},
-	}
-	for name := range cfg.RequiredOptions {
-		if _, ok := supported[name]; !ok {
-			return fmt.Errorf("%w: %s", llmclient.ErrUnsupportedOption, name)
-		}
-	}
-	return nil
+func checkOpenCodeRunRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, openCodeRunStaticCapabilities(""))
 }
 
 // openCodeRunStaticCapabilities returns the static capabilities advertised for
@@ -212,13 +214,18 @@ func openCodeRunStaticCapabilities(version string) llmclient.Capabilities {
 		Streaming:     llmclient.StreamingBufferedOnly,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:  llmclient.OptionSupportFull,
-			llmclient.OptionOllama: llmclient.OptionSupportFull,
+			llmclient.OptionModel:              llmclient.OptionSupportFull,
+			llmclient.OptionOllama:             llmclient.OptionSupportFull,
+			llmclient.OptionWorkingDirectory:   llmclient.OptionSupportFull,
+			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
+			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
 }
 
-func openCodeRunFidelity(cfg llmclient.RequestConfig, streaming llmclient.StreamingFidelity) *llmclient.Fidelity {
+func openCodeRunFidelity(cfg llmclient.RequestConfig, streaming llmclient.StreamingFidelity) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	results := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		results[llmclient.OptionModel] = llmclient.OptionApplied
@@ -226,10 +233,7 @@ func openCodeRunFidelity(cfg llmclient.RequestConfig, streaming llmclient.Stream
 	if cfg.Ollama != nil {
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(results) > 0 {
-		optionResults = results
-	}
+	optionResults := mergeOptionResults(results, executionOptionResults(cfg, openCodeRunStaticCapabilities("")))
 	return &llmclient.Fidelity{
 		Streaming:     streaming,
 		ToolControl:   llmclient.ToolControlNone,

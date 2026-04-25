@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/php-workx/fabrikk/llmclient"
 )
 
 // defaultStderrTailBytes is the max bytes retained from subprocess stderr for
@@ -36,6 +39,10 @@ type processSpec struct {
 	// Dir is the working directory for the subprocess.
 	// An empty string inherits the parent working directory.
 	Dir string
+
+	// RawCapture receives cloned stdout/stderr chunks before backend parsers
+	// normalize stdout or stderr tail buffering trims stderr.
+	RawCapture llmclient.RawCaptureFunc
 }
 
 // supervisor owns the lifecycle of a single subprocess. It holds the exclusive
@@ -90,7 +97,7 @@ func startSupervised(ctx context.Context, spec processSpec) (*supervisor, error)
 	}
 
 	tail := newTailWriter()
-	cmd.Stderr = tail // Go's exec package starts a copying goroutine for this.
+	cmd.Stderr = stderrWriter(tail, spec.RawCapture) // Go's exec package starts a copying goroutine for this.
 
 	if err := cmd.Start(); err != nil {
 		_ = stdoutPipe.Close() // release pipe resources on failure
@@ -99,7 +106,7 @@ func startSupervised(ctx context.Context, spec processSpec) (*supervisor, error)
 
 	s := &supervisor{
 		cmd:           cmd,
-		Stdout:        bufio.NewReader(stdoutPipe),
+		Stdout:        bufio.NewReader(stdoutReader(stdoutPipe, spec.RawCapture)),
 		stderrTailBuf: tail,
 		done:          make(chan struct{}),
 	}
@@ -116,6 +123,51 @@ func startSupervised(ctx context.Context, spec processSpec) (*supervisor, error)
 	}()
 
 	return s, nil
+}
+
+func stdoutReader(r io.Reader, capture llmclient.RawCaptureFunc) io.Reader {
+	if capture == nil {
+		return r
+	}
+	return &rawCaptureReader{
+		stream:  llmclient.RawStreamStdout,
+		reader:  r,
+		capture: capture,
+	}
+}
+
+func stderrWriter(tail io.Writer, capture llmclient.RawCaptureFunc) io.Writer {
+	if capture == nil {
+		return tail
+	}
+	return io.MultiWriter(tail, rawCaptureWriter{
+		stream:  llmclient.RawStreamStderr,
+		capture: capture,
+	})
+}
+
+type rawCaptureReader struct {
+	stream  llmclient.RawStream
+	reader  io.Reader
+	capture llmclient.RawCaptureFunc
+}
+
+func (r *rawCaptureReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.capture(r.stream, append([]byte(nil), p[:n]...))
+	}
+	return n, err
+}
+
+type rawCaptureWriter struct {
+	stream  llmclient.RawStream
+	capture llmclient.RawCaptureFunc
+}
+
+func (w rawCaptureWriter) Write(p []byte) (int, error) {
+	w.capture(w.stream, append([]byte(nil), p...))
+	return len(p), nil
 }
 
 // wait calls cmd.Wait() exactly once and caches the result. Subsequent calls

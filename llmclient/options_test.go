@@ -2,7 +2,9 @@ package llmclient_test
 
 import (
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -95,6 +97,18 @@ func TestWithCodexProfile(t *testing.T) {
 	}
 }
 
+func TestWithCodexJSONL(t *testing.T) {
+	cfg := apply(llmclient.WithCodexJSONL(true))
+	if !cfg.CodexJSONL {
+		t.Error("expected CodexJSONL to be true")
+	}
+
+	cfg = apply(llmclient.WithCodexJSONL(false))
+	if cfg.CodexJSONL {
+		t.Error("expected CodexJSONL to be false")
+	}
+}
+
 func TestWithHostTools(t *testing.T) {
 	tools := []llmclient.Tool{
 		{Name: "Read", Description: "Read a file"},
@@ -115,6 +129,40 @@ func TestWithOpenCodePort(t *testing.T) {
 	cfg := apply(llmclient.WithOpenCodePort(8080))
 	if cfg.OpenCodePort != 8080 {
 		t.Errorf("expected OpenCodePort 8080, got %d", cfg.OpenCodePort)
+	}
+}
+
+func TestWithExecutionControlOptions(t *testing.T) {
+	capture := func(llmclient.RawStream, []byte) {}
+	env := []string{"A=1", "B=2"}
+	overlay := map[string]string{"B": "override", "C": "3"}
+
+	cfg := apply(
+		llmclient.WithWorkingDirectory("/tmp/worktree"),
+		llmclient.WithEnvironment(env),
+		llmclient.WithEnvironmentOverlay(overlay),
+		llmclient.WithTimeout(2*time.Second),
+		llmclient.WithReasoningEffort("high"),
+		llmclient.WithRawCapture(capture),
+	)
+
+	if cfg.WorkingDirectory != "/tmp/worktree" {
+		t.Errorf("WorkingDirectory = %q", cfg.WorkingDirectory)
+	}
+	if !reflect.DeepEqual(cfg.Environment, env) || !cfg.EnvironmentSet {
+		t.Errorf("Environment = %v set=%v, want %v set=true", cfg.Environment, cfg.EnvironmentSet, env)
+	}
+	if !reflect.DeepEqual(cfg.EnvironmentOverlay, overlay) {
+		t.Errorf("EnvironmentOverlay = %v, want %v", cfg.EnvironmentOverlay, overlay)
+	}
+	if cfg.Timeout != 2*time.Second {
+		t.Errorf("Timeout = %v, want 2s", cfg.Timeout)
+	}
+	if cfg.ReasoningEffort != "high" {
+		t.Errorf("ReasoningEffort = %q, want high", cfg.ReasoningEffort)
+	}
+	if cfg.RawCapture == nil {
+		t.Fatal("RawCapture is nil")
 	}
 }
 
@@ -214,10 +262,15 @@ func TestApplyOptionsIsolation(t *testing.T) {
 	// Applying options to a shared base must not mutate the original.
 	base := llmclient.DefaultRequestConfig()
 	base.Model = "original"
+	base.Environment = []string{"BASE=1"}
+	base.EnvironmentSet = true
+	base.EnvironmentOverlay = map[string]string{"OVERLAY": "1"}
 
 	_ = llmclient.ApplyOptions(base, []llmclient.Option{
 		llmclient.WithModel("overridden"),
 		llmclient.WithRequiredOptions(llmclient.OptionModel),
+		llmclient.WithEnvironment([]string{"BASE=2"}),
+		llmclient.WithEnvironmentOverlay(map[string]string{"OVERLAY": "2"}),
 	})
 
 	if base.Model != "original" {
@@ -225,6 +278,47 @@ func TestApplyOptionsIsolation(t *testing.T) {
 	}
 	if len(base.RequiredOptions) != 0 {
 		t.Errorf("ApplyOptions mutated the base RequestConfig (RequiredOptions has entries)")
+	}
+	if !reflect.DeepEqual(base.Environment, []string{"BASE=1"}) {
+		t.Errorf("ApplyOptions mutated base Environment: %v", base.Environment)
+	}
+	if !reflect.DeepEqual(base.EnvironmentOverlay, map[string]string{"OVERLAY": "1"}) {
+		t.Errorf("ApplyOptions mutated base EnvironmentOverlay: %v", base.EnvironmentOverlay)
+	}
+}
+
+func TestApplyOptionsDeepCopiesExecutionControlInputs(t *testing.T) {
+	env := []string{"A=1"}
+	overlay := map[string]string{"B": "2"}
+	cfg := apply(
+		llmclient.WithEnvironment(env),
+		llmclient.WithEnvironmentOverlay(overlay),
+	)
+
+	env[0] = "A=changed"
+	overlay["B"] = "changed"
+
+	if cfg.Environment[0] != "A=1" {
+		t.Errorf("Environment aliased caller slice, got %v", cfg.Environment)
+	}
+	if cfg.EnvironmentOverlay["B"] != "2" {
+		t.Errorf("EnvironmentOverlay aliased caller map, got %v", cfg.EnvironmentOverlay)
+	}
+
+	base := llmclient.DefaultRequestConfig()
+	base.Environment = []string{"BASE=1"}
+	base.EnvironmentSet = true
+	base.EnvironmentOverlay = map[string]string{"BASE_OVERLAY": "1"}
+
+	applied := llmclient.ApplyOptions(base, nil)
+	applied.Environment[0] = "BASE=changed"
+	applied.EnvironmentOverlay["BASE_OVERLAY"] = "changed"
+
+	if base.Environment[0] != "BASE=1" {
+		t.Errorf("ApplyOptions aliased base Environment, base now %v", base.Environment)
+	}
+	if base.EnvironmentOverlay["BASE_OVERLAY"] != "1" {
+		t.Errorf("ApplyOptions aliased base EnvironmentOverlay, base now %v", base.EnvironmentOverlay)
 	}
 }
 

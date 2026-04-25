@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,6 +135,56 @@ func TestBuildCodexExecArgs_ExecSubcommandAndPrompt(t *testing.T) {
 	}
 	if args[1] != promptText {
 		t.Errorf("args[1] = %q, want %q", args[1], promptText)
+	}
+}
+
+func TestBuildCodexExecArgs_WorkingDirectoryAndReasoningEffort(t *testing.T) {
+	input := &llmclient.Context{
+		SystemPrompt: "Follow the repo rules.",
+		Messages: []llmclient.Message{
+			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
+				{Type: llmclient.ContentText, Text: "implement feature"},
+			}},
+		},
+	}
+	cfg := llmclient.DefaultRequestConfig()
+	cfg.WorkingDirectory = "/tmp/worktree"
+	cfg.ReasoningEffort = "high"
+
+	args := buildCodexExecArgs(input, cfg)
+
+	assertFlagsPresent(t, args, map[string]string{
+		"-C": "/tmp/worktree",
+		"-c": "model_reasoning_effort=high",
+	})
+	execIdx := flagIndex(args, "exec")
+	if execIdx < 0 || execIdx+1 >= len(args) {
+		t.Fatalf("exec prompt not found in args %v", args)
+	}
+	prompt := args[execIdx+1]
+	if !strings.Contains(prompt, "System instructions:\nFollow the repo rules.") {
+		t.Errorf("prompt = %q; want injected system instructions", prompt)
+	}
+	if !strings.Contains(prompt, "User request:\nimplement feature") {
+		t.Errorf("prompt = %q; want user request", prompt)
+	}
+}
+
+func TestBuildCodexExecArgs_CodexJSONL(t *testing.T) {
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
+				{Type: llmclient.ContentText, Text: "hello"},
+			}},
+		},
+	}
+	cfg := llmclient.DefaultRequestConfig()
+	cfg.CodexJSONL = true
+
+	args := buildCodexExecArgs(input, cfg)
+
+	if flagIndex(args, "--json") < 0 {
+		t.Fatalf("--json flag missing when cfg.CodexJSONL is true; args=%v", args)
 	}
 }
 
@@ -309,6 +361,26 @@ func TestCodexExec_RequiredUnsupportedOptionReturnsError(t *testing.T) {
 	}
 }
 
+func TestCodexExec_RequiredReasoningEffortAccepted(t *testing.T) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithReasoningEffort("high"),
+		llmclient.WithRequiredOptions(llmclient.OptionReasoningEffort),
+	})
+	if err := checkCodexExecRequiredOptions(cfg); err != nil {
+		t.Fatalf("expected required OptionReasoningEffort to be accepted, got %v", err)
+	}
+}
+
+func TestCodexExec_RequiredCodexJSONLAccepted(t *testing.T) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithCodexJSONL(true),
+		llmclient.WithRequiredOptions(llmclient.OptionCodexJSONL),
+	})
+	if err := checkCodexExecRequiredOptions(cfg); err != nil {
+		t.Fatalf("expected required OptionCodexJSONL to be accepted, got %v", err)
+	}
+}
+
 func TestCodexExec_RequiredOllamaOptionAccepted(t *testing.T) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
 		llmclient.WithOllama(llmclient.OllamaConfig{Model: "gpt-oss:120b"}),
@@ -482,6 +554,160 @@ func TestCodexExec_Cancel(t *testing.T) {
 		// Channel closed as expected after cancellation.
 	case <-time.After(5 * time.Second):
 		t.Error("channel not closed within 5s after context cancellation")
+	}
+}
+
+func TestCodexExec_TimeoutCancelsSubprocess(t *testing.T) {
+	exe := testExecutable(t)
+	b := NewCodexBackend(CliInfo{Path: exe})
+	t.Setenv("LLMCLI_TEST_FIXTURE", "sleep")
+
+	ch, err := b.Stream(
+		context.Background(),
+		&llmclient.Context{Messages: []llmclient.Message{{
+			Role: llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{
+				Type: llmclient.ContentText,
+				Text: "hello",
+			}},
+		}}},
+		llmclient.WithTimeout(50*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainSubprocessChan(t, ch)
+	done := findEvent(t, events, llmclient.EventDone)
+	if done.Reason != llmclient.StopCancelled {
+		t.Errorf("done.Reason = %q, want %q", done.Reason, llmclient.StopCancelled)
+	}
+}
+
+func TestCodexExec_EnvironmentAndRawCapture(t *testing.T) {
+	exe := testExecutable(t)
+	b := NewCodexBackend(CliInfo{Path: exe})
+
+	var mu sync.Mutex
+	captured := map[llmclient.RawStream][]byte{}
+	capture := func(stream llmclient.RawStream, data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured[stream] = append(captured[stream], data...)
+	}
+
+	env := append(baseEnv(),
+		"LLMCLI_TEST_FIXTURE=inspect_process",
+		"LLMCLI_TEST_ENV_VALUE=codex-env",
+	)
+	ch, err := b.Stream(
+		context.Background(),
+		&llmclient.Context{Messages: []llmclient.Message{{
+			Role: llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{
+				Type: llmclient.ContentText,
+				Text: "hello",
+			}},
+		}}},
+		llmclient.WithEnvironment(env),
+		llmclient.WithRawCapture(capture),
+	)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainSubprocessChan(t, ch)
+	start := findEvent(t, events, llmclient.EventStart)
+	if got := start.Fidelity.OptionResults[llmclient.OptionEnvironment]; got != llmclient.OptionApplied {
+		t.Errorf("OptionEnvironment result = %q, want applied", got)
+	}
+	if got := start.Fidelity.OptionResults[llmclient.OptionRawCapture]; got != llmclient.OptionApplied {
+		t.Errorf("OptionRawCapture result = %q, want applied", got)
+	}
+	done := findEvent(t, events, llmclient.EventDone)
+	if done.Message == nil || !strings.Contains(done.Message.Content[0].Text, "env=codex-env") {
+		t.Fatalf("done message = %#v; want env output", done.Message)
+	}
+
+	mu.Lock()
+	rawStdout := string(captured[llmclient.RawStreamStdout])
+	rawStderr := string(captured[llmclient.RawStreamStderr])
+	mu.Unlock()
+	if !strings.Contains(rawStdout, "env=codex-env") {
+		t.Errorf("raw stdout = %q; want env output", rawStdout)
+	}
+	if !strings.Contains(rawStderr, "inspect-stderr") {
+		t.Errorf("raw stderr = %q; want inspect-stderr", rawStderr)
+	}
+}
+
+func TestCodexExec_JSONLModePreservesRawEventsAndNormalizesText(t *testing.T) {
+	exe := testExecutable(t)
+	b := NewCodexBackend(CliInfo{Path: exe})
+
+	var mu sync.Mutex
+	captured := map[llmclient.RawStream][]byte{}
+	capture := func(stream llmclient.RawStream, data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured[stream] = append(captured[stream], data...)
+	}
+
+	env := append(baseEnv(), "LLMCLI_TEST_FIXTURE=codex_jsonl")
+	ch, err := b.Stream(
+		context.Background(),
+		&llmclient.Context{Messages: []llmclient.Message{{
+			Role: llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{
+				Type: llmclient.ContentText,
+				Text: "hello",
+			}},
+		}}},
+		llmclient.WithEnvironment(env),
+		llmclient.WithCodexJSONL(true),
+		llmclient.WithRawCapture(capture),
+	)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainSubprocessChan(t, ch)
+	start := findEvent(t, events, llmclient.EventStart)
+	if got := start.Fidelity.OptionResults[llmclient.OptionCodexJSONL]; got != llmclient.OptionApplied {
+		t.Errorf("OptionCodexJSONL result = %q, want applied", got)
+	}
+
+	delta := findEvent(t, events, llmclient.EventTextDelta)
+	if !strings.Contains(delta.Delta, `VERK_RESULT: {"status":"done","completion_code":"ok"}`) {
+		t.Errorf("text delta = %q; want normalized agent message text", delta.Delta)
+	}
+
+	done := findEvent(t, events, llmclient.EventDone)
+	if done.Message == nil || len(done.Message.Content) == 0 {
+		t.Fatalf("done message = %#v; want content", done.Message)
+	}
+	if done.Message.Content[0].Text != delta.Delta {
+		t.Errorf("done text = %q, want %q", done.Message.Content[0].Text, delta.Delta)
+	}
+	if done.Usage == nil {
+		t.Fatal("done usage is nil")
+	}
+	if done.Usage.InputTokens != 11 || done.Usage.CacheReadTokens != 3 || done.Usage.OutputTokens != 7 {
+		t.Errorf("usage = %#v; want input=11 cached=3 output=7", done.Usage)
+	}
+
+	mu.Lock()
+	rawStdout := string(captured[llmclient.RawStreamStdout])
+	rawStderr := string(captured[llmclient.RawStreamStderr])
+	mu.Unlock()
+	if !strings.Contains(rawStdout, `"type":"turn.completed"`) {
+		t.Errorf("raw stdout = %q; want JSONL turn.completed", rawStdout)
+	}
+	if !strings.Contains(rawStdout, `"type":"command_execution"`) {
+		t.Errorf("raw stdout = %q; want activity event preserved", rawStdout)
+	}
+	if !strings.Contains(rawStderr, "jsonl-stderr") {
+		t.Errorf("raw stderr = %q; want jsonl-stderr", rawStderr)
 	}
 }
 

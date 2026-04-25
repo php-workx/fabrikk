@@ -142,6 +142,18 @@ func SelectBackendByName(name string) (llmclient.Backend, error) {
 	return nil, &BackendNotFoundError{Name: name}
 }
 
+// NewBackendByName constructs the backend registered under name using the
+// caller-provided CliInfo. Unlike SelectBackendByName, it does not inspect PATH
+// or run detection; callers are responsible for providing a usable executable
+// path in info.
+func NewBackendByName(name string, info CliInfo) (llmclient.Backend, error) {
+	f, ok := factoryByName(name)
+	if !ok {
+		return nil, &BackendNotFoundError{Name: name}
+	}
+	return f.New(info), nil
+}
+
 // filterByStaticRequirements returns the candidates whose registered factory
 // has a binary in detected and whose static Capabilities satisfy req. The
 // result is in factory priority order (from [registeredBackendFactories]).

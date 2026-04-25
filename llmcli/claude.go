@@ -64,7 +64,7 @@ func startSupervisedWithStdin(ctx context.Context, spec processSpecWithStdin) (*
 	}
 
 	tail := newTailWriter()
-	cmd.Stderr = tail
+	cmd.Stderr = stderrWriter(tail, spec.RawCapture)
 
 	if err := cmd.Start(); err != nil {
 		_ = stdoutPipe.Close()
@@ -73,7 +73,7 @@ func startSupervisedWithStdin(ctx context.Context, spec processSpecWithStdin) (*
 
 	s := &supervisor{
 		cmd:           cmd,
-		Stdout:        bufio.NewReader(stdoutPipe),
+		Stdout:        bufio.NewReader(stdoutReader(stdoutPipe, spec.RawCapture)),
 		stderrTailBuf: tail,
 		done:          make(chan struct{}),
 	}
@@ -125,9 +125,11 @@ func (b *ClaudeBackend) Stream(
 	opts ...llmclient.Option,
 ) (<-chan llmclient.Event, error) {
 	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
 
 	// Validate required options before spawning any subprocess.
 	if err := checkClaudeRequiredOptions(cfg); err != nil {
+		cancelTimeout()
 		return nil, err
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
@@ -135,7 +137,7 @@ func (b *ClaudeBackend) Stream(
 	prompt := lastUserMessage(input)
 	useStdin := len(prompt) > stdinThreshold
 	args := buildClaudeArgs(input, cfg, useStdin)
-	env := buildClaudeEnv(os.Environ(), cfg)
+	env := resolveProcessEnv(cfg, claudeOllamaEnvOverrides(cfg))
 
 	var stdinReader io.Reader
 	if useStdin {
@@ -144,15 +146,18 @@ func (b *ClaudeBackend) Stream(
 
 	spec := processSpecWithStdin{
 		processSpec: processSpec{
-			Command: b.info.Path,
-			Args:    args,
-			Env:     env,
+			Command:    b.info.Path,
+			Args:       args,
+			Env:        env,
+			Dir:        cfg.WorkingDirectory,
+			RawCapture: cfg.RawCapture,
 		},
 		stdin: stdinReader,
 	}
 
-	s, err := startSupervisedWithStdin(ctx, spec)
+	s, err := startSupervisedWithStdin(streamCtx, spec)
 	if err != nil {
+		cancelTimeout()
 		return nil, fmt.Errorf("llmcli claude: start subprocess: %w", err)
 	}
 
@@ -160,9 +165,10 @@ func (b *ClaudeBackend) Stream(
 	te := newTerminalEmitter(ch)
 
 	go func() {
+		defer cancelTimeout()
 		defer te.close() // safety guard; real terminal comes from parser or wait goroutine
 
-		parseErr := parseClaudeStream(ctx, s.Stdout, ch, te, claudeInitFidelity(cfg))
+		parseErr := parseClaudeStream(streamCtx, s.Stdout, ch, te, claudeInitFidelity(cfg))
 
 		// Drain stdout so cmd.Wait does not deadlock on a live reader.
 		_, _ = io.Copy(io.Discard, s.Stdout)
@@ -174,10 +180,10 @@ func (b *ClaudeBackend) Stream(
 			!errors.Is(parseErr, context.Canceled) &&
 			!errors.Is(parseErr, context.DeadlineExceeded):
 			te.error(ctx, fmt.Errorf("llmcli claude: parse: %w", parseErr))
-		case ctx.Err() != nil:
-			te.done(ctx, nil, nil, llmclient.StopCancelled)
+		case streamCtx.Err() != nil:
+			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
 		case waitErr != nil:
-			te.error(ctx, fmt.Errorf("llmcli claude: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
+			te.error(streamCtx, fmt.Errorf("llmcli claude: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
 		default:
 			// Normal exit — parseClaudeStream already emitted done via te.
 		}
@@ -191,7 +197,7 @@ func (b *ClaudeBackend) Stream(
 // When useStdin is true the prompt is omitted from the -p value (empty string)
 // because the caller will pipe it via stdin. When useStdin is false the full
 // prompt text is passed as the -p argument.
-func buildClaudeArgs(input *llmclient.Context, cfg llmclient.RequestConfig, useStdin bool) []string {
+func buildClaudeArgs(input *llmclient.Context, cfg llmclient.RequestConfig, useStdin bool) []string { //nolint:gocritic // internal tests and callers use RequestConfig values consistently.
 	prompt := lastUserMessage(input)
 
 	var args []string
@@ -229,46 +235,29 @@ func buildClaudeArgs(input *llmclient.Context, cfg llmclient.RequestConfig, useS
 // buildClaudeEnv constructs the subprocess environment. base is typically
 // os.Environ(). When cfg.Ollama is non-nil, the Anthropic API endpoint and
 // auth env vars are injected to route traffic through Ollama.
-func buildClaudeEnv(base []string, cfg llmclient.RequestConfig) []string {
+func buildClaudeEnv(base []string, cfg llmclient.RequestConfig) []string { //nolint:gocritic // kept value-based to match existing helper tests.
+	return applyEnvOverridesLast(base, claudeOllamaEnvOverrides(cfg))
+}
+
+func claudeOllamaEnvOverrides(cfg llmclient.RequestConfig) map[string]string { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
 	if cfg.Ollama == nil {
-		return base
+		return nil
 	}
-
-	o := cfg.Ollama
-	baseURL := o.BaseURL
-	if baseURL == "" {
-		baseURL = "http://localhost:11434"
+	overrides := map[string]string{
+		"ANTHROPIC_BASE_URL":   ollamaEffectiveBaseURL(*cfg.Ollama),
+		"ANTHROPIC_AUTH_TOKEN": "ollama",
+		"ANTHROPIC_API_KEY":    "",
 	}
-
-	env := make([]string, len(base), len(base)+4)
-	copy(env, base)
-
-	env = append(env,
-		"ANTHROPIC_BASE_URL="+baseURL,
-		"ANTHROPIC_AUTH_TOKEN=ollama",
-		"ANTHROPIC_API_KEY=",
-	)
-	if o.APIKey != "" {
-		env = append(env, "OLLAMA_API_KEY="+o.APIKey)
+	if cfg.Ollama.APIKey != "" {
+		overrides["OLLAMA_API_KEY"] = cfg.Ollama.APIKey
 	}
-
-	return env
+	return overrides
 }
 
 // checkClaudeRequiredOptions returns ErrUnsupportedOption if any option in
 // cfg.RequiredOptions is not supported by the Claude backend.
-func checkClaudeRequiredOptions(cfg llmclient.RequestConfig) error {
-	supported := map[llmclient.OptionName]struct{}{
-		llmclient.OptionModel:   {},
-		llmclient.OptionSession: {},
-		llmclient.OptionOllama:  {},
-	}
-	for name := range cfg.RequiredOptions {
-		if _, ok := supported[name]; !ok {
-			return fmt.Errorf("%w: %s", llmclient.ErrUnsupportedOption, name)
-		}
-	}
-	return nil
+func checkClaudeRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, claudeStaticCapabilities(""))
 }
 
 // lastUserMessage returns the concatenated text of the last user-role message
@@ -309,9 +298,14 @@ func claudeStaticCapabilities(version string) llmclient.Capabilities {
 		Usage:         true,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:   llmclient.OptionSupportFull,
-			llmclient.OptionSession: llmclient.OptionSupportFull,
-			llmclient.OptionOllama:  llmclient.OptionSupportFull,
+			llmclient.OptionModel:              llmclient.OptionSupportFull,
+			llmclient.OptionSession:            llmclient.OptionSupportFull,
+			llmclient.OptionOllama:             llmclient.OptionSupportFull,
+			llmclient.OptionWorkingDirectory:   llmclient.OptionSupportFull,
+			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
+			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
 }
@@ -465,7 +459,7 @@ func claudeOnSystemFrame(
 
 // claudeInitFidelity returns the Fidelity advertised on the start event for a
 // Claude stream-json session.
-func claudeInitFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
+func claudeInitFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
 	results := make(map[llmclient.OptionName]llmclient.OptionResult)
 	if cfg.Model != "" {
 		results[llmclient.OptionModel] = llmclient.OptionApplied
@@ -476,10 +470,7 @@ func claudeInitFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity {
 	if cfg.Ollama != nil {
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	var optionResults map[llmclient.OptionName]llmclient.OptionResult
-	if len(results) > 0 {
-		optionResults = results
-	}
+	optionResults := mergeOptionResults(results, executionOptionResults(cfg, claudeStaticCapabilities("")))
 	return &llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlBuiltIn,
