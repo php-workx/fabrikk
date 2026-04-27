@@ -68,8 +68,8 @@ type Requirements struct {
 	// NeedsUsage requires the backend to report token usage on done events.
 	NeedsUsage bool
 
-	// Model is an optional model hint. When StrictProbe is true, selection
-	// verifies that the backend can route to this model.
+	// Model is an optional model hint. Backends are filtered by this value only
+	// when their static capabilities enumerate supported models.
 	Model string
 
 	// MinContextTokens is an optional minimum context window size in tokens.
@@ -106,7 +106,10 @@ type candidate struct {
 // It never silently downgrades a required capability. Returns
 // [ErrNoBackendAvailable] if no installed CLI meets all requirements.
 func SelectBackend(ctx context.Context, req Requirements) (llmclient.Backend, error) {
-	detected := DetectAvailable()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	detected := DetectAvailableContext(ctx)
 	candidates := filterByStaticRequirements(detected, req)
 	if req.StrictProbe {
 		candidates = filterByProbe(ctx, candidates)
@@ -188,6 +191,23 @@ func filterByStaticRequirements(detected []CliInfo, req Requirements) []candidat
 // "never silently downgrade" gate: a backend that cannot meet a stated
 // requirement is excluded from selection regardless of preference.
 func satisfiesStaticRequirements(caps llmclient.Capabilities, req Requirements) bool {
+	if !satisfiesStaticFeatureRequirements(caps, req) {
+		return false
+	}
+	if req.MinStreaming != "" && !streamingFidelityMeets(caps.Streaming, req.MinStreaming) {
+		return false
+	}
+	if req.Model != "" && len(caps.Models) > 0 && !containsString(caps.Models, req.Model) {
+		return false
+	}
+	// Only filter by context window when both sides are known.
+	if req.MinContextTokens > 0 && caps.MaxContextTokens > 0 && caps.MaxContextTokens < req.MinContextTokens {
+		return false
+	}
+	return true
+}
+
+func satisfiesStaticFeatureRequirements(caps llmclient.Capabilities, req Requirements) bool {
 	if req.NeedsToolEvents && !caps.ToolEvents {
 		return false
 	}
@@ -203,9 +223,6 @@ func satisfiesStaticRequirements(caps llmclient.Capabilities, req Requirements) 
 	if req.NeedsMultiTurn && !caps.MultiTurn {
 		return false
 	}
-	if req.MinStreaming != "" && !streamingFidelityMeets(caps.Streaming, req.MinStreaming) {
-		return false
-	}
 	if req.NeedsThinking && !caps.Thinking {
 		return false
 	}
@@ -213,10 +230,6 @@ func satisfiesStaticRequirements(caps llmclient.Capabilities, req Requirements) 
 		return false
 	}
 	if req.NeedsOllama && !caps.OllamaRouting {
-		return false
-	}
-	// Only filter by context window when both sides are known.
-	if req.MinContextTokens > 0 && caps.MaxContextTokens > 0 && caps.MaxContextTokens < req.MinContextTokens {
 		return false
 	}
 	return true
@@ -253,15 +266,27 @@ func fidelityRank(f llmclient.StreamingFidelity) int {
 // It instantiates each backend via its factory New function, calls Available(),
 // and discards the instance. The selected backend is constructed fresh by
 // [pickByPreference].
-func filterByProbe(_ context.Context, candidates []candidate) []candidate {
+func filterByProbe(ctx context.Context, candidates []candidate) []candidate {
 	out := candidates[:0:0]
 	for i := range candidates {
+		if ctx.Err() != nil {
+			return out
+		}
 		b := candidates[i].factory.New(candidates[i].info)
 		if b.Available() {
 			out = append(out, candidates[i])
 		}
 	}
 	return out
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // pickByPreference selects the best candidate from the priority-ordered list.

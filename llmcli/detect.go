@@ -43,14 +43,27 @@ var knownCLIs = []struct{ name, binary string }{
 // If a version probe fails or times out, the CLI is still returned with
 // CliInfo.Version set to the empty string.
 func DetectAvailable() []CliInfo {
+	return DetectAvailableContext(context.Background())
+}
+
+// DetectAvailableContext scans for known AI coding CLI tools on PATH and
+// returns the ones that are available, in the canonical priority order. Version
+// probes inherit ctx and also use a per-binary 5-second deadline.
+func DetectAvailableContext(ctx context.Context) []CliInfo {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var out []CliInfo
 	for _, c := range knownCLIs {
+		if ctx.Err() != nil {
+			return out
+		}
 		path, err := exec.LookPath(c.binary)
 		if err != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-		version := probeVersion(ctx, path)
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		version := probeVersion(probeCtx, path)
 		cancel()
 		out = append(out, CliInfo{
 			Name:    c.name,

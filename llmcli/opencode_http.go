@@ -249,6 +249,10 @@ func (b *OpenCodeHTTPBackend) Stream(
 // If we already own a live process, it is reused. If the port is already in
 // use (external instance), we adopt it. Otherwise we spawn a new process.
 func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -292,7 +296,7 @@ func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error 
 	// Spawn the server.
 	//nolint:gosec // path is from exec.LookPath via CliInfo, not user input
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- b.info.Path is a detected CLI binary path and only fixed backend args are appended.
-	cmd := exec.CommandContext(ctx, b.info.Path, "serve", "--port", fmt.Sprint(port))
+	cmd := exec.Command(b.info.Path, "serve", "--port", fmt.Sprint(port))
 	configureProcessGroup(cmd)
 
 	tail := newTailWriter()
@@ -309,14 +313,6 @@ func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error 
 		stderrTailBuf: tail,
 		done:          make(chan struct{}),
 	}
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			s.terminate(ctx.Err())
-		case <-s.done:
-		}
-	}()
 
 	if err := b.waitReady(ctx, url); err != nil {
 		s.terminate(err)

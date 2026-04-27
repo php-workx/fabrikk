@@ -195,7 +195,9 @@ func TestOmpPrint_ExactlyOneTerminalEvent(t *testing.T) {
 			ch := make(chan llmclient.Event, 64)
 			te := newTerminalEmitter(ch)
 
-			_ = parseOmpStream(context.Background(), r, ch, te, nil)
+			if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+				t.Fatalf("parseOmpStream: %v", err)
+			}
 			events := drainChannel(ch)
 			if len(events) == 0 {
 				t.Fatal("no events emitted")
@@ -225,7 +227,9 @@ func TestOmpPrint_ContentIndexIncrementsAcrossBlocks(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	_ = parseOmpStream(context.Background(), r, ch, te, nil)
+	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+		t.Fatalf("parseOmpStream: %v", err)
+	}
 	events := drainChannel(ch)
 
 	thinkStart := findEvent(t, events, llmclient.EventThinkingStart)
@@ -284,7 +288,9 @@ func TestOmpPrint_AssembledMessageOnDone(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	_ = parseOmpStream(context.Background(), r, ch, te, nil)
+	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+		t.Fatalf("parseOmpStream: %v", err)
+	}
 	events := drainChannel(ch)
 
 	done := findEvent(t, events, llmclient.EventDone)
@@ -315,7 +321,9 @@ func TestOmpPrint_UsageOnDone(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	_ = parseOmpStream(context.Background(), r, ch, te, nil)
+	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+		t.Fatalf("parseOmpStream: %v", err)
+	}
 	events := drainChannel(ch)
 
 	done := findEvent(t, events, llmclient.EventDone)
@@ -343,7 +351,9 @@ func TestOmpPrint_MultipleTextDeltas(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	_ = parseOmpStream(context.Background(), r, ch, te, nil)
+	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+		t.Fatalf("parseOmpStream: %v", err)
+	}
 	events := drainChannel(ch)
 
 	// Verify the text_end event carries the accumulated content.
@@ -391,6 +401,9 @@ func TestOmpPrint_RequiredHostToolsOptionErrors(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error for required OptionHostTools, got nil")
+	}
+	if !errors.Is(err, llmclient.ErrUnsupportedOption) {
+		t.Fatalf("Stream error = %v; want ErrUnsupportedOption", err)
 	}
 }
 

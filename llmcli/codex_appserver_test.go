@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -91,8 +92,9 @@ func (s *fakeServer) sendTextBlock(text string) error {
 
 // drainOneRequest reads and discards one LSP-framed request from the request
 // reader. Used by server goroutines that don't need to inspect the request.
-func (s *fakeServer) drainOneRequest() {
-	_, _ = internal.ReadFrame(s.reqReader, 4096, 8<<20)
+func (s *fakeServer) drainOneRequest() error {
+	_, err := internal.ReadFrame(s.reqReader, 4096, 8<<20)
+	return err
 }
 
 // newTestBackend creates a CodexAppServerBackend with a fake info and injects
@@ -142,11 +144,13 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 	)
 
 	// Server goroutine: service two sequential turn requests, recording order.
-	serverDone := make(chan struct{})
+	serverDone := make(chan error, 1)
 	go func() {
-		defer close(serverDone)
 		for i := 1; i <= 2; i++ {
-			server.drainOneRequest()
+			if err := server.drainOneRequest(); err != nil {
+				serverDone <- err
+				return
+			}
 
 			mu.Lock()
 			received = append(received, i)
@@ -157,6 +161,7 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 			_ = server.sendDone()
 		}
 		_ = server.respWriter.Close()
+		serverDone <- nil
 	}()
 
 	ctx := context.Background()
@@ -177,7 +182,9 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 	events1 := drainWithTimeout(t, ch1)
 	events2 := drainWithTimeout(t, ch2)
 
-	<-serverDone
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server drain request: %v", err)
+	}
 
 	// Each stream must have exactly one terminal event.
 	assertExactlyOneTerminal(t, events1, "stream1")
@@ -208,16 +215,19 @@ func TestCodexAppServer_CloseTerminatesProcess(t *testing.T) {
 	// Prime the backend: start one stream so ensureProcess is called and
 	// the process is live inside the backend.
 	serverReady := make(chan struct{})
-	serverClosed := make(chan struct{})
+	serverClosed := make(chan error, 1)
 	go func() {
 		close(serverReady)
 		// Drain the request, then wait for stdin to close (Close() call).
-		server.drainOneRequest()
+		if err := server.drainOneRequest(); err != nil {
+			serverClosed <- err
+			return
+		}
 		// Write one text event and then done.
 		_ = server.sendTextBlock("hi")
 		_ = server.sendDone()
 		_ = server.respWriter.Close()
-		close(serverClosed)
+		serverClosed <- nil
 	}()
 
 	<-serverReady
@@ -229,7 +239,9 @@ func TestCodexAppServer_CloseTerminatesProcess(t *testing.T) {
 
 	// Drain the stream to completion.
 	drainWithTimeout(t, ch)
-	<-serverClosed
+	if err := <-serverClosed; err != nil {
+		t.Fatalf("server drain request: %v", err)
+	}
 
 	// Now close the backend.
 	if err := b.Close(); err != nil {
@@ -264,10 +276,15 @@ func TestCodexAppServer_ProtocolCorruptionEmitsOneError(t *testing.T) {
 	// Server: consume the request, then write an invalid LSP frame.
 	// "Content-Length: not-a-number" triggers ErrInvalidContentLength in
 	// ReadFrame, which is not io.EOF, so readTurnEvents routes it to te.error.
+	serverDone := make(chan error, 1)
 	go func() {
-		server.drainOneRequest()
+		if err := server.drainOneRequest(); err != nil {
+			serverDone <- err
+			return
+		}
 		_, _ = io.WriteString(server.respWriter, "Content-Length: not-a-number\r\n\r\n")
 		_ = server.respWriter.Close()
+		serverDone <- nil
 	}()
 
 	ctx := context.Background()
@@ -279,6 +296,9 @@ func TestCodexAppServer_ProtocolCorruptionEmitsOneError(t *testing.T) {
 	}
 
 	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server drain request: %v", err)
+	}
 
 	// Must have exactly one terminal event and it must be an error.
 	if len(events) == 0 {
@@ -353,24 +373,30 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 	input := simpleUserInput("hello")
 
 	// Server1: drain request then write an invalid LSP frame (protocol corruption).
-	corruptDone := make(chan struct{})
+	corruptDone := make(chan error, 1)
 	go func() {
-		defer close(corruptDone)
-		server1.drainOneRequest()
+		if err := server1.drainOneRequest(); err != nil {
+			corruptDone <- err
+			return
+		}
 		// Invalid Content-Length value causes ReadFrame to return
 		// ErrInvalidContentLength (not io.EOF), triggering the error path.
 		_, _ = io.WriteString(server1.respWriter, "Content-Length: NaN\r\n\r\n")
 		_ = server1.respWriter.Close()
+		corruptDone <- nil
 	}()
 
 	// Server2: respond normally.
-	normalDone := make(chan struct{})
+	normalDone := make(chan error, 1)
 	go func() {
-		defer close(normalDone)
-		server2.drainOneRequest()
+		if err := server2.drainOneRequest(); err != nil {
+			normalDone <- err
+			return
+		}
 		_ = server2.sendTextBlock("recovered")
 		_ = server2.sendDone()
 		_ = server2.respWriter.Close()
+		normalDone <- nil
 	}()
 
 	// First Stream: triggers protocol corruption.
@@ -379,7 +405,9 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 		t.Fatalf("Stream 1: %v", err)
 	}
 	events1 := drainWithTimeout(t, ch1)
-	<-corruptDone
+	if err := <-corruptDone; err != nil {
+		t.Fatalf("server1 drain request: %v", err)
+	}
 
 	// Verify first stream produced an error terminal.
 	last1 := events1[len(events1)-1]
@@ -393,7 +421,9 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 		t.Fatalf("Stream 2: %v", err)
 	}
 	events2 := drainWithTimeout(t, ch2)
-	<-normalDone
+	if err := <-normalDone; err != nil {
+		t.Fatalf("server2 drain request: %v", err)
+	}
 
 	// Second stream must complete with a done terminal event.
 	if len(events2) == 0 {
@@ -426,11 +456,16 @@ func TestCodexAppServer_StreamMapsTextEvents(t *testing.T) {
 
 	const msg = "hello from codex"
 
+	serverDone := make(chan error, 1)
 	go func() {
-		server.drainOneRequest()
+		if err := server.drainOneRequest(); err != nil {
+			serverDone <- err
+			return
+		}
 		_ = server.sendTextBlock(msg)
 		_ = server.sendDone()
 		_ = server.respWriter.Close()
+		serverDone <- nil
 	}()
 
 	ctx := context.Background()
@@ -442,6 +477,9 @@ func TestCodexAppServer_StreamMapsTextEvents(t *testing.T) {
 	}
 
 	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server drain request: %v", err)
+	}
 
 	wantTypes := []llmclient.EventType{
 		llmclient.EventStart,
@@ -584,11 +622,16 @@ func TestCodexAppServer_ContextCancelDuringStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Server: drain request, then hang (never responds).
+	serverDone := make(chan error, 1)
 	go func() {
-		server.drainOneRequest()
+		if err := server.drainOneRequest(); err != nil {
+			serverDone <- err
+			return
+		}
 		// Hang until stdin closes (cancel → process terminates → stdin closed).
 		_, _ = io.Copy(io.Discard, server.reqReader)
 		_ = server.respWriter.Close()
+		serverDone <- nil
 	}()
 
 	ch, err := b.Stream(ctx, simpleUserInput("hello"))
@@ -610,6 +653,9 @@ func TestCodexAppServer_ContextCancelDuringStream(t *testing.T) {
 		// Channel closed as expected.
 	case <-time.After(3 * time.Second):
 		t.Error("channel was not closed within 3s after context cancellation")
+	}
+	if err := <-serverDone; err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("server drain request: %v", err)
 	}
 }
 

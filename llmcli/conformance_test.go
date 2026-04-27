@@ -32,7 +32,7 @@ func TestOptionSupportMatrix_WithHostTools(t *testing.T) {
 		// All other registered backends do not support host-defined tools.
 		{"claude", false, ""},
 		{"codex-exec", false, ""},
-		{"codex-appserver", false, ""},
+		{"codex-app-server", false, ""},
 		{"opencode-run", false, ""},
 		{"opencode-serve", false, ""},
 		{"omp", false, ""},
@@ -79,8 +79,9 @@ func TestOptionSupportMatrix_BestEffortDegradation(t *testing.T) {
 	}{
 		{"claude", checkClaudeRequiredOptions},
 		{"codex-exec", checkCodexExecRequiredOptions},
-		{"codex-appserver", checkCodexAppServerRequiredOptions},
+		{"codex-app-server", checkCodexAppServerRequiredOptions},
 		{"opencode-run", checkOpenCodeRunRequiredOptions},
+		{"opencode-serve", checkOpenCodeHTTPRequiredOptions},
 		{"omp (print)", checkOmpPrintRequiredOptions},
 		{"omp-rpc", checkOmpRPCRequiredOptions},
 	}
@@ -116,8 +117,9 @@ func TestRequiredUnsupportedOptionFailsBeforeSpawn(t *testing.T) {
 	}{
 		{"claude", checkClaudeRequiredOptions},
 		{"codex-exec", checkCodexExecRequiredOptions},
-		{"codex-appserver", checkCodexAppServerRequiredOptions},
+		{"codex-app-server", checkCodexAppServerRequiredOptions},
 		{"opencode-run", checkOpenCodeRunRequiredOptions},
+		{"opencode-serve", checkOpenCodeHTTPRequiredOptions},
 		{"omp (print)", checkOmpPrintRequiredOptions},
 	}
 
@@ -198,6 +200,20 @@ func TestSelectBackend_NeverDowngradesRequiredCapabilities_HostDefs(t *testing.T
 			t.Errorf("backend %q unexpectedly satisfies NeedsHostToolDefs=true; "+
 				"only omp-rpc should", f.Name)
 		}
+	}
+}
+
+func TestSelectBackend_ModelRequirementUsesEnumeratedModelsOnly(t *testing.T) {
+	req := Requirements{Model: "model-b"}
+
+	if !satisfiesStaticRequirements(llmclient.Capabilities{Models: nil}, req) {
+		t.Fatal("empty model list means unknown support and must not filter the backend")
+	}
+	if !satisfiesStaticRequirements(llmclient.Capabilities{Models: []string{"model-a", "model-b"}}, req) {
+		t.Fatal("backend enumerating the requested model should satisfy the requirement")
+	}
+	if satisfiesStaticRequirements(llmclient.Capabilities{Models: []string{"model-a"}}, req) {
+		t.Fatal("backend enumerating models without the requested model should be filtered out")
 	}
 }
 

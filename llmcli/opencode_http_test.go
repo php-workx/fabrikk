@@ -28,6 +28,7 @@ type fakeOpenCodeServer struct {
 	sseBodies    []string // raw SSE to stream on GET /event
 	sseStatus    int      // 0 → 200
 	promptStatus int      // 0 → 204
+	promptClose  bool     // close prompt_async connection without an HTTP response
 
 	mu           sync.Mutex
 	requestOrder []string // records "method path" in arrival order
@@ -98,6 +99,20 @@ func (f *fakeOpenCodeServer) handlePromptAsync(w http.ResponseWriter, r *http.Re
 	f.mu.Lock()
 	f.requestOrder = append(f.requestOrder, "POST /prompt_async")
 	f.mu.Unlock()
+
+	if f.promptClose {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		return
+	}
 
 	status := f.promptStatus
 	if status == 0 {
@@ -409,13 +424,13 @@ func TestOpenCodeHTTP_PromptAsyncNon204CancelsSSE(t *testing.T) {
 // fails with a network error the response body is closed and an error event
 // is emitted (Criterion 3).
 func TestOpenCodeHTTP_PromptAsyncErrorClosesBody(t *testing.T) {
-	// Use an already-closed server so the HTTP call fails with a connection error.
-	fake := newFakeOpenCodeServer(t, []string{"data: {\"type\":\"server.connected\"}\n\n"})
+	// Keep the server available for SSE/session setup, then close only the
+	// prompt_async connection so the prompt send fails after Stream starts.
+	fake := newFakeOpenCodeServer(t, []string{": keep-alive\n\n" + strings.Repeat(": ping\n\n", 100)})
+	fake.promptClose = true
+	defer fake.close()
 	b := openCodeBackendForTest(fake)
 	b.schemaDiscovered.Store(1)
-
-	// Close the server now so prompt_async will fail.
-	fake.close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -429,8 +444,7 @@ func TestOpenCodeHTTP_PromptAsyncErrorClosesBody(t *testing.T) {
 
 	ch, err := b.Stream(ctx, input)
 	if err != nil {
-		// openSSEStream may fail immediately; that is acceptable.
-		return
+		t.Fatalf("Stream: unexpected setup error: %v", err)
 	}
 
 	events := waitForEvents(t, ch, 3*time.Second)
@@ -443,10 +457,8 @@ func TestOpenCodeHTTP_PromptAsyncErrorClosesBody(t *testing.T) {
 			break
 		}
 	}
-	// Also accept no events if the channel was closed without error (the
-	// server was gone before SSE opened).
-	if !hasError && len(events) != 0 {
-		t.Fatalf("Stream/waitForEvents got %d events without EventError after prompt_async failure: %v", len(events), events)
+	if !hasError {
+		t.Fatalf("expected EventError after prompt_async network failure; got events: %v", events)
 	}
 }
 

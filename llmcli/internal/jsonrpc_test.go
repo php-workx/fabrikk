@@ -227,9 +227,9 @@ func TestReadFrame_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// TestReadFrame_RejectsOversizedBody_AtExactLimit verifies that
+// TestReadFrame_AcceptsBodyAtExactLimit verifies that
 // Content-Length == maxBodyBytes is accepted (boundary value).
-func TestReadFrame_RejectsOversizedBody_AtExactLimit(t *testing.T) {
+func TestReadFrame_AcceptsBodyAtExactLimit(t *testing.T) {
 	const limit = 10
 	body := strings.Repeat("x", limit)
 	r := lspReader(lspFrame(body))
@@ -376,7 +376,7 @@ func TestWriteRequest_ValidOutput(t *testing.T) {
 }
 
 // TestWriteRequest_NilParams verifies that WriteRequest omits the params field
-// when params is nil, producing a valid JSON-RPC 2.0 notification-style body.
+// when params is nil, producing a valid JSON-RPC 2.0 request body.
 func TestWriteRequest_NilParams(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteRequest(&buf, 1, "ping", nil); err != nil {
