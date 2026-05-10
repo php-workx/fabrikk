@@ -1,7 +1,9 @@
 package llmcli
 
 import (
+	"bufio"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +128,63 @@ func TestBuildClaudeArgs_UseStdin(t *testing.T) {
 	// --output-format stream-json must always be present.
 	if flagIndex(args, "--output-format") < 0 {
 		t.Error("--output-format missing")
+	}
+}
+
+// TestBuildClaudeArgs_SessionAwarePromptSwitch verifies that when SessionID
+// is set, only the last user message is used (--resume handles context).
+// When SessionID is empty, BuildPromptFromContext produces the full history.
+func TestBuildClaudeArgs_SessionAwarePromptSwitch(t *testing.T) {
+	input := &llmclient.Context{
+		SystemPrompt: "Be helpful.",
+		Messages: []llmclient.Message{
+			{
+				Role: llmclient.RoleUser,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "first question"},
+				},
+			},
+			{
+				Role: llmclient.RoleAssistant,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "first answer"},
+				},
+			},
+			{
+				Role: llmclient.RoleUser,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "second question"},
+				},
+			},
+		},
+	}
+
+	// Case 1: No SessionID → full prompt from history
+	cfgNoSession := llmclient.DefaultRequestConfig()
+	argsNoSession := buildClaudeArgs(input, cfgNoSession, false)
+	promptNoSession := getFlagValue(argsNoSession, "-p")
+	if !strings.Contains(promptNoSession, "first question") {
+		t.Errorf("no-session prompt missing first question: %q", promptNoSession)
+	}
+	if !strings.Contains(promptNoSession, "second question") {
+		t.Errorf("no-session prompt missing second question: %q", promptNoSession)
+	}
+	if !strings.Contains(promptNoSession, "Assistant: first answer") {
+		t.Errorf("no-session prompt missing assistant response: %q", promptNoSession)
+	}
+
+	// Case 2: With SessionID → only last user message (resume handles context)
+	cfgWithSession := llmclient.DefaultRequestConfig()
+	cfgWithSession.SessionID = "sess-123"
+	argsWithSession := buildClaudeArgs(input, cfgWithSession, false)
+	promptWithSession := getFlagValue(argsWithSession, "-p")
+	if promptWithSession != "second question" {
+		t.Errorf("session prompt = %q, want %q", promptWithSession, "second question")
+	}
+
+	// --resume must be present
+	if flagIndex(argsWithSession, "--resume") < 0 {
+		t.Error("--resume flag missing when SessionID is set")
 	}
 }
 
@@ -622,6 +681,17 @@ func assertFlagsPresent(t *testing.T, args []string, want map[string]string) {
 }
 
 // flagIndex returns the index of flag in args, or -1 if not found.
+
+// getFlagValue returns the value immediately following flag in args, or
+// empty string if the flag is not found or has no value.
+func getFlagValue(args []string, flag string) string {
+	idx := flagIndex(args, flag)
+	if idx < 0 || idx+1 >= len(args) {
+		return ""
+	}
+	return args[idx+1]
+}
+
 func flagIndex(args []string, flag string) int {
 	for i, a := range args {
 		if a == flag {
@@ -690,4 +760,72 @@ func findEvent(t *testing.T, events []llmclient.Event, et llmclient.EventType) l
 	}
 	t.Fatalf("event type %q not found in events: %v", et, eventTypes(events))
 	return llmclient.Event{}
+}
+
+// TestClaudeStream_HookOutputBeforeInit verifies that SessionStart hook
+// output (non-init system frames) is surfaced as complete TextStart/Delta/End
+// triplets with distinct ContentIndex values, and that the parser does NOT
+// return io.ErrUnexpectedEOF when the stream closes without a system/init frame.
+func TestClaudeStream_HookOutputBeforeInit(t *testing.T) {
+	lines := []string{
+		`{"type":"system","content":"git status: clean"}`,
+		`{"type":"system","content":"env: 42 vars set"}`,
+	}
+	var buf strings.Builder
+	for _, l := range lines {
+		buf.WriteString(l)
+		buf.WriteByte('\n')
+	}
+
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+	r := bufio.NewReader(strings.NewReader(buf.String()))
+
+	err := parseClaudeStream(context.Background(), r, ch, te, claudeInitFidelity(llmclient.RequestConfig{}))
+	if err != nil {
+		t.Fatalf("parseClaudeStream: unexpected error: %v", err)
+	}
+
+	var events []llmclient.Event
+	for ev := range ch {
+		events = append(events, ev)
+	}
+
+	// Each hook frame emits Start+Delta+End triplet; two frames = 6 content
+	// events plus EventStart and EventDone = 8 total.
+	if len(events) != 8 {
+		t.Fatalf("expected 8 events, got %d", len(events))
+	}
+
+	// events[0]: synthetic start (no system/init arrived)
+	if events[0].Type != llmclient.EventStart {
+		t.Fatalf("event[0] = %v; want EventStart", events[0].Type)
+	}
+
+	// events[1-3]: first hook frame at contentIndex 0
+	if events[1].Type != llmclient.EventTextStart || events[1].ContentIndex != 0 {
+		t.Fatalf("event[1] = %+v; want EventTextStart at index 0", events[1])
+	}
+	if events[2].Type != llmclient.EventTextDelta || events[2].Delta != "git status: clean" || events[2].ContentIndex != 0 {
+		t.Fatalf("event[2] = %+v; want EventTextDelta 'git status: clean' at index 0", events[2])
+	}
+	if events[3].Type != llmclient.EventTextEnd || events[3].ContentIndex != 0 {
+		t.Fatalf("event[3] = %+v; want EventTextEnd at index 0", events[3])
+	}
+
+	// events[4-6]: second hook frame at contentIndex 1
+	if events[4].Type != llmclient.EventTextStart || events[4].ContentIndex != 1 {
+		t.Fatalf("event[4] = %+v; want EventTextStart at index 1", events[4])
+	}
+	if events[5].Type != llmclient.EventTextDelta || events[5].Delta != "env: 42 vars set" || events[5].ContentIndex != 1 {
+		t.Fatalf("event[5] = %+v; want EventTextDelta 'env: 42 vars set' at index 1", events[5])
+	}
+	if events[6].Type != llmclient.EventTextEnd || events[6].ContentIndex != 1 {
+		t.Fatalf("event[6] = %+v; want EventTextEnd at index 1", events[6])
+	}
+
+	// events[7]: terminal done
+	if events[7].Type != llmclient.EventDone {
+		t.Fatalf("event[7] = %v; want EventDone", events[7].Type)
+	}
 }

@@ -113,6 +113,40 @@ func (b *ClaudeBackend) Capabilities() llmclient.Capabilities {
 	return claudeStaticCapabilities(b.info.Version)
 }
 
+// Ready checks that Claude Code is installed and that a known Claude auth
+// marker is present. It avoids making a paid model request.
+func (b *ClaudeBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	if anyPathExists(homePath(".claude.json"), homePath(".claude")) {
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
+	}
+	return readyNotAuthed(b.Name(), "run `claude /login`")
+}
+
+// Available reports whether Claude Code is installed and authenticated.
+func (b *ClaudeBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// promptForClaude returns the prompt text for claude -p.
+//
+// When cfg.SessionID is set (resuming an existing session), only the last
+// user message is returned — Claude already has the full context from the
+// resumed session, and provider-side prefix caching works because the
+// prompt prefix stays stable across turns.
+//
+// When cfg.SessionID is empty (first turn), the full conversation history
+// is built into a single text prompt via BuildPromptFromContext so Claude
+// sees the complete context.
+func promptForClaude(input *llmclient.Context, cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig is passed by value throughout prompt helpers.
+	if cfg.SessionID != "" {
+		return llmclient.LastUserMessage(input)
+	}
+	return llmclient.BuildPromptFromContext(input)
+}
+
 // Stream spawns `claude -p --output-format stream-json`, parses the JSONL
 // event stream, and returns a channel of normalized [llmclient.Event] values.
 //
@@ -134,7 +168,7 @@ func (b *ClaudeBackend) Stream(
 	}
 	model, started := observeStreamStart(b.Name(), cfg)
 
-	prompt := lastUserMessage(input)
+	prompt := promptForClaude(input, cfg)
 	useStdin := len(prompt) > stdinThreshold
 	args := buildClaudeArgs(input, cfg, useStdin)
 	env := resolveProcessEnv(cfg, claudeOllamaEnvOverrides(cfg))
@@ -198,7 +232,7 @@ func (b *ClaudeBackend) Stream(
 // because the caller will pipe it via stdin. When useStdin is false the full
 // prompt text is passed as the -p argument.
 func buildClaudeArgs(input *llmclient.Context, cfg llmclient.RequestConfig, useStdin bool) []string { //nolint:gocritic // internal tests and callers use RequestConfig values consistently.
-	prompt := lastUserMessage(input)
+	prompt := promptForClaude(input, cfg)
 
 	var args []string
 	if useStdin {
@@ -208,7 +242,9 @@ func buildClaudeArgs(input *llmclient.Context, cfg llmclient.RequestConfig, useS
 		args = []string{"-p", prompt}
 	}
 
-	args = append(args, "--output-format", "stream-json")
+	// claude 2.x requires --verbose alongside --output-format=stream-json
+	// when -p is used. Without it claude exits immediately with an error.
+	args = append(args, "--output-format", "stream-json", "--verbose")
 
 	// System prompt.
 	if input != nil && input.SystemPrompt != "" {
@@ -260,29 +296,7 @@ func checkClaudeRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:go
 	return llmclient.EnforceRequired(cfg, claudeStaticCapabilities(""))
 }
 
-// lastUserMessage returns the concatenated text of the last user-role message
-// in input. Returns empty string when input is nil or no user text is present.
-func lastUserMessage(input *llmclient.Context) string {
-	if input == nil {
-		return ""
-	}
-	for i := len(input.Messages) - 1; i >= 0; i-- {
-		msg := input.Messages[i]
-		if msg.Role != llmclient.RoleUser {
-			continue
-		}
-		var parts []string
-		for _, block := range msg.Content {
-			if block.Type == llmclient.ContentText && block.Text != "" {
-				parts = append(parts, block.Text)
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-	}
-	return ""
-}
+// lastUserMessage is defined in llmclient/prompt.go
 
 // claudeStaticCapabilities returns the capabilities advertised for the Claude
 // backend. version is the detected CLI version string (may be empty).
@@ -304,6 +318,7 @@ func claudeStaticCapabilities(version string) llmclient.Capabilities {
 			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
 			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
 			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:         llmclient.OptionSupportPartial,
 			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
@@ -325,6 +340,9 @@ type claudeFrame struct {
 
 	// result fields
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+
+	// system/hook fields — content emitted by SessionStart hooks
+	Content string `json:"content,omitempty"`
 }
 
 type claudeMessage struct {
@@ -345,9 +363,15 @@ type claudeContent struct {
 // claudeParseState holds mutable state shared across all frames in a single
 // stream parse. It is created once per Stream call.
 type claudeParseState struct {
-	sessionID     string
-	contentIndex  int
-	assembledMsg  *llmclient.AssistantMessage
+	sessionID    string
+	contentIndex int
+	assembledMsg *llmclient.AssistantMessage
+
+	// bytesRead tracks how many bytes the parser has successfully consumed
+	// from the stream. Used to distinguish a clean EOF (data was seen) from
+	// an unexpected EOF (stream was empty).
+	bytesRead int
+
 	startEmitted  bool
 	resultEmitted bool
 	startFidelity *llmclient.Fidelity
@@ -369,13 +393,25 @@ func parseClaudeStream(
 
 	for {
 		line, readErr := internal.ReadBoundedLine(r, maxClaudeLineBytes)
+		state.bytesRead += len(line)
 
 		if readErr != nil {
-			skip, retErr := claudeHandleReadError(readErr, state.startEmitted, state.resultEmitted)
-			if skip {
-				continue
+			// If ReadBoundedLine returned content with EOF, process the content
+			// first before handling the EOF on the next iteration.
+			if len(line) == 0 || !errors.Is(readErr, io.EOF) {
+				skip, retErr := claudeHandleReadError(readErr, state.startEmitted, state.resultEmitted, state.bytesRead)
+				if skip {
+					continue
+				}
+				if retErr == nil && state.startEmitted && !state.resultEmitted {
+					// Stream delivered content but no result frame arrived — emit
+					// a synthetic done so the consumer receives a terminal event.
+					te.done(ctx, state.assembledMsg, nil, llmclient.StopEndTurn)
+				}
+				return retErr
 			}
-			return retErr
+			// len(line) > 0 && errors.Is(readErr, io.EOF): fall through to
+			// frame processing below; the EOF is handled on the next iteration.
 		}
 
 		if len(line) == 0 {
@@ -398,15 +434,26 @@ func parseClaudeStream(
 // Returns (skip=true, nil) when the line should be skipped and the loop should
 // continue. Returns (skip=false, err) when the loop should return err (which
 // may be nil for normal EOF).
-func claudeHandleReadError(err error, startEmitted, resultEmitted bool) (skip bool, retErr error) {
+func claudeHandleReadError(err error, startEmitted, resultEmitted bool, bytesRead int) (skip bool, retErr error) {
 	if errors.Is(err, io.EOF) {
 		if !startEmitted {
+			// SessionStart hooks can emit system frames (with content) before
+			// the formal system/init frame. If we've consumed any bytes we
+			// treat EOF as a clean close rather than an unexpected EOF — the
+			// stream delivered real data, it just never emitted the init
+			// handshake frame.
+			if bytesRead > 0 {
+				return false, nil
+			}
 			return false, io.ErrUnexpectedEOF
 		}
 		if resultEmitted {
 			return false, nil
 		}
-		return false, io.ErrUnexpectedEOF
+		// Stream started (possibly from synthetic start events emitted by
+		// hook frames) but closed without a result frame. Treat as clean
+		// EOF so the caller can emit a synthetic done event.
+		return false, nil
 	}
 	if errors.Is(err, internal.ErrLineTooLong) {
 		return true, nil // skip oversize line, keep going
@@ -446,17 +493,43 @@ func claudeOnSystemFrame(
 	out chan<- llmclient.Event,
 	state *claudeParseState,
 ) error {
-	if frame.Subtype != "init" {
+	if frame.Subtype == "init" {
+		state.sessionID = frame.SessionID
+		if !emit(ctx, out, startEvent(state.sessionID, state.startFidelity)) {
+			return ctx.Err()
+		}
+		state.startEmitted = true
+		state.assembledMsg = &llmclient.AssistantMessage{
+			Role:  "assistant",
+			Model: frame.Model,
+		}
 		return nil
 	}
-	state.sessionID = frame.SessionID
-	if !emit(ctx, out, startEvent(state.sessionID, state.startFidelity)) {
-		return ctx.Err()
-	}
-	state.startEmitted = true
-	state.assembledMsg = &llmclient.AssistantMessage{
-		Role:  "assistant",
-		Model: frame.Model,
+
+	// SessionStart hooks emit non-init system frames carrying text content
+	// (e.g. environment summaries, git status, etc.). We surface that
+	// content as text deltas so the consumer sees the hook output.
+	if frame.Content != "" {
+		if !state.startEmitted {
+			// Emit a synthetic start event so downstream consumers know the
+			// stream is alive even though the formal init frame hasn't arrived.
+			if !emit(ctx, out, startEvent("", state.startFidelity)) {
+				return ctx.Err()
+			}
+			state.startEmitted = true
+			state.assembledMsg = &llmclient.AssistantMessage{Role: "assistant"}
+		}
+		idx := state.contentIndex
+		if !emit(ctx, out, llmclient.Event{Type: llmclient.EventTextStart, ContentIndex: idx}) {
+			return ctx.Err()
+		}
+		if !emit(ctx, out, llmclient.Event{Type: llmclient.EventTextDelta, ContentIndex: idx, Delta: frame.Content}) {
+			return ctx.Err()
+		}
+		if !emit(ctx, out, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx}) {
+			return ctx.Err()
+		}
+		state.contentIndex++
 	}
 	return nil
 }
@@ -475,11 +548,11 @@ func claudeInitFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nol
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
 	optionResults := mergeOptionResults(results, executionOptionResults(cfg, claudeStaticCapabilities("")))
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlBuiltIn,
 		OptionResults: optionResults,
-	}
+	}, cfg)
 }
 
 // claudeOnAssistantFrame handles an assistant frame: updates the assembled
@@ -618,13 +691,13 @@ func handleClaudeResultFrame(
 		if assembledMsg != nil {
 			assembledMsg.StopReason = reason
 		}
-		// Claude reports cost, not token counts. Emit a non-nil Usage so
-		// callers can detect that usage metadata arrived.
-		var usage *llmclient.Usage
-		if frame.TotalCostUSD > 0 {
-			usage = &llmclient.Usage{}
+		// Claude reports cost only, not token counts. Keep usage nil so
+		// callers checking ev.Usage != nil don't conclude token counts are
+		// known-zero rather than unavailable.
+		if frame.TotalCostUSD > 0 && assembledMsg != nil {
+			assembledMsg.Cost = &llmclient.Cost{TotalUSD: frame.TotalCostUSD}
 		}
-		te.done(ctx, assembledMsg, usage, reason)
+		te.done(ctx, assembledMsg, nil, reason)
 
 	case "error_max_turns":
 		te.error(ctx, errors.New("claude: max turns reached"))
