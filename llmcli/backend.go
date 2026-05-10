@@ -8,7 +8,10 @@
 package llmcli
 
 import (
+	"context"
 	"os"
+
+	"github.com/php-workx/fabrikk/llmclient"
 )
 
 // CliBackend is the embedded base struct for per-call CLI backends. It holds
@@ -51,7 +54,7 @@ func (b *CliBackend) binaryAvailable() bool {
 // For per-call backends this is a lightweight stat check; it does not verify
 // auth state, version compatibility, or subprocess liveness.
 func (b *CliBackend) Available() bool {
-	return observeAvailability(b.name, b.binaryAvailable())
+	return observeAvailability(b.name, b.Ready(context.Background()).State == llmclient.ReadyOK)
 }
 
 // Close is a no-op for per-call backends that spawn a fresh subprocess per
@@ -63,4 +66,13 @@ func (b *CliBackend) Close() error {
 // Info returns the detected CLI info associated with this backend.
 func (b *CliBackend) Info() CliInfo {
 	return b.info
+}
+
+// Ready reports whether the resolved binary still exists on disk. Concrete
+// backends may override this to add lightweight auth or liveness checks.
+func (b *CliBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.name, b.info.Path)
+	}
+	return llmclient.ReadyReport{State: llmclient.ReadyOK}
 }

@@ -389,3 +389,23 @@ func TestSelectBackend_StrictProbeFiltersUnavailable(t *testing.T) {
 		t.Errorf("filterByProbe: surviving candidate %q, want %q", filtered[0].factory.Name, "claude")
 	}
 }
+
+func TestSelectBackendChainReturnsFirstReadyBackend(t *testing.T) {
+	restore := resetBackendFactoriesForTest(
+		makeFactory("claude", "claude", PreferClaude, llmclient.Capabilities{}, false),
+		makeFactory(codexExecBackendName, "codex", PreferCodex, llmclient.Capabilities{}, true),
+	)
+	defer restore()
+
+	dir := fakeCLIDir(t, "claude", "codex")
+	prependPath(t, dir)
+	t.Setenv("FABRIKK_LLMCLI_TEST_VERSION", "1.0.0")
+
+	b, err := SelectBackendChain(context.Background(), []string{"claude", codexExecBackendName})
+	if err != nil {
+		t.Fatalf("SelectBackendChain returned error: %v", err)
+	}
+	if b.Name() != codexExecBackendName {
+		t.Errorf("backend name = %q, want %q", b.Name(), codexExecBackendName)
+	}
+}

@@ -145,6 +145,52 @@ func SelectBackendByName(name string) (llmclient.Backend, error) {
 	return nil, &BackendNotFoundError{Name: name}
 }
 
+// SelectBackendChain tries each named backend in order and returns the first
+// backend whose Ready probe reports ReadyOK.
+//
+// Backends in [llmclient.ReadyUnknown] state (e.g. crashed) are skipped the
+// same as [llmclient.ReadyMissingBinary] or [llmclient.ReadyNotAuthed].
+// When a ReadyUnknown backend is skipped, the recorded error message contains
+// the word "crashed" so callers can distinguish a crash from a missing binary
+// or unauthenticated backend.
+//
+// opts is reserved for future use and currently has no effect on selection.
+func SelectBackendChain(ctx context.Context, names []string, opts ...llmclient.Option) (llmclient.Backend, error) {
+	_ = opts // reserved for future probes that need request options
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(names) == 0 {
+		return nil, ErrNoBackendAvailable
+	}
+
+	lastErr := ErrNoBackendAvailable
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		backend, err := SelectBackendByName(name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		report := backend.Ready(ctx)
+		if report.State == llmclient.ReadyOK {
+			return backend, nil
+		}
+		_ = backend.Close()
+		switch {
+		case report.State == llmclient.ReadyUnknown:
+			lastErr = fmt.Errorf("llmcli: backend %q crashed: %s", name, report.Detail)
+		case report.Detail != "":
+			lastErr = fmt.Errorf("llmcli: backend %q not ready: %s (%s)", name, report.State.String(), report.Detail)
+		default:
+			lastErr = fmt.Errorf("llmcli: backend %q not ready: %s", name, report.State.String())
+		}
+	}
+	return nil, lastErr
+}
+
 // NewBackendByName constructs the backend registered under name using the
 // caller-provided CliInfo. Unlike SelectBackendByName, it does not inspect PATH
 // or run detection; callers are responsible for providing a usable executable

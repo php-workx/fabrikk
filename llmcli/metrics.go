@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
@@ -76,7 +77,7 @@ var DefaultObserver Observer = NoopObserver{} //nolint:gochecknoglobals // inten
 
 const (
 	defaultModelLabel = "default"
-	genericErrorType  = "error"
+	genericErrorType  = llmclient.ErrTypeInternal
 	noErrorType       = "none"
 )
 
@@ -183,9 +184,9 @@ func LabelEventType(et llmclient.EventType) string { return string(et) }
 // LabelErrorType returns a canonical metric label for the given error.
 //
 //   - nil  → "none"
-//   - context.Canceled → "canceled"
-//   - context.DeadlineExceeded → "deadline_exceeded"
-//   - anything else → "error"
+//   - context.Canceled → "cancelled"
+//   - context.DeadlineExceeded → "timeout"
+//   - anything else → a stable llmclient.ErrType* value
 func LabelErrorType(err error) string {
 	if err == nil {
 		return noErrorType
@@ -193,10 +194,24 @@ func LabelErrorType(err error) string {
 
 	switch {
 	case errors.Is(err, context.Canceled):
-		return "canceled"
+		return llmclient.ErrTypeCancelled
 	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline_exceeded"
+		return llmclient.ErrTypeTimeout
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "auth") || strings.Contains(msg, "login") || strings.Contains(msg, "not logged in"):
+		return llmclient.ErrTypeAuth
+	case strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate_limit") || strings.Contains(msg, "quota"):
+		return llmclient.ErrTypeRateLimit
+	case strings.Contains(msg, "bad request") || strings.Contains(msg, "invalid request") || strings.Contains(msg, "malformed"):
+		return llmclient.ErrTypeBadRequest
+	case strings.Contains(msg, "network") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host"):
+		return llmclient.ErrTypeNetwork
+	case strings.Contains(msg, "provider") || strings.Contains(msg, "upstream"):
+		return llmclient.ErrTypeProvider
 	default:
-		return genericErrorType
+		return llmclient.ErrTypeInternal
 	}
 }

@@ -141,6 +141,19 @@ func mergeOptionResults(a, b map[llmclient.OptionName]llmclient.OptionResult) ma
 	return out
 }
 
+func populateJSONSchemaFidelity(fidelity *llmclient.Fidelity, cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig value mirrors fidelity helper style.
+	if cfg.JSONSchema == nil {
+		return fidelity
+	}
+	fidelity.JSONSchemaMode = llmclient.JSONSchemaAdvisory
+	if fidelity.OptionResults == nil {
+		fidelity.OptionResults = make(map[llmclient.OptionName]llmclient.OptionResult)
+	}
+	fidelity.OptionResults[llmclient.OptionJSONSchema] = llmclient.OptionDegraded
+	fidelity.Warnings = append(fidelity.Warnings, "JSON schema is advisory; backend does not enforce structured output natively")
+	return fidelity
+}
+
 func providedExecutionOptions(cfg llmclient.RequestConfig) []llmclient.OptionName { //nolint:gocritic // RequestConfig value mirrors fidelity helper style.
 	var names []llmclient.OptionName
 	if cfg.WorkingDirectory != "" {
