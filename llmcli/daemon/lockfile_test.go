@@ -150,16 +150,6 @@ func TestLockFile_Path(t *testing.T) {
 	}
 }
 
-func TestLockFilePath(t *testing.T) {
-	t.Parallel()
-
-	path := LockFilePath("/home/user/.clai")
-	expected := "/home/user/.clai/clai.lock"
-	if path != expected {
-		t.Errorf("expected %s, got %s", expected, path)
-	}
-}
-
 func TestLockFile_CreatesDirectory(t *testing.T) {
 	t.Parallel()
 

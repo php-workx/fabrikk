@@ -38,11 +38,6 @@ func AcquireLockfile(path string) (*LockFile, error) {
 	return lock, nil
 }
 
-// LockFilePath returns the default lock file path for the given base directory.
-func LockFilePath(baseDir string) string {
-	return filepath.Join(baseDir, "clai.lock")
-}
-
 // ReadHeldPID returns the PID recorded in lockPath when a lock file exists.
 // On Windows we infer lock ownership from the lock file presence.
 func ReadHeldPID(lockPath string) (pid int, held bool, err error) {
