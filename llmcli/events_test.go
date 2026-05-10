@@ -532,16 +532,16 @@ func TestErrorEvent(t *testing.T) {
 	if ev.ErrorMessage != err.Error() {
 		t.Errorf("ErrorMessage = %q, want %q", ev.ErrorMessage, err.Error())
 	}
-	if ev.ErrorType != "error" {
-		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, "error")
+	if ev.ErrorType != llmclient.ErrTypeInternal {
+		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, llmclient.ErrTypeInternal)
 	}
 }
 
 func TestErrorEvent_DeadlineErrorType(t *testing.T) {
 	ev := errorEvent(context.DeadlineExceeded)
 
-	if ev.ErrorType != "deadline_exceeded" {
-		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, "deadline_exceeded")
+	if ev.ErrorType != llmclient.ErrTypeTimeout {
+		t.Errorf("ErrorType = %q, want %q", ev.ErrorType, llmclient.ErrTypeTimeout)
 	}
 }
 
@@ -557,7 +557,7 @@ func TestErrorEvent_NilError(t *testing.T) {
 	if ev.ErrorMessage != "" {
 		t.Errorf("nil error should produce empty ErrorMessage, got %q", ev.ErrorMessage)
 	}
-	if ev.ErrorType != "none" {
+	if ev.ErrorType != noErrorType {
 		t.Errorf("nil error should produce ErrorType none, got %q", ev.ErrorType)
 	}
 }

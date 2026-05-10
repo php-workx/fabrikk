@@ -1,6 +1,7 @@
 package llmcli
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -214,6 +215,50 @@ func TestSelectBackend_ModelRequirementUsesEnumeratedModelsOnly(t *testing.T) {
 	}
 	if satisfiesStaticRequirements(llmclient.Capabilities{Models: []string{"model-a"}}, req) {
 		t.Fatal("backend enumerating models without the requested model should be filtered out")
+	}
+}
+
+func TestEventErrorTypesUseStableConstants(t *testing.T) {
+	allowed := map[string]struct{}{
+		llmclient.ErrTypeAuth:       {},
+		llmclient.ErrTypeRateLimit:  {},
+		llmclient.ErrTypeBadRequest: {},
+		llmclient.ErrTypeProvider:   {},
+		llmclient.ErrTypeNetwork:    {},
+		llmclient.ErrTypeTimeout:    {},
+		llmclient.ErrTypeCancelled:  {},
+		llmclient.ErrTypeInternal:   {},
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"auth", errors.New("not logged in"), llmclient.ErrTypeAuth},
+		{"rate_limit", errors.New("rate limit exceeded"), llmclient.ErrTypeRateLimit},
+		{"bad_request", errors.New("bad request: malformed input"), llmclient.ErrTypeBadRequest},
+		{"provider", errors.New("upstream provider failed"), llmclient.ErrTypeProvider},
+		{"network", errors.New("connection refused"), llmclient.ErrTypeNetwork},
+		{"timeout", context.DeadlineExceeded, llmclient.ErrTypeTimeout},
+		{"cancelled", context.Canceled, llmclient.ErrTypeCancelled},
+		{"internal", errors.New("unexpected failure"), llmclient.ErrTypeInternal},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ev := errorEvent(tc.err)
+			if ev.Type != llmclient.EventError {
+				t.Fatalf("Type = %q, want %q", ev.Type, llmclient.EventError)
+			}
+			if _, ok := allowed[ev.ErrorType]; !ok {
+				t.Fatalf("ErrorType = %q, want stable llmclient ErrType* constant", ev.ErrorType)
+			}
+			if ev.ErrorType != tc.want {
+				t.Fatalf("ErrorType = %q, want %q", ev.ErrorType, tc.want)
+			}
+		})
 	}
 }
 

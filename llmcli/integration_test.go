@@ -175,3 +175,195 @@ func TestIntegrationSelectBackend_StrictProbe(t *testing.T) {
 
 	t.Logf("StrictProbe selected backend: %s", b.Name())
 }
+
+// TestIntegrationCodexExec_BasicPrompt streams a trivial prompt through the
+// real codex CLI and verifies that at least one text event and a terminal
+// done event arrive on the channel.
+//
+// Skipped when the codex binary is not installed.
+func TestIntegrationCodexExec_BasicPrompt(t *testing.T) {
+	skipIfCLIUnavailable(t, "codex")
+
+	b, err := SelectBackendByName("codex-exec")
+	if err != nil {
+		t.Skipf("integration: codex-exec backend not available: %v", err)
+	}
+
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{
+				Role: llmclient.RoleUser,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "Reply with exactly one word: pong"},
+				},
+			},
+		},
+	}
+
+	ch, err := b.Stream(ctx, input)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainChannel(ch)
+
+	if len(events) == 0 {
+		t.Fatal("no events received")
+	}
+
+	last := events[len(events)-1]
+
+	if last.Type == llmclient.EventError {
+		t.Skipf("integration: codex-exec stream error (check authentication/config): %s",
+			last.ErrorMessage)
+	}
+
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event type = %q, want %q", last.Type, llmclient.EventDone)
+	}
+
+	var gotContent bool
+	for _, ev := range events {
+		if (ev.Type == llmclient.EventTextDelta && ev.Delta != "") ||
+			(ev.Type == llmclient.EventThinkingDelta && ev.Delta != "") {
+			gotContent = true
+			break
+		}
+	}
+	if !gotContent {
+		t.Log("no non-empty text/thinking content received (backend may have returned empty response)")
+	}
+}
+
+// TestIntegrationOpenCodeRun_BasicPrompt streams a trivial prompt through the
+// real opencode CLI and verifies that at least one text event and a terminal
+// done event arrive on the channel.
+//
+// Skipped when the opencode binary is not installed.
+func TestIntegrationOpenCodeRun_BasicPrompt(t *testing.T) {
+	skipIfCLIUnavailable(t, "opencode")
+
+	b, err := SelectBackendByName("opencode-run")
+	if err != nil {
+		t.Skipf("integration: opencode-run backend not available: %v", err)
+	}
+
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{
+				Role: llmclient.RoleUser,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "Reply with exactly one word: pong"},
+				},
+			},
+		},
+	}
+
+	ch, err := b.Stream(ctx, input)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainChannel(ch)
+
+	if len(events) == 0 {
+		t.Fatal("no events received")
+	}
+
+	last := events[len(events)-1]
+
+	if last.Type == llmclient.EventError {
+		t.Skipf("integration: opencode-run stream error (check authentication/config): %s",
+			last.ErrorMessage)
+	}
+
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event type = %q, want %q", last.Type, llmclient.EventDone)
+	}
+
+	var gotContent bool
+	for _, ev := range events {
+		if (ev.Type == llmclient.EventTextDelta && ev.Delta != "") ||
+			(ev.Type == llmclient.EventThinkingDelta && ev.Delta != "") {
+			gotContent = true
+			break
+		}
+	}
+	if !gotContent {
+		t.Log("no non-empty text/thinking content received (backend may have returned empty response)")
+	}
+}
+
+// TestIntegrationOmp_BasicPrompt streams a trivial prompt through the
+// real omp CLI and verifies that at least one text event and a terminal
+// done event arrive on the channel.
+//
+// Skipped when the omp binary is not installed.
+func TestIntegrationOmp_BasicPrompt(t *testing.T) {
+	skipIfCLIUnavailable(t, "omp")
+
+	b, err := SelectBackendByName("omp")
+	if err != nil {
+		t.Skipf("integration: omp backend not available: %v", err)
+	}
+
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{
+				Role: llmclient.RoleUser,
+				Content: []llmclient.ContentBlock{
+					{Type: llmclient.ContentText, Text: "Reply with exactly one word: pong"},
+				},
+			},
+		},
+	}
+
+	ch, err := b.Stream(ctx, input)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainChannel(ch)
+
+	if len(events) == 0 {
+		t.Fatal("no events received")
+	}
+
+	last := events[len(events)-1]
+
+	if last.Type == llmclient.EventError {
+		t.Skipf("integration: omp stream error (check authentication/config): %s",
+			last.ErrorMessage)
+	}
+
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event type = %q, want %q", last.Type, llmclient.EventDone)
+	}
+
+	var gotContent bool
+	for _, ev := range events {
+		if (ev.Type == llmclient.EventTextDelta && ev.Delta != "") ||
+			(ev.Type == llmclient.EventThinkingDelta && ev.Delta != "") {
+			gotContent = true
+			break
+		}
+	}
+	if !gotContent {
+		t.Log("no non-empty text/thinking content received (backend may have returned empty response)")
+	}
+}

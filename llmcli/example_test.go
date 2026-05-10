@@ -101,9 +101,9 @@ func TestMetricLabelHelpers(t *testing.T) {
 			want string
 		}{
 			{"nil", nil, "none"},
-			{"canceled", ctx.Err(), "canceled"},
-			{"deadline", dlCtx.Err(), "deadline_exceeded"},
-			{"other", errors.New("some backend error"), "error"},
+			{"canceled", ctx.Err(), llmclient.ErrTypeCancelled},
+			{"deadline", dlCtx.Err(), llmclient.ErrTypeTimeout},
+			{"other", errors.New("some backend error"), llmclient.ErrTypeInternal},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

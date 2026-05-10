@@ -16,7 +16,13 @@ type fakeBackend struct {
 
 func (f *fakeBackend) Name() string    { return f.name }
 func (f *fakeBackend) Available() bool { return f.available }
-func (f *fakeBackend) Close() error    { return nil }
+func (f *fakeBackend) Ready(context.Context) llmclient.ReadyReport {
+	if f.available {
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
+	}
+	return llmclient.ReadyReport{State: llmclient.ReadyMissingBinary, Detail: "fake unavailable"}
+}
+func (f *fakeBackend) Close() error { return nil }
 func (f *fakeBackend) Stream(_ context.Context, _ *llmclient.Context, _ ...llmclient.Option) (<-chan llmclient.Event, error) {
 	ch := make(chan llmclient.Event)
 	close(ch)
