@@ -83,8 +83,7 @@ func TestBuildCodexExecArgs_Ollama(t *testing.T) {
 	args := buildCodexExecArgs(input, cfg)
 
 	want := map[string]string{
-		"--approval-policy": "full-auto",
-		"--model":           "gpt-oss:120b",
+		"--model": "gpt-oss:120b",
 	}
 	assertFlagsPresent(t, args, want)
 	if flagIndex(args, "--oss") < 0 {
@@ -92,28 +91,6 @@ func TestBuildCodexExecArgs_Ollama(t *testing.T) {
 	}
 }
 
-// TestBuildCodexExecArgs_ApprovalPolicy verifies that --approval-policy
-// full-auto is always included to suppress interactive prompts.
-func TestBuildCodexExecArgs_ApprovalPolicy(t *testing.T) {
-	input := &llmclient.Context{
-		Messages: []llmclient.Message{
-			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
-				{Type: llmclient.ContentText, Text: "hello"},
-			}},
-		},
-	}
-	cfg := llmclient.DefaultRequestConfig()
-
-	args := buildCodexExecArgs(input, cfg)
-
-	want := map[string]string{
-		"--approval-policy": "full-auto",
-	}
-	assertFlagsPresent(t, args, want)
-}
-
-// TestBuildCodexExecArgs_ExecSubcommandAndPrompt verifies that "exec" is the
-// first positional argument and that the prompt is the second.
 func TestBuildCodexExecArgs_ExecSubcommandAndPrompt(t *testing.T) {
 	const promptText = "count to five"
 	input := &llmclient.Context{
@@ -133,8 +110,9 @@ func TestBuildCodexExecArgs_ExecSubcommandAndPrompt(t *testing.T) {
 	if args[0] != "exec" {
 		t.Errorf("args[0] = %q, want %q", args[0], "exec")
 	}
-	if args[1] != promptText {
-		t.Errorf("args[1] = %q, want %q", args[1], promptText)
+	wantPrompt := "User: " + promptText
+	if args[1] != wantPrompt {
+		t.Errorf("args[1] = %q, want %q", args[1], wantPrompt)
 	}
 }
 
@@ -162,11 +140,11 @@ func TestBuildCodexExecArgs_WorkingDirectoryAndReasoningEffort(t *testing.T) {
 		t.Fatalf("exec prompt not found in args %v", args)
 	}
 	prompt := args[execIdx+1]
-	if !strings.Contains(prompt, "System instructions:\nFollow the repo rules.") {
-		t.Errorf("prompt = %q; want injected system instructions", prompt)
+	if !strings.Contains(prompt, "Follow the repo rules.") {
+		t.Errorf("prompt = %q; want system prompt in text", prompt)
 	}
-	if !strings.Contains(prompt, "User request:\nimplement feature") {
-		t.Errorf("prompt = %q; want user request", prompt)
+	if !strings.Contains(prompt, "User: implement feature") {
+		t.Errorf("prompt = %q; want user message in text", prompt)
 	}
 }
 

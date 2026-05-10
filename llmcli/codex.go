@@ -34,6 +34,34 @@ func (b *CodexBackend) Capabilities() llmclient.Capabilities {
 	return codexExecStaticCapabilities(b.info.Version)
 }
 
+// Ready checks that codex is installed and that a known Codex auth
+// marker is present. It avoids making a paid model request.
+func (b *CodexBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	if anyPathExists(homePath(".codex", "auth.json"), homePath(".codex", "config.toml")) {
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
+	}
+	return readyNotAuthed(b.Name(), "run `codex login`")
+}
+
+// Available reports whether codex is installed and authenticated.
+func (b *CodexBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// promptForCodex returns the prompt text for codex exec.
+//
+// When cfg.SessionID is set, only the last user message is returned.
+// When empty, the full conversation history is built via BuildPromptFromContext.
+func promptForCodex(input *llmclient.Context, cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig is passed by value throughout prompt helpers.
+	if cfg.SessionID != "" {
+		return llmclient.LastUserMessage(input)
+	}
+	return llmclient.BuildPromptFromContext(input)
+}
+
 // Stream spawns `codex exec <prompt>`, reads the plain-text response, and
 // returns a channel of normalized [llmclient.Event] values.
 //
@@ -111,8 +139,6 @@ func (b *CodexBackend) Stream(
 func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
 	prompt := codexExecPrompt(input, cfg)
 
-	// --approval-policy full-auto prevents interactive approval prompts in
-	// programmatic invocations where there is no human operator at the terminal.
 	var args []string
 	if cfg.WorkingDirectory != "" {
 		args = append(args, "-C", cfg.WorkingDirectory)
@@ -124,7 +150,7 @@ func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) [
 	if cfg.CodexJSONL {
 		args = append(args, "--json")
 	}
-	args = append(args, prompt, "--approval-policy", "full-auto")
+	args = append(args, prompt)
 
 	model := cfg.Model
 	if cfg.Ollama != nil {
@@ -142,7 +168,7 @@ func buildCodexExecArgs(input *llmclient.Context, cfg llmclient.RequestConfig) [
 }
 
 func codexExecPrompt(input *llmclient.Context, cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
-	prompt := lastUserMessage(input)
+	prompt := promptForCodex(input, cfg)
 	if cfg.WorkingDirectory == "" || input == nil || input.SystemPrompt == "" {
 		return prompt
 	}
@@ -206,6 +232,7 @@ func codexExecStaticCapabilities(version string) llmclient.Capabilities {
 			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
 			llmclient.OptionReasoningEffort:    llmclient.OptionSupportFull,
 			llmclient.OptionCodexJSONL:         llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:         llmclient.OptionSupportPartial,
 			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
@@ -220,9 +247,9 @@ func codexExecFidelity(cfg llmclient.RequestConfig, streaming llmclient.Streamin
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
 	optionResults := mergeOptionResults(results, executionOptionResults(cfg, codexExecStaticCapabilities("")))
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     streaming,
 		ToolControl:   llmclient.ToolControlNone,
 		OptionResults: optionResults,
-	}
+	}, cfg)
 }

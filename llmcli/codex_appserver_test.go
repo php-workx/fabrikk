@@ -32,9 +32,10 @@ func newPipeProcess() (*codexProcess, *fakeServer) {
 	serverOutR, serverOutW := io.Pipe()
 
 	proc := &codexProcess{
-		sup:    nil, // test mode: no real subprocess
-		stdin:  clientInW,
-		stdout: bufio.NewReader(serverOutR),
+		sup:          nil, // test mode: no real subprocess
+		stdin:        clientInW,
+		stdout:       bufio.NewReader(serverOutR),
+		stdoutCloser: serverOutR,
 	}
 
 	server := &fakeServer{

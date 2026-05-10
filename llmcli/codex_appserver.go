@@ -30,15 +30,19 @@ const maxCodexBodyBytes = 8 << 20
 // process. It holds an optional supervisor (nil when constructed in tests via
 // in-process pipes) alongside the stdin writer and stdout reader.
 type codexProcess struct {
-	sup    *supervisor // nil in test mode
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
+	sup          *supervisor // nil in test mode
+	stdin        io.WriteCloser
+	stdout       *bufio.Reader
+	stdoutCloser io.Closer
 }
 
 // terminate sends a termination signal to the process tree (when sup != nil)
 // and closes stdin. Safe to call more than once.
 func (p *codexProcess) terminate(reason error) {
 	_ = p.stdin.Close()
+	if p.stdoutCloser != nil {
+		_ = p.stdoutCloser.Close()
+	}
 	if p.sup != nil {
 		p.sup.terminate(reason)
 	}
@@ -118,9 +122,10 @@ func startCodexAppServer(ctx context.Context, info CliInfo, env []string) (*code
 	}()
 
 	return &codexProcess{
-		sup:    sup,
-		stdin:  stdinPipe,
-		stdout: stdoutReader,
+		sup:          sup,
+		stdin:        stdinPipe,
+		stdout:       stdoutReader,
+		stdoutCloser: stdoutPipe,
 	}, nil
 }
 
@@ -216,15 +221,26 @@ func NewCodexAppServerBackend(info CliInfo) *CodexAppServerBackend {
 // the binary is on PATH. If a process has already been started, it also
 // verifies the process has not exited and the backend is healthy.
 func (b *CodexAppServerBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// Ready checks codex auth markers and persistent process liveness.
+func (b *CodexAppServerBackend) Ready(_ context.Context) llmclient.ReadyReport {
 	if !b.binaryAvailable() {
-		return observeAvailability(b.Name(), false)
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	if !anyPathExists(homePath(".codex", "auth.json"), homePath(".codex", "config.toml")) {
+		return readyNotAuthed(b.Name(), "run `codex login`")
 	}
 	b.procMu.Lock()
 	defer b.procMu.Unlock()
 	if b.proc == nil {
-		return observeAvailability(b.Name(), true) // binary exists; process starts lazily on first Stream call
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
 	}
-	return observeAvailability(b.Name(), b.healthy && b.proc.alive())
+	if !b.healthy || !b.proc.alive() {
+		return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "codex app-server process is not healthy"}
+	}
+	return llmclient.ReadyReport{State: llmclient.ReadyOK}
 }
 
 // Capabilities returns the static capabilities for this backend instance.
@@ -311,7 +327,7 @@ func (b *CodexAppServerBackend) Stream(
 		defer close(cancelWatchDone)
 
 		id := b.nextID.Add(1)
-		prompt := lastUserMessage(input)
+		prompt := llmclient.LastUserMessage(input)
 
 		params := map[string]any{
 			"message": prompt,
@@ -333,6 +349,7 @@ func (b *CodexAppServerBackend) Stream(
 		// may include a canonical session ID in a future notification.
 		fidelity := codexAppServerFidelity(cfg)
 		if !emit(streamCtx, ch, startEvent(cfg.SessionID, fidelity)) {
+			b.restartAfterProtocolError(streamCtx.Err())
 			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
 			return
 		}
@@ -421,6 +438,7 @@ func (b *CodexAppServerBackend) readTurnEvents(
 
 	for {
 		if ctx.Err() != nil {
+			b.restartAfterProtocolError(ctx.Err())
 			te.done(ctx, nil, nil, llmclient.StopCancelled)
 			return
 		}
@@ -428,6 +446,7 @@ func (b *CodexAppServerBackend) readTurnEvents(
 		body, err := internal.ReadFrame(proc.stdout, maxCodexHeaderBytes, maxCodexBodyBytes)
 		if err != nil {
 			if ctx.Err() != nil {
+				b.restartAfterProtocolError(ctx.Err())
 				te.done(ctx, nil, nil, llmclient.StopCancelled)
 				return
 			}
@@ -566,11 +585,11 @@ func codexAppServerFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { /
 	}
 	optionResults := mergeOptionResults(optResults, executionOptionResults(cfg, codexAppServerStaticCapabilities("")))
 
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlBuiltIn,
 		OptionResults: optionResults,
-	}
+	}, cfg)
 }
 
 // codexAppServerStaticCapabilities returns the static capabilities for the
@@ -590,6 +609,7 @@ func codexAppServerStaticCapabilities(version string) llmclient.Capabilities {
 			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
 			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
 			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:         llmclient.OptionSupportPartial,
 		},
 	}
 }
