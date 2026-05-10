@@ -94,7 +94,7 @@ func (lc *Lifecycle) waitForRun(ctx context.Context, errCh <-chan error) error {
 // DefaultLockfilePath returns a per-user lockfile path for name.
 func DefaultLockfilePath(name string) string {
 	if name == "" {
-		name = "llmcli-bridge"
+		name = "llmcli"
 	}
 	if runtime.GOOS == windowsOS {
 		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {

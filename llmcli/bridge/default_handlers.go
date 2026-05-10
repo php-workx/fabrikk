@@ -9,7 +9,7 @@ import (
 	"github.com/php-workx/fabrikk/llmclient"
 )
 
-// Built-in op names supported by the shipped llmcli-bridge binary.
+// Built-in op names supported by the shipped llmcli binary.
 const (
 	OpReady      = "ready"
 	OpText       = "text"
@@ -44,7 +44,7 @@ type jsonResult struct {
 	Value json.RawMessage `json:"value"`
 }
 
-// RegisterBuiltinHandlers registers the generic ops shipped by cmd/llmcli-bridge.
+// RegisterBuiltinHandlers registers the generic ops shipped by cmd/llmcli.
 func RegisterBuiltinHandlers() {
 	Register(HandlerFunc{Operation: OpReady, Fn: handleReady})
 	Register(HandlerFunc{Operation: OpText, Fn: handleText})
