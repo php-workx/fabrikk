@@ -53,6 +53,7 @@ type OpenCodeHTTPBackend struct {
 	CliBackend
 
 	mu      sync.Mutex
+	closed  bool
 	srv     *supervisor // non-nil when we own the server process
 	baseURL string      // e.g. "http://127.0.0.1:4096"; set after ensureServer
 	port    int         // port backing baseURL; 0 means externally injected/test URL
@@ -93,20 +94,33 @@ func newOpenCodeHTTPBackendWithClient(info CliInfo, client *http.Client, passwor
 // Available reports whether the backend is usable. For a persistent backend
 // this checks both the binary on disk and that the server (if owned) is alive.
 func (b *OpenCodeHTTPBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// Ready checks binary availability, opencode config presence, and owned-server liveness.
+func (b *OpenCodeHTTPBackend) Ready(_ context.Context) llmclient.ReadyReport {
 	if !b.binaryAvailable() {
-		return observeAvailability(b.Name(), false)
+		return readyMissingBinary(b.Name(), b.info.Path)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "opencode HTTP backend has been closed"}
+	}
 	if b.srv != nil {
-		// Verify the owned process is still running.
+		// Server already started — verify it is still running.
 		select {
 		case <-b.srv.done:
-			return observeAvailability(b.Name(), false) // process exited
+			return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "opencode server process has exited"}
 		default:
+			return llmclient.ReadyReport{State: llmclient.ReadyOK}
 		}
 	}
-	return observeAvailability(b.Name(), true)
+	// Server not yet started — check that opencode has been configured.
+	if !anyPathExists(xdgConfigPath("opencode", "opencode.json")) {
+		return readyNotAuthed(b.Name(), "configure a provider in ~/.config/opencode/opencode.json")
+	}
+	return llmclient.ReadyReport{State: llmclient.ReadyOK}
 }
 
 // Close terminates the owned server process (if any) and releases resources.
@@ -115,7 +129,9 @@ func (b *OpenCodeHTTPBackend) Close() error {
 	var err error
 	b.closeOnce.Do(func() {
 		b.mu.Lock()
+		b.closed = true
 		s := b.srv
+		b.srv = nil
 		b.mu.Unlock()
 		if s != nil {
 			s.terminate(nil)
@@ -485,7 +501,7 @@ func (b *OpenCodeHTTPBackend) sendPromptAsync(
 	input *llmclient.Context,
 ) error {
 	body := openCodePromptBody{
-		Text: lastUserMessage(input),
+		Text: llmclient.LastUserMessage(input),
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -629,6 +645,7 @@ func openCodeHTTPStaticCapabilities(version string) llmclient.Capabilities {
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
 			llmclient.OptionOpenCodePort: llmclient.OptionSupportFull,
 			llmclient.OptionTimeout:      llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:   llmclient.OptionSupportPartial,
 		},
 	}
 }
@@ -638,11 +655,11 @@ func openCodeHTTPFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //n
 	if cfg.OpenCodePort != 0 {
 		results[llmclient.OptionOpenCodePort] = llmclient.OptionApplied
 	}
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructuredUnknown,
 		ToolControl:   llmclient.ToolControlNone,
 		OptionResults: mergeOptionResults(results, executionOptionResults(cfg, openCodeHTTPStaticCapabilities(""))),
-	}
+	}, cfg)
 }
 
 // openCodeTextPayload is the minimal JSON shape we try to extract text from.

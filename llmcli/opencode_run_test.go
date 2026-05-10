@@ -42,8 +42,9 @@ func TestBuildOpenCodeRunArgs_RunSubcommandAndPrompt(t *testing.T) {
 	if args[0] != "run" {
 		t.Errorf("args[0] = %q, want %q", args[0], "run")
 	}
-	if args[1] != promptText {
-		t.Errorf("args[1] = %q, want %q", args[1], promptText)
+	wantPrompt := "User: " + promptText
+	if args[1] != wantPrompt {
+		t.Errorf("args[1] = %q, want %q", args[1], wantPrompt)
 	}
 	// Model should NOT appear in args — it is handled via config file.
 	if flagIndex(args, "--model") >= 0 {
@@ -78,7 +79,7 @@ func TestOpenCodeRun_ConfigCleanup(t *testing.T) {
 		t.Fatalf("read opencode.json: %v", readErr)
 	}
 
-	// Config must be valid JSON containing model and systemPrompt.
+	// Config must be valid JSON containing model and instructions.
 	var parsed openCodeConfig
 	if jsonErr := json.Unmarshal(data, &parsed); jsonErr != nil {
 		cleanup()
@@ -87,8 +88,15 @@ func TestOpenCodeRun_ConfigCleanup(t *testing.T) {
 	if parsed.Model != model {
 		t.Errorf("config.Model = %q, want %q", parsed.Model, model)
 	}
-	if parsed.SystemPrompt != sysPrompt {
-		t.Errorf("config.SystemPrompt = %q, want %q", parsed.SystemPrompt, sysPrompt)
+	if len(parsed.Instructions) != 1 {
+		t.Fatalf("config.Instructions length = %d, want 1", len(parsed.Instructions))
+	}
+	instrData, instrErr := os.ReadFile(parsed.Instructions[0])
+	if instrErr != nil {
+		t.Fatalf("read instructions file: %v", instrErr)
+	}
+	if string(instrData) != sysPrompt {
+		t.Errorf("instructions file content = %q, want %q", string(instrData), sysPrompt)
 	}
 
 	// xdgHome must not reside inside user config directories.
@@ -128,8 +136,8 @@ func TestOpenCodeRun_ConfigCleanup_EmptyFields(t *testing.T) {
 	if parsed.Model != "" {
 		t.Errorf("model should be empty, got %q", parsed.Model)
 	}
-	if parsed.SystemPrompt != "" {
-		t.Errorf("systemPrompt should be empty, got %q", parsed.SystemPrompt)
+	if len(parsed.Instructions) != 0 {
+		t.Errorf("instructions should be empty, got %v", parsed.Instructions)
 	}
 }
 

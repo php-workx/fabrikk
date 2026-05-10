@@ -36,6 +36,22 @@ func (b *OpenCodeRunBackend) Capabilities() llmclient.Capabilities {
 	return openCodeRunStaticCapabilities(b.info.Version)
 }
 
+// Ready checks that opencode is installed and that a user opencode config exists.
+func (b *OpenCodeRunBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	if anyPathExists(xdgConfigPath("opencode", "opencode.json")) {
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
+	}
+	return readyNotAuthed(b.Name(), "configure a provider in ~/.config/opencode/opencode.json")
+}
+
+// Available reports whether opencode is installed and configured.
+func (b *OpenCodeRunBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
 // Stream spawns `opencode run <message>`, reads the plain-text response, and
 // returns a channel of normalized [llmclient.Event] values.
 //
@@ -102,8 +118,12 @@ func (b *OpenCodeRunBackend) Stream(
 //
 // opencode run does not accept flags for system prompt or model; those are
 // supplied through the config file written by writeTempOpenCodeConfig.
-func buildOpenCodeRunArgs(input *llmclient.Context, _ llmclient.RequestConfig) []string { //nolint:gocritic // signature kept stable for existing helper tests.
-	return []string{"run", lastUserMessage(input)}
+func buildOpenCodeRunArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string { //nolint:gocritic // signature kept stable for existing helper tests.
+	prompt := llmclient.BuildPromptFromContext(input)
+	if cfg.SessionID != "" {
+		prompt = llmclient.LastUserMessage(input)
+	}
+	return []string{"run", prompt}
 }
 
 // openCodeConfig is the subset of the opencode configuration that llmcli
@@ -114,7 +134,7 @@ func buildOpenCodeRunArgs(input *llmclient.Context, _ llmclient.RequestConfig) [
 // public opencode documentation.
 type openCodeConfig struct {
 	Model        string                            `json:"model,omitempty"`
-	SystemPrompt string                            `json:"systemPrompt,omitempty"`
+	Instructions []string                          `json:"instructions,omitempty"`
 	Providers    map[string]openCodeOllamaProvider `json:"providers,omitempty"`
 }
 
@@ -153,8 +173,16 @@ func writeTempOpenCodeConfig(
 	ocCfg := openCodeConfig{
 		Model: cfg.Model,
 	}
-	if input != nil {
-		ocCfg.SystemPrompt = input.SystemPrompt
+	if input != nil && input.SystemPrompt != "" {
+		// opencode does not accept a 'systemPrompt' config key. System
+		// instructions must be written to a file and referenced via the
+		// 'instructions' array.
+		promptPath := filepath.Join(tmpDir, "system-prompt.md")
+		if writeErr := os.WriteFile(promptPath, []byte(input.SystemPrompt), 0o600); writeErr != nil {
+			cleanupFn()
+			return "", func() {}, fmt.Errorf("write system prompt file: %w", writeErr)
+		}
+		ocCfg.Instructions = []string{promptPath}
 	}
 	if cfg.Ollama != nil {
 		ocCfg.Providers = buildOpenCodeOllamaConfigJSON(*cfg.Ollama).Providers
@@ -220,6 +248,7 @@ func openCodeRunStaticCapabilities(version string) llmclient.Capabilities {
 			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
 			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
 			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:         llmclient.OptionSupportPartial,
 			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
@@ -234,9 +263,9 @@ func openCodeRunFidelity(cfg llmclient.RequestConfig, streaming llmclient.Stream
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
 	optionResults := mergeOptionResults(results, executionOptionResults(cfg, openCodeRunStaticCapabilities("")))
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     streaming,
 		ToolControl:   llmclient.ToolControlNone,
 		OptionResults: optionResults,
-	}
+	}, cfg)
 }
