@@ -21,7 +21,10 @@ func (s *stubBackend) Stream(_ context.Context, _ *llmclient.Context, _ ...llmcl
 
 func (s *stubBackend) Name() string    { return "stub" }
 func (s *stubBackend) Available() bool { return false }
-func (s *stubBackend) Close() error    { return nil }
+func (s *stubBackend) Ready(context.Context) llmclient.ReadyReport {
+	return llmclient.ReadyReport{State: llmclient.ReadyMissingBinary, Detail: "stub"}
+}
+func (s *stubBackend) Close() error { return nil }
 
 // TestBackendInterfaceAssignment verifies at compile time that a concrete type
 // can be assigned to llmclient.Backend.
@@ -57,6 +60,33 @@ func TestEventJSONShape(t *testing.T) {
 	if _, ok := m["contentIndex"]; !ok {
 		t.Error("expected key 'contentIndex' in JSON output")
 	}
+}
+
+func TestContextMetadataJSONShape(t *testing.T) {
+	ctx := llmclient.Context{
+		Messages: []llmclient.Message{},
+		Metadata: map[string]string{
+			"cwd":   "/tmp/repo",
+			"shell": "zsh",
+		},
+	}
+
+	data, err := json.Marshal(ctx)
+	if err != nil {
+		t.Fatalf("marshal Context: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+
+	metadata, ok := m["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected metadata object")
+	}
+	checkKey(t, metadata, "cwd", "/tmp/repo")
+	checkKey(t, metadata, "shell", "zsh")
 }
 
 func TestEventDoneJSONShape(t *testing.T) {
@@ -113,6 +143,51 @@ func TestEventErrorJSONShape(t *testing.T) {
 
 	checkKey(t, m, "type", "error")
 	checkKey(t, m, "errorMessage", "subprocess exited with code 1")
+}
+
+func TestStableErrorTypeConstants(t *testing.T) {
+	got := []string{
+		llmclient.ErrTypeAuth,
+		llmclient.ErrTypeRateLimit,
+		llmclient.ErrTypeBadRequest,
+		llmclient.ErrTypeProvider,
+		llmclient.ErrTypeNetwork,
+		llmclient.ErrTypeTimeout,
+		llmclient.ErrTypeCancelled,
+		llmclient.ErrTypeInternal,
+	}
+	want := []string{
+		"auth",
+		"rate_limit",
+		"bad_request",
+		"provider",
+		"network",
+		"timeout",
+		"cancelled",
+		"internal",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("error constant %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReadyStateString(t *testing.T) {
+	cases := []struct {
+		state llmclient.ReadyState
+		want  string
+	}{
+		{llmclient.ReadyOK, "ok"},
+		{llmclient.ReadyMissingBinary, "missing_binary"},
+		{llmclient.ReadyNotAuthed, "not_authed"},
+		{llmclient.ReadyUnknown, "unknown"},
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("ReadyState(%d).String() = %q, want %q", tc.state, got, tc.want)
+		}
+	}
 }
 
 func TestEventStartWithFidelityJSONShape(t *testing.T) {

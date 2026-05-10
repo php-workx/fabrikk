@@ -3,9 +3,10 @@ package llmclient
 // Context is the input to a single streaming request. It carries the system
 // prompt, conversation history, and any tool definitions the model may call.
 type Context struct {
-	SystemPrompt string    `json:"systemPrompt,omitempty"`
-	Messages     []Message `json:"messages"`
-	Tools        []Tool    `json:"tools,omitempty"`
+	SystemPrompt string            `json:"systemPrompt,omitempty"`
+	Messages     []Message         `json:"messages"`
+	Tools        []Tool            `json:"tools,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 // Message is a single turn in the conversation history.
@@ -89,6 +90,18 @@ const (
 	StopCancelled StopReason = "cancelled"  // request was cancelled
 )
 
+// Stable coarse classifications for EventError events.
+const (
+	ErrTypeAuth       = "auth"
+	ErrTypeRateLimit  = "rate_limit"
+	ErrTypeBadRequest = "bad_request"
+	ErrTypeProvider   = "provider"
+	ErrTypeNetwork    = "network"
+	ErrTypeTimeout    = "timeout"
+	ErrTypeCancelled  = "cancelled"
+	ErrTypeInternal   = "internal"
+)
+
 // Event is the unified event type emitted by all backends (both llmclient and
 // llmcli). It is a discriminated union on the Type field.
 type Event struct {
@@ -155,6 +168,7 @@ type AssistantMessage struct {
 	Model      string         `json:"model,omitempty"`
 	StopReason StopReason     `json:"stopReason,omitempty"`
 	Usage      *Usage         `json:"usage,omitempty"`
+	Cost       *Cost          `json:"cost,omitempty"`
 }
 
 // Usage carries token usage metadata when it is available from the backend.

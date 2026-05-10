@@ -42,6 +42,20 @@ const (
 	ToolControlHost ToolControlMode = "host_controlled"
 )
 
+// JSONSchemaMode describes how a backend handled a JSON schema request.
+type JSONSchemaMode string
+
+const (
+	// JSONSchemaEnforced means the backend natively constrained model output.
+	JSONSchemaEnforced JSONSchemaMode = "enforced"
+
+	// JSONSchemaAdvisory means the schema was accepted only as guidance.
+	JSONSchemaAdvisory JSONSchemaMode = "advisory"
+
+	// JSONSchemaIgnored means the schema was ignored.
+	JSONSchemaIgnored JSONSchemaMode = "ignored"
+)
+
 // OptionSupport indicates the degree to which a backend supports a given
 // option. Used in Capabilities.OptionSupport to advertise static support
 // before a request is made.
@@ -126,6 +140,10 @@ type Fidelity struct {
 
 	// ToolControl describes which party owns tool execution for this stream.
 	ToolControl ToolControlMode `json:"toolControl"`
+
+	// JSONSchemaMode describes whether a requested JSON schema was enforced,
+	// treated as advisory guidance, or ignored.
+	JSONSchemaMode JSONSchemaMode `json:"jsonSchemaMode,omitempty"`
 
 	// OptionResults maps each option that was passed to Stream to its
 	// resolution: applied, ignored, degraded, or unsupported.

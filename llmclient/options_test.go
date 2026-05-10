@@ -1,6 +1,7 @@
 package llmclient_test
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -107,6 +108,49 @@ func TestWithCodexJSONL(t *testing.T) {
 	if cfg.CodexJSONL {
 		t.Error("expected CodexJSONL to be false")
 	}
+}
+
+func TestWithJSONSchemaCopiesSchema(t *testing.T) {
+	const mutated = "mutated"
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"ok": map[string]interface{}{"type": "boolean"},
+		},
+	}
+
+	cfg := apply(llmclient.WithJSONSchema(schema))
+	if cfg.JSONSchema == nil {
+		t.Fatal("JSONSchema is nil")
+	}
+	schema["type"] = mutated
+	cfg.JSONSchema["type"] = "object-mutated"
+
+	cfg2 := apply(llmclient.WithJSONSchema(map[string]interface{}{"type": "array"}))
+	if cfg2.JSONSchema["type"] != "array" {
+		t.Fatalf("JSONSchema = %v", cfg2.JSONSchema)
+	}
+}
+
+func TestFidelityJSONSchemaModeJSONShape(t *testing.T) {
+	fidelity := llmclient.Fidelity{
+		Streaming:      llmclient.StreamingStructured,
+		ToolControl:    llmclient.ToolControlNone,
+		JSONSchemaMode: llmclient.JSONSchemaAdvisory,
+		OptionResults:  map[llmclient.OptionName]llmclient.OptionResult{llmclient.OptionJSONSchema: llmclient.OptionDegraded},
+		Warnings:       []string{"schema is advisory"},
+	}
+
+	data, err := json.Marshal(fidelity)
+	if err != nil {
+		t.Fatalf("marshal Fidelity: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal Fidelity: %v", err)
+	}
+	checkKey(t, m, "jsonSchemaMode", string(llmclient.JSONSchemaAdvisory))
 }
 
 func TestWithHostTools(t *testing.T) {

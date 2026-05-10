@@ -17,6 +17,7 @@ const (
 	OptionOllama       OptionName = "ollama"
 	OptionCodexProfile OptionName = "codexProfile"
 	OptionCodexJSONL   OptionName = "codexJSONL"
+	OptionJSONSchema   OptionName = "jsonSchema"
 	OptionHostTools    OptionName = "hostTools"
 	OptionOpenCodePort OptionName = "openCodePort"
 
@@ -110,6 +111,10 @@ type RequestConfig struct {
 	// CodexJSONL requests Codex exec JSONL stdout mode for callers that need
 	// raw Codex events while still receiving normalized llmclient events.
 	CodexJSONL bool
+
+	// JSONSchema requests JSON-shaped output matching this schema. Backends
+	// that cannot enforce schemas natively report advisory or ignored fidelity.
+	JSONSchema map[string]interface{}
 
 	// HostTools is the list of host-defined tools injected for this request.
 	HostTools []Tool
@@ -217,6 +222,15 @@ func WithCodexJSONL(enabled bool) Option {
 	}
 }
 
+// WithJSONSchema requests JSON-shaped output matching schema. The schema is
+// copied before storage. Current llmcli backends report this as advisory
+// fidelity rather than native enforcement.
+func WithJSONSchema(schema map[string]interface{}) Option {
+	return func(cfg *RequestConfig) {
+		cfg.JSONSchema = cloneInterfaceMap(schema)
+	}
+}
+
 // WithHostTools injects custom tool definitions to be executed by the host
 // rather than the CLI. Recognized by omp RPC backend; reported unsupported by
 // others.
@@ -308,6 +322,7 @@ func ApplyOptions(base RequestConfig, opts []Option) RequestConfig { //nolint:go
 	cfg.Environment = append([]string(nil), base.Environment...)
 	cfg.EnvironmentOverlay = copyStringMap(base.EnvironmentOverlay)
 	cfg.HostTools = cloneTools(base.HostTools)
+	cfg.JSONSchema = cloneInterfaceMap(base.JSONSchema)
 	if base.Ollama != nil {
 		ollama := *base.Ollama
 		cfg.Ollama = &ollama
@@ -355,4 +370,30 @@ func copyStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func cloneInterfaceMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = cloneInterfaceValue(value)
+	}
+	return out
+}
+
+func cloneInterfaceValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		return cloneInterfaceMap(v)
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i := range v {
+			out[i] = cloneInterfaceValue(v[i])
+		}
+		return out
+	default:
+		return v
+	}
 }
