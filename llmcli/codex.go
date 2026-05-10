@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -22,6 +23,8 @@ import (
 // CodexBackend implements [llmclient.Backend].
 type CodexBackend struct {
 	CliBackend
+	streamingOnce sync.Once
+	streamingMode llmclient.StreamingFidelity
 }
 
 // NewCodexBackend constructs a CodexBackend from the detected CliInfo.
@@ -99,10 +102,13 @@ func (b *CodexBackend) Stream(
 		}
 	}
 
-	streaming := llmclient.StreamingBufferedOnly
-	if probePipeStreaming(streamCtx, b.info.Path, nil) {
-		streaming = llmclient.StreamingTextChunk
-	}
+	b.streamingOnce.Do(func() {
+		b.streamingMode = llmclient.StreamingBufferedOnly
+		if probePipeStreaming(streamCtx, b.info.Path, nil) {
+			b.streamingMode = llmclient.StreamingTextChunk
+		}
+	})
+	streaming := b.streamingMode
 
 	spec := processSpec{
 		Command:    b.info.Path,
