@@ -12,6 +12,7 @@ import (
 
 	"github.com/php-workx/fabrikk/llmcli"
 	"github.com/php-workx/fabrikk/llmcli/daemon"
+	"github.com/php-workx/fabrikk/llmcli/internal"
 	"github.com/php-workx/fabrikk/llmclient"
 )
 
@@ -30,7 +31,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.BackendNames = backendNamesFromEnv()
 	}
 	if cfg.LockfilePath == "" {
-		cfg.LockfilePath = daemon.DefaultLockfilePath("llmcli-bridge")
+		cfg.LockfilePath = daemon.DefaultLockfilePath("llmcli")
 	}
 
 	lc := daemon.NewLifecycle(daemon.LifecycleConfig{ShutdownTimeout: cfg.ShutdownTimeout})
@@ -96,23 +97,23 @@ func (r *runner) run(ctx context.Context) error {
 }
 
 func (r *runner) readLoop(ctx context.Context) error {
-	reader := bufio.NewReader(r.in)
+	br := bufio.NewReader(r.in)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line, err := reader.ReadBytes('\n')
-		if len(line) > maxWireLineBytes {
-			return fmt.Errorf("bridge request exceeds %d bytes", maxWireLineBytes)
+		line, err := internal.ReadBoundedLine(br, maxWireLineBytes)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if errors.Is(err, internal.ErrLineTooLong) {
+				return fmt.Errorf("bridge request exceeds %d bytes", maxWireLineBytes)
+			}
+			return err
 		}
 		if len(line) > 0 {
 			r.handleLine(ctx, line)
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
 		}
 	}
 }

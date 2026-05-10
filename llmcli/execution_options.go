@@ -42,7 +42,8 @@ func applyEnvOverlay(base []string, overlay map[string]string) []string {
 	for _, entry := range env {
 		key := envKey(entry)
 		if key == "" {
-			out = append(out, entry)
+			// Skip malformed entries (no '=' or empty key): they cannot be
+			// deduplicated and accumulating multiples would corrupt the env.
 			continue
 		}
 		if _, duplicate := seen[key]; duplicate {

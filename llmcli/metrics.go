@@ -187,11 +187,20 @@ func LabelEventType(et llmclient.EventType) string { return string(et) }
 //   - context.Canceled → "cancelled"
 //   - context.DeadlineExceeded → "timeout"
 //   - anything else → a stable llmclient.ErrType* value
+//
+// Sentinel check: errors.Is/errors.As are tried first for context errors.
+// The llmclient.ErrType* constants are plain strings, not typed sentinel
+// errors, so all other classification falls back to substring matching on
+// the lowercased error message. This is a known limitation: messages that
+// mention these words in unrelated context (e.g. "neural network", "rate
+// this response") can be misclassified. More-specific patterns (multi-word
+// phrases) are checked before shorter, broader ones to reduce false hits.
 func LabelErrorType(err error) string {
 	if err == nil {
 		return noErrorType
 	}
 
+	// Prefer typed error checks before any string matching.
 	switch {
 	case errors.Is(err, context.Canceled):
 		return llmclient.ErrTypeCancelled
@@ -199,17 +208,19 @@ func LabelErrorType(err error) string {
 		return llmclient.ErrTypeTimeout
 	}
 
+	// Substring fallback: check multi-word / specific phrases first so that
+	// they win over shorter substrings that appear in the same message.
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "auth") || strings.Contains(msg, "login") || strings.Contains(msg, "not logged in"):
+	case strings.Contains(msg, "not logged in") || strings.Contains(msg, "login") || strings.Contains(msg, "auth"):
 		return llmclient.ErrTypeAuth
-	case strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate_limit") || strings.Contains(msg, "quota"):
+	case strings.Contains(msg, "rate_limit") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "quota"):
 		return llmclient.ErrTypeRateLimit
 	case strings.Contains(msg, "bad request") || strings.Contains(msg, "invalid request") || strings.Contains(msg, "malformed"):
 		return llmclient.ErrTypeBadRequest
-	case strings.Contains(msg, "network") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host"):
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") || strings.Contains(msg, "network"):
 		return llmclient.ErrTypeNetwork
-	case strings.Contains(msg, "provider") || strings.Contains(msg, "upstream"):
+	case strings.Contains(msg, "upstream") || strings.Contains(msg, "provider"):
 		return llmclient.ErrTypeProvider
 	default:
 		return llmclient.ErrTypeInternal
