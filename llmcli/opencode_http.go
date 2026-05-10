@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/php-workx/fabrikk/llmcli/internal"
@@ -61,11 +60,6 @@ type OpenCodeHTTPBackend struct {
 	// password is the HTTP basic-auth secret read from
 	// OPENCODE_SERVER_PASSWORD. Empty means no auth is set.
 	password string
-
-	// schemaDiscovered is set atomically to 1 once discoverSchema succeeds
-	// (or has been attempted). We record it as best-effort and continue even
-	// on failure.
-	schemaDiscovered atomic.Int32
 
 	httpClient *http.Client
 
@@ -145,14 +139,17 @@ func (b *OpenCodeHTTPBackend) Close() error {
 // the full split-channel request lifecycle:
 //
 //  1. Ensure the opencode server is running or reuse an external one.
-//  2. Attempt schema discovery via GET /doc (best-effort, non-blocking).
-//  3. Open GET /event SSE stream.
-//  4. Create a session via POST /session.
-//  5. Send POST /session/:id/prompt_async in a goroutine.
-//  6. Parse the SSE stream and emit normalized events on the returned channel.
+//  2. Open GET /event SSE stream.
+//  3. Create a session via POST /session.
+//  4. Send POST /session/:id/prompt_async in a goroutine.
+//  5. Parse the SSE stream and emit normalized events on the returned channel.
 //
 // The returned channel is closed after exactly one terminal event (done or
 // error). Cancelling ctx terminates the SSE stream and the channel.
+//
+// NOTE: parseOpenCodeSSE has no terminal-event detection and relies on EOF or
+// ctx cancellation to stop. Callers should supply a non-zero timeout via
+// [llmclient.WithTimeout] to avoid hanging on a connection that never closes.
 func (b *OpenCodeHTTPBackend) Stream(
 	ctx context.Context,
 	input *llmclient.Context,
@@ -175,15 +172,6 @@ func (b *OpenCodeHTTPBackend) Stream(
 	if err := b.ensureServer(streamCtx, port); err != nil {
 		cancelTimeout()
 		return nil, fmt.Errorf("llmcli opencode: ensure server: %w", err)
-	}
-
-	// Schema discovery is best-effort — we're schema-gated regardless.
-	if b.schemaDiscovered.CompareAndSwap(0, 1) {
-		go func() {
-			discoverCtx, cancel := context.WithTimeout(streamCtx, openCodeReadyAttemptTimeout)
-			defer cancel()
-			_ = b.discoverSchema(discoverCtx)
-		}()
 	}
 
 	// 1. Open SSE stream BEFORE sending the prompt.
@@ -412,28 +400,6 @@ func (b *OpenCodeHTTPBackend) scanForServerConnected(body io.Reader) bool {
 }
 
 // discoverSchema issues GET /doc on the server and stores the result. It is
-// called once per backend instance as a best-effort schema gate. Failure is
-// non-fatal: the backend operates in StreamingStructuredUnknown mode regardless.
-func (b *OpenCodeHTTPBackend) discoverSchema(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/doc", http.NoBody)
-	if err != nil {
-		return err
-	}
-	b.setAuth(req)
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opencode /doc returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
 // openSSEStream opens the long-lived GET /event SSE connection and returns the
 // HTTP response. The caller owns the response body and must close it.
 func (b *OpenCodeHTTPBackend) openSSEStream(ctx context.Context) (*http.Response, error) {
@@ -572,6 +538,12 @@ func checkOpenCodeHTTPRequiredOptions(cfg llmclient.RequestConfig) error { //nol
 //     terminal event so it can fold in any prompt error that may have arrived.
 //
 // It does NOT emit tool, thinking, or usage events until the schema is pinned.
+//
+// WARNING: This function has no terminal-event detection. It relies entirely on
+// the server closing the SSE body (EOF) or ctx being cancelled to return. A
+// long-lived connection that never closes will block indefinitely. Callers MUST
+// supply a non-zero timeout via [llmclient.WithTimeout] (or cancel ctx externally)
+// to guarantee termination. [llmclient.DefaultRequestConfig] has Timeout = 0.
 func parseOpenCodeSSE(
 	ctx context.Context,
 	body io.Reader,

@@ -123,15 +123,6 @@ func (f *fakeOpenCodeServer) handlePromptAsync(w http.ResponseWriter, r *http.Re
 
 func (f *fakeOpenCodeServer) close() { f.srv.Close() }
 
-// requestOrderSnapshot returns a copy of the recorded request order.
-func (f *fakeOpenCodeServer) requestOrderSnapshot() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := make([]string, len(f.requestOrder))
-	copy(cp, f.requestOrder)
-	return cp
-}
-
 // openCodeBackendForTest builds an OpenCodeHTTPBackend wired to the fake server.
 func openCodeBackendForTest(srv *fakeOpenCodeServer) *OpenCodeHTTPBackend {
 	b := newOpenCodeHTTPBackendWithClient(
@@ -287,7 +278,6 @@ func TestOpenCodeHTTP_OpensSSEBeforePromptAsync(t *testing.T) {
 		httpClient: srv.Client(),
 		baseURL:    srv.URL,
 	}
-	b.schemaDiscovered.Store(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -338,45 +328,6 @@ func TestOpenCodeHTTP_OpensSSEBeforePromptAsync(t *testing.T) {
 	}
 }
 
-// TestOpenCodeHTTP_DiscoversSchema verifies that GET /doc is called during
-// the first Stream invocation (Criterion 2).
-func TestOpenCodeHTTP_DiscoversSchema(t *testing.T) {
-	sseBody := "data: {\"type\":\"server.connected\"}\n\n"
-	fake := newFakeOpenCodeServer(t, []string{sseBody})
-	defer fake.close()
-
-	b := openCodeBackendForTest(fake)
-	// schemaDiscovered is 0 (default), so discoverSchema should run.
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	input := &llmclient.Context{
-		Messages: []llmclient.Message{{
-			Role:    llmclient.RoleUser,
-			Content: []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "test"}},
-		}},
-	}
-
-	ch, err := b.Stream(ctx, input)
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
-	waitForEvents(t, ch, 3*time.Second)
-
-	order := fake.requestOrderSnapshot()
-	found := false
-	for _, r := range order {
-		if r == "GET /doc" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("GET /doc not observed; requests: %v", order)
-	}
-}
-
 // TestOpenCodeHTTP_PromptAsyncNon204CancelsSSE verifies that when prompt_async
 // returns a non-204 status the SSE stream is cancelled and the channel receives
 // an error event (Criterion 3).
@@ -388,8 +339,6 @@ func TestOpenCodeHTTP_PromptAsyncNon204CancelsSSE(t *testing.T) {
 	defer fake.close()
 
 	b := openCodeBackendForTest(fake)
-	b.schemaDiscovered.Store(1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -430,8 +379,6 @@ func TestOpenCodeHTTP_PromptAsyncErrorClosesBody(t *testing.T) {
 	fake.promptClose = true
 	defer fake.close()
 	b := openCodeBackendForTest(fake)
-	b.schemaDiscovered.Store(1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -517,8 +464,6 @@ func TestOpenCodeHTTP_StreamEmitsStartEvent(t *testing.T) {
 	defer fake.close()
 
 	b := openCodeBackendForTest(fake)
-	b.schemaDiscovered.Store(1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -558,8 +503,6 @@ func TestOpenCodeHTTP_StreamEmitsTextFromContent(t *testing.T) {
 	defer fake.close()
 
 	b := openCodeBackendForTest(fake)
-	b.schemaDiscovered.Store(1)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -596,7 +539,6 @@ func TestOpenCodeHTTP_WithOpenCodePortOption(t *testing.T) {
 	defer fake.close()
 
 	b := openCodeBackendForTest(fake)
-	b.schemaDiscovered.Store(1)
 
 	// Provide a non-default port via option; the backend uses its pre-set
 	// baseURL (from openCodeBackendForTest), so we just verify Stream does

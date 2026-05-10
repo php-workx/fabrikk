@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -23,6 +24,12 @@ import (
 // OpenCodeRunBackend implements [llmclient.Backend].
 type OpenCodeRunBackend struct {
 	CliBackend
+
+	// streamingMode is the cached result of probePipeStreaming, populated on the
+	// first Stream call. Subsequent calls reuse the cached value to avoid
+	// spawning a probe subprocess on every invocation.
+	streamingMode llmclient.StreamingFidelity
+	streamingOnce sync.Once
 }
 
 // NewOpenCodeRunBackend constructs an OpenCodeRunBackend from the detected
@@ -88,10 +95,13 @@ func (b *OpenCodeRunBackend) Stream(
 		return nil, fmt.Errorf("llmcli opencode: temp config: %w", err)
 	}
 
-	streaming := llmclient.StreamingBufferedOnly
-	if probePipeStreaming(ctx, b.info.Path, nil) {
-		streaming = llmclient.StreamingTextChunk
-	}
+	b.streamingOnce.Do(func() {
+		b.streamingMode = llmclient.StreamingBufferedOnly
+		if probePipeStreaming(ctx, b.info.Path, nil) {
+			b.streamingMode = llmclient.StreamingTextChunk
+		}
+	})
+	streaming := b.streamingMode
 
 	spec := processSpec{
 		Command:    b.info.Path,
