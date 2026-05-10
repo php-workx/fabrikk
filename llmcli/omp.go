@@ -41,6 +41,34 @@ func (b *OmpBackend) Capabilities() llmclient.Capabilities {
 	return ompPrintStaticCapabilities(b.info.Version)
 }
 
+// Ready checks that omp is installed and that its config directory exists.
+func (b *OmpBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	if anyPathExists(homePath(".omp", "agent", "config.yml")) {
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
+	}
+	return readyNotAuthed(b.Name(), "run `omp` and configure a provider")
+}
+
+// Available reports whether omp is installed and configured.
+func (b *OmpBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// promptForOmp returns the prompt text for omp -p.
+//
+// When cfg.SessionID is set (resuming an existing session), only the last
+// user message is returned. When empty, the full conversation history is
+// built into a single text prompt via BuildPromptFromContext.
+func promptForOmp(input *llmclient.Context, cfg llmclient.RequestConfig) string { //nolint:gocritic // RequestConfig is passed by value throughout prompt helpers.
+	if cfg.SessionID != "" {
+		return llmclient.LastUserMessage(input)
+	}
+	return llmclient.BuildPromptFromContext(input)
+}
+
 // Stream spawns `omp -p --mode json`, parses the JSONL event stream, and
 // returns a channel of normalized [llmclient.Event] values.
 //
@@ -109,7 +137,7 @@ func (b *OmpBackend) Stream(
 
 // buildOmpPrintArgs constructs the argument list for `omp -p --mode json ...`.
 func buildOmpPrintArgs(input *llmclient.Context, cfg llmclient.RequestConfig) []string { //nolint:gocritic // RequestConfig value keeps helper tests simple and immutable.
-	prompt := lastUserMessage(input)
+	prompt := promptForOmp(input, cfg)
 	args := []string{"-p", prompt, "--mode", "json"}
 
 	if input != nil && input.SystemPrompt != "" {
@@ -150,6 +178,7 @@ func ompPrintStaticCapabilities(version string) llmclient.Capabilities {
 			llmclient.OptionEnvironment:        llmclient.OptionSupportFull,
 			llmclient.OptionEnvironmentOverlay: llmclient.OptionSupportFull,
 			llmclient.OptionTimeout:            llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:         llmclient.OptionSupportPartial,
 			llmclient.OptionRawCapture:         llmclient.OptionSupportFull,
 		},
 	}
@@ -195,6 +224,11 @@ type ompParseState struct {
 	assembledMsg  *llmclient.AssistantMessage
 	startEmitted  bool
 	startFidelity *llmclient.Fidelity
+
+	// bytesRead tracks how many bytes the parser has successfully consumed
+	// from the stream. Used to distinguish a clean EOF (data was seen) from
+	// an unexpected EOF (stream was empty).
+	bytesRead int
 
 	// open block tracking for streaming text and thinking
 	inTextBlock  bool
@@ -250,10 +284,17 @@ func parseOmpLines(
 ) error {
 	for {
 		line, readErr := internal.ReadBoundedLine(r, maxOmpLineBytes)
+		state.bytesRead += len(line)
 
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return io.ErrUnexpectedEOF
+				if !state.startEmitted {
+					return io.ErrUnexpectedEOF
+				}
+				// Stream closed without a done/error frame — emit a synthetic done
+				// so the consumer receives a terminal event.
+				te.done(ctx, state.assembledMsg, nil, llmclient.StopEndTurn)
+				return nil
 			}
 			if errors.Is(readErr, internal.ErrLineTooLong) {
 				continue // skip oversize line, keep parsing
@@ -391,11 +432,11 @@ func ompPrintFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolin
 	}
 	optionResults := mergeOptionResults(optResults, executionOptionResults(cfg, ompPrintStaticCapabilities("")))
 
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlBuiltIn,
 		OptionResults: optionResults,
-	}
+	}, cfg)
 }
 
 func ompOnTextDelta(ctx context.Context, frame ompFrame, out chan<- llmclient.Event, state *ompParseState) error {

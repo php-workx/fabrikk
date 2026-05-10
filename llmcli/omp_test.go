@@ -267,10 +267,32 @@ func TestOmpPrint_MalformedJSONLineSkipped(t *testing.T) {
 	}
 }
 
-func TestOmpPrint_EOFBeforeTerminalFrameIsUnexpected(t *testing.T) {
+func TestOmpPrint_EOFBeforeTerminalFrameEmitsSyntheticDone(t *testing.T) {
 	r := ompJSONLReader(
 		`{"type":"ready","session_id":"s1"}`,
 		`{"type":"text_delta","content":"partial"}`,
+	)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	if err != nil {
+		t.Fatalf("parseOmpStream error = %v; want nil", err)
+	}
+
+	events := drainChannel(ch)
+	done := findEvent(t, events, llmclient.EventDone)
+	if done.Reason != llmclient.StopEndTurn {
+		t.Fatalf("done.Reason = %v; want StopEndTurn", done.Reason)
+	}
+}
+
+// TestOmpPrint_ContentBeforeReadyReturnsUnexpectedEOF verifies that a stream
+// delivering bytes without a ready frame returns io.ErrUnexpectedEOF instead
+// of emitting a synthetic done with no preceding start event.
+func TestOmpPrint_ContentBeforeReadyReturnsUnexpectedEOF(t *testing.T) {
+	r := ompJSONLReader(
+		`{"type":"text_delta","content":"hook output"}`,
 	)
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)

@@ -24,7 +24,8 @@ import (
 type OmpRPCBackend struct {
 	CliBackend
 
-	mu         sync.Mutex // protects proc
+	mu         sync.Mutex // protects proc and closed
+	closed     bool
 	proc       *ompRPCProc
 	routingKey string
 }
@@ -69,20 +70,32 @@ func (b *OmpRPCBackend) Capabilities() llmclient.Capabilities {
 // started backend it checks binary existence; for a running process it also
 // verifies the process has not exited.
 func (b *OmpRPCBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// Ready checks binary availability, omp config presence, and persistent process liveness.
+func (b *OmpRPCBackend) Ready(_ context.Context) llmclient.ReadyReport {
 	if !b.binaryAvailable() {
-		return observeAvailability(b.Name(), false)
+		return readyMissingBinary(b.Name(), b.info.Path)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "omp RPC backend has been closed"}
+	}
 	if b.proc == nil {
-		return observeAvailability(b.Name(), true) // not yet started; binary is present
+		// Process not yet started — check that omp has been configured.
+		if !anyPathExists(homePath(".omp", "agent", "config.yml")) {
+			return readyNotAuthed(b.Name(), "run `omp` and configure a provider")
+		}
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
 	}
 	// Non-blocking check: if proc.sup.done is closed the process exited.
 	select {
 	case <-b.proc.sup.done:
-		return observeAvailability(b.Name(), false)
+		return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "omp RPC process has exited"}
 	default:
-		return observeAvailability(b.Name(), true)
+		return llmclient.ReadyReport{State: llmclient.ReadyOK}
 	}
 }
 
@@ -90,6 +103,7 @@ func (b *OmpRPCBackend) Available() bool {
 // call multiple times; subsequent calls are no-ops.
 func (b *OmpRPCBackend) Close() error {
 	b.mu.Lock()
+	b.closed = true
 	proc := b.proc
 	b.proc = nil
 	b.mu.Unlock()
@@ -157,7 +171,7 @@ func (b *OmpRPCBackend) Stream(
 	}
 
 	// Send the prompt command to trigger the turn.
-	prompt := lastUserMessage(input)
+	prompt := llmclient.LastUserMessage(input)
 	if err := sendPrompt(proc, prompt); err != nil {
 		proc.turnMu.Unlock()
 		te.error(ctx, fmt.Errorf("llmcli omp-rpc: send prompt: %w", err))
@@ -353,10 +367,11 @@ func ompRPCStaticCapabilities(version string) llmclient.Capabilities {
 		Usage:               true,
 		OllamaRouting:       true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
-			llmclient.OptionModel:     llmclient.OptionSupportFull,
-			llmclient.OptionSession:   llmclient.OptionSupportFull,
-			llmclient.OptionHostTools: llmclient.OptionSupportFull,
-			llmclient.OptionOllama:    llmclient.OptionSupportFull,
+			llmclient.OptionModel:      llmclient.OptionSupportFull,
+			llmclient.OptionSession:    llmclient.OptionSupportFull,
+			llmclient.OptionHostTools:  llmclient.OptionSupportFull,
+			llmclient.OptionOllama:     llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema: llmclient.OptionSupportPartial,
 		},
 	}
 }
@@ -377,11 +392,11 @@ func ompRPCFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:
 	if cfg.Ollama != nil {
 		results[llmclient.OptionOllama] = llmclient.OptionApplied
 	}
-	return &llmclient.Fidelity{
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
 		Streaming:     llmclient.StreamingStructured,
 		ToolControl:   llmclient.ToolControlHost,
 		OptionResults: mergeOptionResults(results, executionOptionResults(cfg, ompRPCStaticCapabilities(""))),
-	}
+	}, cfg)
 }
 
 // checkOmpRPCRequiredOptions returns ErrUnsupportedOption if any required
