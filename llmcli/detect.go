@@ -3,8 +3,10 @@ package llmcli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,6 +25,71 @@ type CliInfo struct {
 	// Version is the trimmed output of `<binary> --version`, or empty if
 	// the probe failed or timed out.
 	Version string
+
+	// VersionWarning is non-empty when the detected version is below the
+	// minimum known-good version for this CLI. Empty when no minimum is defined
+	// or when the version probe produced no output.
+	VersionWarning string
+}
+
+// minVersions maps CLI name → minimum version string. Versions below this
+// threshold cause DetectAvailableContext to populate CliInfo.VersionWarning.
+var minVersions = map[string]string{
+	"claude":          "1.0.0",
+	"codex":           "0.1.0",
+	"codex-appserver": "0.2.0",
+	"opencode":        "0.3.0",
+	"omp":             "14.0.0",
+}
+
+// versionWarning returns a human-readable warning when version is below the
+// minimum for name, or empty string if no warning is warranted.
+func versionWarning(name, version string) string {
+	minVer, ok := minVersions[name]
+	if !ok || version == "" {
+		return ""
+	}
+	if compareSemver(version, minVer) < 0 {
+		return fmt.Sprintf("%s version %s below minimum %s", name, version, minVer)
+	}
+	return ""
+}
+
+// compareSemver compares two semantic version strings. It strips pre-release
+// and build-metadata suffixes (anything after '-' or '+'), splits on '.',
+// and compares up to 3 numeric parts. Returns -1 if a < b, 0 if equal, 1 if
+// a > b. Non-numeric or unparseable segments are treated as 0 (no warning).
+func compareSemver(a, b string) int {
+	normalize := func(v string) string {
+		if i := strings.IndexAny(v, "-+"); i >= 0 {
+			v = v[:i]
+		}
+		return v
+	}
+	parseParts := func(v string) [3]int {
+		parts := strings.SplitN(normalize(v), ".", 4)
+		var out [3]int
+		for i := range out {
+			if i < len(parts) {
+				n, err := strconv.Atoi(parts[i])
+				if err != nil {
+					return [3]int{}
+				}
+				out[i] = n
+			}
+		}
+		return out
+	}
+	ap, bp := parseParts(a), parseParts(b)
+	for i := range ap {
+		if ap[i] < bp[i] {
+			return -1
+		}
+		if ap[i] > bp[i] {
+			return 1
+		}
+	}
+	return 0
 }
 
 // knownCLIs is the ordered list of AI coding CLI tools to detect, in the
@@ -66,10 +133,11 @@ func DetectAvailableContext(ctx context.Context) []CliInfo {
 		version := probeVersion(probeCtx, path)
 		cancel()
 		out = append(out, CliInfo{
-			Name:    c.name,
-			Binary:  c.binary,
-			Path:    path,
-			Version: version,
+			Name:           c.name,
+			Binary:         c.binary,
+			Path:           path,
+			Version:        version,
+			VersionWarning: versionWarning(c.name, version),
 		})
 	}
 	return out
