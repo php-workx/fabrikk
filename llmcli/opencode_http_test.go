@@ -651,6 +651,97 @@ func TestOpenCodeHTTP_ServerCtxSurvivesStreamCancel(t *testing.T) {
 	}
 }
 
+// TestOpenCodeHTTP_ServerSurvivesFirstStreamCancel verifies that cancelling the
+// per-turn Stream context does not kill the owned server supervisor. The server
+// process must remain alive after the first Stream is cancelled and only be
+// terminated when Close() is called.
+func TestOpenCodeHTTP_ServerSurvivesFirstStreamCancel(t *testing.T) {
+	exe := testExecutable(t)
+
+	// Build a fake opencode HTTP server for the SSE/session/prompt lifecycle.
+	// The SSE body keeps the stream open long enough that we can cancel it.
+	sseBody := ": keep-alive\n\n" + strings.Repeat(": ping\n\n", 100)
+	fake := newFakeOpenCodeServer(t, []string{sseBody})
+	defer fake.close()
+
+	// Construct a supervisor wrapping a long-running subprocess. This simulates
+	// the real opencode server process that ensureServer would have spawned.
+	cmd := exec.Command(exe) //nolint:gosec // test binary path from testExecutable helper
+	cmd.Env = append(baseEnv(), "LLMCLI_TEST_FIXTURE=sleep")
+	configureProcessGroup(cmd)
+	tail := newTailWriter()
+	cmd.Stderr = tail
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	s := &supervisor{
+		cmd:           cmd,
+		Stdout:        bufio.NewReader(bytes.NewReader(nil)),
+		stderrTailBuf: tail,
+		done:          make(chan struct{}),
+		gracePeriod:   defaultPerCallGracePeriod,
+	}
+
+	// Wire the backend: pre-injected baseURL bypasses ensureServer; srv is the
+	// real subprocess we want to verify survives the stream cancellation.
+	// b.port must match openCodeDefaultPort so checkExistingServer returns true
+	// for b.srv without terminating it and falling through to the baseURL path.
+	b := &OpenCodeHTTPBackend{
+		CliBackend: NewCliBackend("opencode-serve", CliInfo{}),
+		httpClient: fake.srv.Client(),
+		srv:        s,
+		baseURL:    fake.srv.URL,
+		port:       openCodeDefaultPort,
+	}
+	b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+
+	// Stream with a context we will cancel immediately after the stream starts.
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{{
+			Role:    llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "ping"}},
+		}},
+	}
+
+	ch, err := b.Stream(streamCtx, input)
+	if err != nil {
+		cancelStream()
+		_ = b.Close()
+		t.Fatalf("Stream: unexpected error: %v", err)
+	}
+
+	// Cancel the per-turn stream context. This should tear down the SSE
+	// connection but must NOT kill the server subprocess.
+	cancelStream()
+
+	// Drain the event channel so the goroutines finish.
+	for ev := range ch {
+		_ = ev
+	}
+
+	// The server supervisor must still be alive — its done channel must be open.
+	select {
+	case <-s.done:
+		t.Fatal("server supervisor.done was closed after stream cancel; server was killed prematurely")
+	default:
+		// Good — process is still running.
+	}
+
+	// Now Close() must terminate the process.
+	if err := b.Close(); err != nil {
+		t.Logf("Close: %v (expected for a killed process)", err)
+	}
+
+	select {
+	case <-s.done:
+		// done is closed by wait() after cmd.Wait() returns — process reaped.
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor.done not closed within 5s after Close()")
+	}
+}
+
 // TestOpenCodeHTTP_RefusesWithOllama verifies that passing WithOllama to
 // Stream() returns an error immediately, before attempting any network I/O.
 // opencode-serve has no Ollama routing support.
