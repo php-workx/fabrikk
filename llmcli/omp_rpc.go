@@ -3,6 +3,7 @@ package llmcli
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/php-workx/fabrikk/llmcli/internal"
 	"github.com/php-workx/fabrikk/llmclient"
@@ -47,10 +49,34 @@ type ompRPCGenericCmd struct {
 	Model string `json:"model,omitempty"`
 }
 
+// ompHostToolSpec is the wire shape for a single host tool in the
+// set_host_tools command. It uses "parameters" (not "inputSchema") to match
+// the omp protocol v14.0.0+ specification.
+type ompHostToolSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+	Label       string         `json:"label,omitempty"`
+	Hidden      bool           `json:"hidden,omitempty"`
+}
+
 // ompRPCHostToolsCmd carries the set_host_tools command payload.
 type ompRPCHostToolsCmd struct {
-	Type  string           `json:"type"`
-	Tools []llmclient.Tool `json:"tools"`
+	ID    string            `json:"id"`
+	Type  string            `json:"type"`
+	Tools []ompHostToolSpec `json:"tools"`
+}
+
+// ompCmdCounter provides monotonically increasing command IDs.
+var ompCmdCounter atomic.Uint64
+
+// newOmpCmdID returns a unique command ID with a monotonic counter and a
+// random 4-byte suffix for collision avoidance across process restarts.
+func newOmpCmdID() string {
+	n := ompCmdCounter.Add(1)
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("ht-%d-%x", n, b)
 }
 
 // NewOmpRPCBackend constructs an OmpRPCBackend from the detected CliInfo.
@@ -345,7 +371,23 @@ func sendCompact(proc *ompRPCProc) error {
 // omp will emit toolcall_start/end events for these tools and wait for the
 // host to provide results (unique to the omp RPC protocol).
 func sendSetHostTools(proc *ompRPCProc, tools []llmclient.Tool) error {
-	return proc.enc.Encode(ompRPCHostToolsCmd{Type: "set_host_tools", Tools: tools})
+	specs := make([]ompHostToolSpec, len(tools))
+	for i, t := range tools {
+		params := t.InputSchema
+		if params == nil {
+			params = map[string]any{"type": "object"}
+		}
+		specs[i] = ompHostToolSpec{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  params,
+		}
+	}
+	return proc.enc.Encode(ompRPCHostToolsCmd{
+		ID:    newOmpCmdID(),
+		Type:  "set_host_tools",
+		Tools: specs,
+	})
 }
 
 // — Static capabilities and fidelity -----------------------------------------

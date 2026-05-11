@@ -521,6 +521,98 @@ func TestOmpRPC_Ollama_InjectsEnv(t *testing.T) {
 	}
 }
 
+// ─── TestOmpRPC_SetHostTools_PayloadShape ─────────────────────────────────────
+
+// TestOmpRPC_SetHostTools_PayloadShape verifies that sendSetHostTools encodes
+// tools using the "parameters" key (not "inputSchema") and includes a non-empty
+// top-level "id" field, matching the omp protocol v14.0.0+ wire shape.
+func TestOmpRPC_SetHostTools_PayloadShape(t *testing.T) {
+	enc, buf := newEncoderBuf()
+	proc := &ompRPCProc{enc: enc}
+
+	tools := []llmclient.Tool{
+		{
+			Name:        "ReadFile",
+			Description: "read a file from disk",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+	}
+
+	if err := sendSetHostTools(proc, tools); err != nil {
+		t.Fatalf("sendSetHostTools: %v", err)
+	}
+
+	msgs := decodeLines(buf)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 encoded line, got %d", len(msgs))
+	}
+
+	msg := msgs[0]
+
+	// top-level id must be present and non-empty
+	id, ok := msg["id"].(string)
+	if !ok || id == "" {
+		t.Errorf("top-level id field missing or empty: %v", msg["id"])
+	}
+
+	toolsVal, ok := msg["tools"].([]interface{})
+	if !ok || len(toolsVal) == 0 {
+		t.Fatalf("tools field missing or empty: %v", msg["tools"])
+	}
+
+	first, ok := toolsVal[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("first tool is not a JSON object")
+	}
+
+	// "parameters" key must be present
+	if _, ok := first["parameters"]; !ok {
+		t.Error(`tools[0] must have "parameters" key`)
+	}
+
+	// "inputSchema" key must NOT be present
+	if _, ok := first["inputSchema"]; ok {
+		t.Error(`tools[0] must NOT have "inputSchema" key`)
+	}
+}
+
+// ─── TestOmpRPC_SetHostToolsResponse ─────────────────────────────────────────
+
+// TestOmpRPC_SetHostToolsResponse verifies that a success response frame for
+// set_host_tools is silently consumed and does not produce an EventError.
+func TestOmpRPC_SetHostToolsResponse(t *testing.T) {
+	// Build a fake omp stdout that contains a success response frame followed
+	// by a normal done turn so parseOmpRPCTurn terminates cleanly.
+	lines := []string{
+		`{"type":"response","command":"set_host_tools","id":"ht-1-abcd","success":true,"data":{}}`,
+		`{"type":"text_delta","content":"ok"}`,
+		`{"type":"done","message":{"id":"m1"}}`,
+	}
+	r := ompJSONLReader(lines...)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	err := parseOmpRPCTurn(context.Background(), r, ch, te)
+	if err != nil {
+		t.Fatalf("parseOmpRPCTurn: unexpected error: %v", err)
+	}
+
+	events := drainChannel(ch)
+	for _, ev := range events {
+		if ev.Type == llmclient.EventError {
+			t.Errorf("unexpected EventError in events: %s", ev.ErrorMessage)
+		}
+	}
+	if findEventOr(events, llmclient.EventDone) == nil {
+		t.Error("expected done event, got none")
+	}
+}
+
 // TestOmpRPCRegistry_StaticCapabilities_Ollama verifies that the registered
 // omp-rpc capabilities declare OllamaRouting=true.
 func TestOmpRPCRegistry_StaticCapabilities_Ollama(t *testing.T) {
