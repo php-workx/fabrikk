@@ -500,3 +500,38 @@ func TestOmpRPC_StaticCapabilitiesCompleteness(t *testing.T) {
 		t.Errorf("Binary = %q, want omp", f.Binary)
 	}
 }
+
+// ─── fab-o5la: Ollama routing ─────────────────────────────────────────────────
+
+// TestOmpRPC_Ollama_InjectsEnv verifies that applyOmpOllamaEnv (wired into
+// startOmpRPCProcess) injects ANTHROPIC_BASE_URL into the process environment.
+func TestOmpRPC_Ollama_InjectsEnv(t *testing.T) {
+	ollamaCfg := llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}
+	env := applyOmpOllamaEnv([]string{}, ollamaCfg)
+
+	found := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ANTHROPIC_BASE_URL not found in env after applyOmpOllamaEnv; got %v", env)
+	}
+}
+
+// TestOmpRPCRegistry_StaticCapabilities_Ollama verifies that the registered
+// omp-rpc capabilities declare OllamaRouting=true.
+func TestOmpRPCRegistry_StaticCapabilities_Ollama(t *testing.T) {
+	f, ok := factoryByName("omp-rpc")
+	if !ok {
+		t.Fatal("omp-rpc backend not registered")
+	}
+	if !f.Capabilities.OllamaRouting {
+		t.Error("OllamaRouting should be true for omp-rpc")
+	}
+	if f.Capabilities.OptionSupport[llmclient.OptionOllama] == "" {
+		t.Error("OptionSupport[OptionOllama] should be set for omp-rpc")
+	}
+}

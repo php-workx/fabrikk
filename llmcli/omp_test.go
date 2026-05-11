@@ -497,6 +497,58 @@ func TestOmpPrint_BuildArgs(t *testing.T) {
 	assertFlagsPresent(t, args, wantFlags)
 }
 
+// ─── fab-o4la: Ollama routing ─────────────────────────────────────────────────
+
+// TestOmpPrint_Ollama_InjectsEnv verifies that when WithOllama is set,
+// claudeOllamaEnvOverrides returns a map containing ANTHROPIC_BASE_URL, which
+// is the env variable used to route omp (print) through an Ollama endpoint.
+func TestOmpPrint_Ollama_InjectsEnv(t *testing.T) {
+	cfg := llmclient.DefaultRequestConfig()
+	cfg.Ollama = &llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}
+
+	overrides := claudeOllamaEnvOverrides(cfg)
+	if _, ok := overrides["ANTHROPIC_BASE_URL"]; !ok {
+		t.Errorf("ANTHROPIC_BASE_URL missing from overrides; got %v", overrides)
+	}
+}
+
+// TestOmpPrint_Ollama_NilWhenUnset verifies that claudeOllamaEnvOverrides
+// returns nil when no Ollama config is present, so no spurious env vars are
+// injected into normal (non-Ollama) omp runs.
+func TestOmpPrint_Ollama_NilWhenUnset(t *testing.T) {
+	cfg := llmclient.DefaultRequestConfig()
+	if got := claudeOllamaEnvOverrides(cfg); got != nil {
+		t.Errorf("expected nil overrides when Ollama not set, got %v", got)
+	}
+}
+
+// TestOmpRegistry_StaticCapabilities_Ollama verifies that the registered
+// omp capabilities declare OllamaRouting=true and OptionOllama support.
+func TestOmpRegistry_StaticCapabilities_Ollama(t *testing.T) {
+	f, ok := factoryByName("omp")
+	if !ok {
+		t.Fatal("omp backend not registered")
+	}
+	if !f.Capabilities.OllamaRouting {
+		t.Error("OllamaRouting should be true for omp")
+	}
+	if f.Capabilities.OptionSupport[llmclient.OptionOllama] == "" {
+		t.Error("OptionSupport[OptionOllama] should be set for omp")
+	}
+}
+
+// TestOmpPrint_RequiredOllamaOptionAccepted verifies that requiring OptionOllama
+// is accepted (backend supports it fully).
+func TestOmpPrint_RequiredOllamaOptionAccepted(t *testing.T) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithOllama(llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}),
+		llmclient.WithRequiredOptions(llmclient.OptionOllama),
+	})
+	if err := checkOmpPrintRequiredOptions(cfg); err != nil {
+		t.Errorf("checkOmpPrintRequiredOptions rejected OptionOllama: %v", err)
+	}
+}
+
 // TestOmpPrint_BuildArgs_NoSystemPrompt verifies that --system-prompt is omitted
 // when the input has an empty system prompt.
 func TestOmpPrint_BuildArgs_NoSystemPrompt(t *testing.T) {
