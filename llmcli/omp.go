@@ -87,7 +87,8 @@ func (b *OmpBackend) Stream(
 		cancelTimeout()
 		return nil, err
 	}
-	model, started := observeStreamStart(b.Name(), cfg)
+
+	fidelity := ompPrintFidelity(cfg)
 
 	args := buildOmpPrintArgs(input, cfg)
 	env := resolveProcessEnv(cfg, claudeOllamaEnvOverrides(cfg))
@@ -104,35 +105,19 @@ func (b *OmpBackend) Stream(
 		return nil, fmt.Errorf("llmcli omp: start subprocess: %w", err)
 	}
 
-	ch := make(chan llmclient.Event, 16)
-	te := newTerminalEmitter(ch)
-
-	go func() {
-		defer cancelTimeout()
-		defer te.close() // safety guard; real terminal comes from parser or wait goroutine
-
-		parseErr := parseOmpStream(streamCtx, s.Stdout, ch, te, ompPrintFidelity(cfg))
-
-		// Drain stdout so cmd.Wait does not deadlock on a live reader.
+	parseFn := func(ctx context.Context, out chan<- llmclient.Event, te *terminalEmitter) error {
+		parseErr := parseOmpStream(ctx, s.Stdout, out, te)
 		_, _ = io.Copy(io.Discard, s.Stdout)
-
 		waitErr := s.wait()
-
-		switch {
-		case parseErr != nil &&
-			!errors.Is(parseErr, context.Canceled) &&
-			!errors.Is(parseErr, context.DeadlineExceeded):
-			te.error(ctx, fmt.Errorf("llmcli omp: parse: %w", parseErr))
-		case streamCtx.Err() != nil:
-			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
-		case waitErr != nil:
-			te.error(streamCtx, fmt.Errorf("llmcli omp: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
-		default:
-			// Normal exit — parseOmpStream already emitted done via te.
+		if parseErr != nil && !errors.Is(parseErr, context.Canceled) && !errors.Is(parseErr, context.DeadlineExceeded) {
+			return parseErr
 		}
-	}()
-
-	return observeStream(b.Name(), model, started, ch), nil
+		if waitErr != nil {
+			return fmt.Errorf("subprocess: %w; stderr: %s", waitErr, s.stderrTail())
+		}
+		return nil
+	}
+	return structuredStream(streamCtx, b.Name(), cfg.SessionID, cfg.Model, fidelity, parseFn, cancelTimeout), nil
 }
 
 // buildOmpPrintArgs constructs the argument list for `omp -p --mode json ...`.
@@ -194,6 +179,10 @@ type ompFrame struct {
 	ToolCall  *ompToolCall `json:"toolCall,omitempty"`   // toolcall_start/end
 	Message   *ompMessage  `json:"message,omitempty"`    // done
 	Error     *ompError    `json:"error,omitempty"`      // error
+	// response frame fields
+	Command string `json:"command,omitempty"` // response: which command this answers
+	ID      string `json:"id,omitempty"`      // response: command id echoed back
+	Success bool   `json:"success,omitempty"` // response: whether the command succeeded
 }
 
 type ompToolCall struct {
@@ -219,11 +208,10 @@ type ompError struct {
 
 // ompParseState holds mutable state shared across frames in a single omp stream.
 type ompParseState struct {
-	sessionID     string
-	contentIndex  int
-	assembledMsg  *llmclient.AssistantMessage
-	startEmitted  bool
-	startFidelity *llmclient.Fidelity
+	sessionID    string
+	contentIndex int
+	assembledMsg *llmclient.AssistantMessage
+	startEmitted bool
 
 	// bytesRead tracks how many bytes the parser has successfully consumed
 	// from the stream. Used to distinguish a clean EOF (data was seen) from
@@ -246,14 +234,15 @@ type ompParseState struct {
 // Returns when r reaches EOF or when a fatal error occurs.
 //
 // Exactly one terminal event is emitted via te; intermediate events go to out.
+// The EventStart event is NOT emitted by this function; structuredStream emits
+// it before invoking the parseFn that calls this function.
 func parseOmpStream(
 	ctx context.Context,
 	r *bufio.Reader,
 	out chan<- llmclient.Event,
 	te *terminalEmitter,
-	startFidelity *llmclient.Fidelity,
 ) error {
-	return parseOmpLines(ctx, r, out, te, &ompParseState{startFidelity: startFidelity})
+	return parseOmpLines(ctx, r, out, te, &ompParseState{})
 }
 
 // parseOmpRPCTurn reads JSONL frames from r and emits normalized events for a
@@ -266,9 +255,8 @@ func parseOmpRPCTurn(
 	te *terminalEmitter,
 ) error {
 	return parseOmpLines(ctx, r, out, te, &ompParseState{
-		startEmitted:  true,
-		assembledMsg:  &llmclient.AssistantMessage{Role: "assistant"},
-		startFidelity: ompRPCFidelity(llmclient.RequestConfig{}),
+		startEmitted: true,
+		assembledMsg: &llmclient.AssistantMessage{Role: "assistant"},
 	})
 }
 
@@ -361,6 +349,14 @@ func ompDispatchFrame(
 	case "error":
 		ompOnError(frame, te)
 		return true, nil
+	case "response":
+		// Synchronous response frames (e.g. set_host_tools ACK) are handled inline.
+		// Success responses are silently consumed; failures for known commands are
+		// surfaced as errors via te so the caller's Stream channel receives them.
+		if !frame.Success && frame.Command == "set_host_tools" {
+			te.error(context.Background(), fmt.Errorf("omp: set_host_tools failed (id=%s)", frame.ID))
+		}
+		return false, nil
 	}
 	// Unknown types are silently ignored.
 	return false, nil
@@ -405,16 +401,15 @@ func ompCloseOpenBlocks(ctx context.Context, out chan<- llmclient.Event, state *
 	return nil
 }
 
-func ompOnReady(ctx context.Context, frame ompFrame, out chan<- llmclient.Event, state *ompParseState) error {
+// ompOnReady handles the "ready" frame. It captures the session ID for
+// correlation and marks the parser as past the ready gate. The EventStart event
+// is NOT emitted here — structuredStream emits it before invoking parseFn so
+// that the start event always carries the fidelity negotiated before streaming.
+//
+//nolint:unparam // ctx and out are unused but required by the ompDispatchFrame handler signature.
+func ompOnReady(_ context.Context, frame ompFrame, _ chan<- llmclient.Event, state *ompParseState) error {
 	state.sessionID = frame.SessionID
 	state.assembledMsg = &llmclient.AssistantMessage{Role: "assistant"}
-	fidelity := state.startFidelity
-	if fidelity == nil {
-		fidelity = ompPrintFidelity(llmclient.RequestConfig{})
-	}
-	if !emit(ctx, out, startEvent(state.sessionID, fidelity)) {
-		return ctx.Err()
-	}
 	state.startEmitted = true
 	return nil
 }

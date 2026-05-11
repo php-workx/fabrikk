@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -80,8 +81,9 @@ func testOmpTextSessionMapping(t *testing.T) {
 	t.Helper()
 	events := parseOmpEventsForTest(t, ompTextSession("sid1", helloWorldText), 32)
 
+	// EventStart is now emitted by structuredStream, not by the parser.
+	// Parser-level tests see only the content events and the terminal.
 	wantTypes := []llmclient.EventType{
-		llmclient.EventStart,
 		llmclient.EventTextStart,
 		llmclient.EventTextDelta,
 		llmclient.EventTextEnd,
@@ -89,14 +91,11 @@ func testOmpTextSessionMapping(t *testing.T) {
 	}
 	assertEventSequence(t, events, wantTypes)
 
-	if events[0].SessionID != "sid1" {
-		t.Errorf("start.SessionID = %q, want %q", events[0].SessionID, "sid1")
+	if events[1].Delta != helloWorldText {
+		t.Errorf("text_delta.Delta = %q, want %q", events[1].Delta, helloWorldText)
 	}
-	if events[2].Delta != helloWorldText {
-		t.Errorf("text_delta.Delta = %q, want %q", events[2].Delta, helloWorldText)
-	}
-	if events[3].Content != helloWorldText {
-		t.Errorf("text_end.Content = %q, want %q", events[3].Content, helloWorldText)
+	if events[2].Content != helloWorldText {
+		t.Errorf("text_end.Content = %q, want %q", events[2].Content, helloWorldText)
 	}
 }
 
@@ -105,8 +104,8 @@ func testOmpThinkingSessionMapping(t *testing.T) {
 	const thinkingText = "let me think"
 	events := parseOmpEventsForTest(t, ompThinkingSession("sid2", thinkingText, "answer"), 32)
 
+	// EventStart is emitted by structuredStream, not the parser.
 	wantTypes := []llmclient.EventType{
-		llmclient.EventStart,
 		llmclient.EventThinkingStart,
 		llmclient.EventThinkingDelta,
 		llmclient.EventThinkingEnd,
@@ -169,7 +168,7 @@ func parseOmpEventsForTest(t *testing.T, lines []string, bufSize int) []llmclien
 	ch := make(chan llmclient.Event, bufSize)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	err := parseOmpStream(context.Background(), r, ch, te)
 	if err != nil {
 		t.Fatalf("parseOmpStream: %v", err)
 	}
@@ -195,7 +194,7 @@ func TestOmpPrint_ExactlyOneTerminalEvent(t *testing.T) {
 			ch := make(chan llmclient.Event, 64)
 			te := newTerminalEmitter(ch)
 
-			if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+			if err := parseOmpStream(context.Background(), r, ch, te); err != nil {
 				t.Fatalf("parseOmpStream: %v", err)
 			}
 			events := drainChannel(ch)
@@ -227,7 +226,7 @@ func TestOmpPrint_ContentIndexIncrementsAcrossBlocks(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+	if err := parseOmpStream(context.Background(), r, ch, te); err != nil {
 		t.Fatalf("parseOmpStream: %v", err)
 	}
 	events := drainChannel(ch)
@@ -256,7 +255,7 @@ func TestOmpPrint_MalformedJSONLineSkipped(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	err := parseOmpStream(context.Background(), r, ch, te)
 	if err != nil {
 		t.Fatalf("parseOmpStream: unexpected error: %v", err)
 	}
@@ -275,7 +274,7 @@ func TestOmpPrint_EOFBeforeTerminalFrameEmitsSyntheticDone(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	err := parseOmpStream(context.Background(), r, ch, te)
 	if err != nil {
 		t.Fatalf("parseOmpStream error = %v; want nil", err)
 	}
@@ -297,7 +296,7 @@ func TestOmpPrint_ContentBeforeReadyReturnsUnexpectedEOF(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpStream(context.Background(), r, ch, te, nil)
+	err := parseOmpStream(context.Background(), r, ch, te)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("parseOmpStream error = %v; want io.ErrUnexpectedEOF", err)
 	}
@@ -310,7 +309,7 @@ func TestOmpPrint_AssembledMessageOnDone(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+	if err := parseOmpStream(context.Background(), r, ch, te); err != nil {
 		t.Fatalf("parseOmpStream: %v", err)
 	}
 	events := drainChannel(ch)
@@ -343,7 +342,7 @@ func TestOmpPrint_UsageOnDone(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+	if err := parseOmpStream(context.Background(), r, ch, te); err != nil {
 		t.Fatalf("parseOmpStream: %v", err)
 	}
 	events := drainChannel(ch)
@@ -373,7 +372,7 @@ func TestOmpPrint_MultipleTextDeltas(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	if err := parseOmpStream(context.Background(), r, ch, te, nil); err != nil {
+	if err := parseOmpStream(context.Background(), r, ch, te); err != nil {
 		t.Fatalf("parseOmpStream: %v", err)
 	}
 	events := drainChannel(ch)
@@ -562,5 +561,90 @@ func TestOmpPrint_BuildArgs_NoSystemPrompt(t *testing.T) {
 	args := buildOmpPrintArgs(input, llmclient.DefaultRequestConfig())
 	if flagIndex(args, "--system-prompt") >= 0 {
 		t.Error("--system-prompt should not appear when SystemPrompt is empty")
+	}
+}
+
+// ─── fab-omss: structuredStream delegation ────────────────────────────────────
+
+// TestOmpStream_ObserverFires verifies that when Stream delegates to
+// structuredStream, the DefaultObserver hooks fire correctly:
+//   - OnStreamStart once
+//   - OnEventEmitted at least twice (EventStart + EventDone minimum)
+//   - OnStreamEnd once with success=true
+//
+// The test uses the "omp_jsonl" fixture (registered in subprocess_test.go
+// TestMain) to drive a full omp print-mode session without a real omp binary.
+func TestOmpStream_ObserverFires(t *testing.T) {
+	spy := &spyObserver{}
+	orig := DefaultObserver
+	DefaultObserver = spy
+	t.Cleanup(func() { DefaultObserver = orig })
+
+	exe := testExecutable(t)
+
+	b := NewOmpBackend(CliInfo{
+		Name:    "omp",
+		Binary:  "omp",
+		Path:    exe,
+		Version: "0.0.0-test",
+	})
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
+				{Type: llmclient.ContentText, Text: "hello"},
+			}},
+		},
+	}
+
+	// Point the backend at the test executable with the omp_jsonl fixture env.
+	// We override the executable path via CliInfo and inject the fixture env
+	// through WithEnvironment so that baseEnv() stripping is applied correctly.
+	ch, err := b.Stream(
+		context.Background(),
+		input,
+		llmclient.WithEnvironment(
+			append(baseEnv(), "LLMCLI_TEST_FIXTURE=omp_jsonl"),
+		),
+	)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := waitForEvents(t, ch, 5*time.Second)
+
+	// Verify observer was invoked correctly.
+	spy.mu.Lock()
+	starts := spy.starts
+	ends := spy.ends
+	eventTypes := spy.eventTypes
+	spy.mu.Unlock()
+
+	if starts != 1 {
+		t.Errorf("OnStreamStart called %d time(s), want 1", starts)
+	}
+	if len(ends) != 1 {
+		t.Errorf("OnStreamEnd called %d time(s), want 1", len(ends))
+	} else if !ends[0].success {
+		t.Errorf("OnStreamEnd success=%v, want true", ends[0].success)
+	}
+	if len(eventTypes) < 2 {
+		t.Errorf("OnEventEmitted called %d time(s), want >= 2 (at least EventStart + EventDone)", len(eventTypes))
+	}
+
+	// Sanity-check the stream itself.
+	if len(events) == 0 {
+		t.Fatal("no events received from Stream")
+	}
+	first := events[0]
+	if first.Type != llmclient.EventStart {
+		t.Errorf("events[0].Type = %v, want EventStart", first.Type)
+	}
+	last := events[len(events)-1]
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event.Type = %v, want EventDone", last.Type)
+	}
+	if last.Reason != llmclient.StopEndTurn {
+		t.Errorf("last event.Reason = %v, want StopEndTurn", last.Reason)
 	}
 }
