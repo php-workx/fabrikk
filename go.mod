@@ -1,6 +1,6 @@
 module github.com/php-workx/fabrikk
 
-go 1.26.2
+go 1.26.3
 
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
