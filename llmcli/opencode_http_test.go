@@ -757,3 +757,56 @@ func TestOpenCodeHTTP_RefusesWithOllama(t *testing.T) {
 		t.Fatal("Stream with WithOllama + RequiredOptions should return error, got nil")
 	}
 }
+
+// ─── fab-opss: structuredStream delegation ────────────────────────────────────
+
+// TestOpenCodeHTTP_ObserverFires verifies that when Stream delegates to
+// structuredStream, the DefaultObserver hooks fire correctly:
+//   - OnStreamStart once
+//   - OnEventEmitted at least twice (EventStart + EventDone minimum)
+//   - OnStreamEnd once
+func TestOpenCodeHTTP_ObserverFires(t *testing.T) {
+	spy := &spyObserver{}
+	orig := DefaultObserver
+	DefaultObserver = spy
+	t.Cleanup(func() { DefaultObserver = orig })
+
+	// SSE body with a content event so parseFn emits at least one text event.
+	sseBody := fmt.Sprintf("data: {\"content\":%q}\n\n", "hello from observer test")
+	fake := newFakeOpenCodeServer(t, []string{sseBody})
+	defer fake.close()
+
+	b := openCodeBackendForTest(fake)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{{
+			Role:    llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "hi"}},
+		}},
+	}
+
+	ch, err := b.Stream(ctx, input)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	waitForEvents(t, ch, 3*time.Second)
+
+	spy.mu.Lock()
+	starts := spy.starts
+	ends := spy.ends
+	eventTypes := spy.eventTypes
+	spy.mu.Unlock()
+
+	if starts != 1 {
+		t.Errorf("OnStreamStart called %d time(s), want 1", starts)
+	}
+	if len(ends) != 1 {
+		t.Errorf("OnStreamEnd called %d time(s), want 1", len(ends))
+	}
+	if len(eventTypes) < 2 {
+		t.Errorf("OnEventEmitted called %d time(s), want >= 2 (at least EventStart + EventDone)", len(eventTypes))
+	}
+}

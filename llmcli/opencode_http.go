@@ -190,7 +190,6 @@ func (b *OpenCodeHTTPBackend) Stream(
 	if cfg.OpenCodePort != 0 {
 		port = cfg.OpenCodePort
 	}
-	model, started := observeStreamStart(b.Name(), cfg)
 
 	if err := b.ensureServer(streamCtx, port); err != nil {
 		cancelTimeout()
@@ -199,7 +198,7 @@ func (b *OpenCodeHTTPBackend) Stream(
 
 	// 1. Open SSE stream BEFORE sending the prompt.
 	sseCtx, cancelSSE := context.WithCancel(streamCtx)
-	sseResp, err := b.openSSEStream(sseCtx) //nolint:bodyclose // response body is owned by the stream goroutine below
+	sseResp, err := b.openSSEStream(sseCtx) //nolint:bodyclose // response body is owned by the parseFn goroutine via structuredStream
 	if err != nil {
 		cancelSSE()
 		cancelTimeout()
@@ -215,31 +214,27 @@ func (b *OpenCodeHTTPBackend) Stream(
 		return nil, fmt.Errorf("llmcli opencode: create session: %w", err)
 	}
 
-	ch := make(chan llmclient.Event, 16)
-	te := newTerminalEmitter(ch)
+	// promptErrCh carries the result of sendPromptAsync. It is buffered so the
+	// prompt goroutine never blocks even if parseFn has already moved on.
+	promptErrCh := make(chan error, 1)
 
-	// promptDone carries the result of sendPromptAsync. It is buffered so the
-	// prompt goroutine never blocks even if the SSE goroutine has already moved on.
-	promptDone := make(chan error, 1)
-
-	// Goroutine: send prompt_async. On failure, cancel the SSE reader so the
-	// SSE goroutine unblocks from parseOpenCodeSSE.
+	// Goroutine: send prompt_async. On failure, cancel the SSE reader so parseFn
+	// unblocks from parseOpenCodeSSE.
 	go func() {
 		pErr := b.sendPromptAsync(streamCtx, sessionID, input)
-		// Send before cancelSSE so the SSE goroutine always sees the error.
-		promptDone <- pErr
+		// Send before cancelSSE so parseFn always sees the error.
+		promptErrCh <- pErr
 		if pErr != nil {
 			cancelSSE()
 		}
 	}()
 
-	// Goroutine: parse the SSE stream and emit events. Owns all terminal events.
-	go func() {
-		defer cancelTimeout()
-		defer cancelSSE()
-		defer func() { _ = sseResp.Body.Close() }()
+	fidelity := openCodeHTTPFidelity(cfg)
 
-		parseErr := parseOpenCodeSSE(sseCtx, sseResp.Body, ch, openCodeHTTPFidelity(cfg))
+	// parseFn reads the SSE stream and waits for the prompt goroutine result.
+	// structuredStream calls it in its own goroutine and handles terminal emission.
+	parseFn := func(_ context.Context, out chan<- llmclient.Event, _ *terminalEmitter) error {
+		parseErr := parseOpenCodeSSE(sseCtx, sseResp.Body, out, fidelity)
 
 		// Drain so that underlying connections are cleanly released.
 		_, _ = io.Copy(io.Discard, sseResp.Body)
@@ -248,25 +243,30 @@ func (b *OpenCodeHTTPBackend) Stream(
 		// prompt error even when the SSE body finishes before the prompt response.
 		var pErr error
 		select {
-		case pErr = <-promptDone:
+		case pErr = <-promptErrCh:
 		case <-streamCtx.Done():
 			// Parent context cancelled; prompt error (if any) is not actionable.
 		}
 
 		switch {
 		case pErr != nil:
-			te.error(streamCtx, pErr)
+			return pErr
 		case parseErr != nil && !isContextError(parseErr):
-			te.error(streamCtx, fmt.Errorf("llmcli opencode: SSE parse: %w", parseErr))
-		case streamCtx.Err() != nil:
-			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
+			return fmt.Errorf("llmcli opencode: SSE parse: %w", parseErr)
 		default:
-			// SSE stream ended cleanly with no prompt error.
-			te.done(streamCtx, nil, nil, llmclient.StopEndTurn)
+			return nil
 		}
-	}()
+	}
 
-	return observeStream(b.Name(), model, started, ch), nil
+	// onClose cancels the SSE sub-context and closes the response body.
+	// structuredStream calls this after parseFn returns, before emitting the terminal.
+	onClose := func() {
+		cancelSSE()
+		_ = sseResp.Body.Close()
+		cancelTimeout()
+	}
+
+	return structuredStream(streamCtx, "opencode-serve", sessionID, cfg.Model, fidelity, parseFn, onClose), nil
 }
 
 // ensureServer makes sure a server is available at the given port.
@@ -633,11 +633,13 @@ func checkOpenCodeHTTPRequiredOptions(cfg llmclient.RequestConfig) error { //nol
 //
 // Since the OpenCode event schema is schema-gated (StreamingStructuredUnknown),
 // this parser:
-//   - Emits one EventStart carrying StreamingStructuredUnknown fidelity.
 //   - Emits text deltas for any event whose data contains a recognizable text
 //     payload (best-effort; silently skips unrecognized events).
-//   - Returns nil on clean EOF; the caller is responsible for emitting the
-//     terminal event so it can fold in any prompt error that may have arrived.
+//   - Returns nil on clean EOF; the caller (structuredStream) is responsible for
+//     emitting the terminal event so it can fold in any prompt error.
+//
+// EventStart is NOT emitted here — structuredStream emits it before invoking
+// parseFn so that all backends share uniform start-event behaviour.
 //
 // It does NOT emit tool, thinking, or usage events until the schema is pinned.
 //
@@ -650,10 +652,9 @@ func parseOpenCodeSSE(
 	ctx context.Context,
 	body io.Reader,
 	out chan<- llmclient.Event,
-	fidelity *llmclient.Fidelity,
+	_ *llmclient.Fidelity,
 ) error {
 	r := bufio.NewReader(body)
-	startEmitted := false
 	contentIndex := 0
 
 	for {
@@ -668,21 +669,6 @@ func parseOpenCodeSSE(
 		// Check context cancellation between events.
 		if ctx.Err() != nil {
 			return ctx.Err()
-		}
-
-		// Emit start on first event.
-		if !startEmitted {
-			startFidelity := fidelity
-			if startFidelity == nil {
-				startFidelity = &llmclient.Fidelity{
-					Streaming:   llmclient.StreamingStructuredUnknown,
-					ToolControl: llmclient.ToolControlNone,
-				}
-			}
-			if !emit(ctx, out, startEvent("", startFidelity)) {
-				return ctx.Err()
-			}
-			startEmitted = true
 		}
 
 		// Skip empty payloads (e.g. server.connected heartbeats).
