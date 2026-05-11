@@ -2,6 +2,7 @@ package llmclient
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -80,6 +81,33 @@ const (
 // ErrUnsupportedOption is returned by Stream when a required option is not
 // supported by the backend.
 var ErrUnsupportedOption = errors.New("llmclient: required option not supported by backend")
+
+// UnsupportedOptionError carries the backend name and the specific option names
+// that caused the failure. It satisfies errors.Is(err, ErrUnsupportedOption).
+type UnsupportedOptionError struct {
+	Backend string
+	Options []OptionName
+}
+
+func (e *UnsupportedOptionError) Error() string {
+	names := make([]string, len(e.Options))
+	for i, n := range e.Options {
+		names[i] = string(n)
+	}
+	return "llmclient: backend " + e.Backend + " does not support required options: " + strings.Join(names, ", ")
+}
+
+// Is satisfies errors.Is(err, ErrUnsupportedOption).
+func (e *UnsupportedOptionError) Is(target error) bool { return target == ErrUnsupportedOption }
+
+// Unwrap returns ErrUnsupportedOption so callers using errors.Is on the sentinel still match.
+func (e *UnsupportedOptionError) Unwrap() error { return ErrUnsupportedOption }
+
+// NewUnsupportedOptionError constructs an UnsupportedOptionError for the given
+// backend and option names.
+func NewUnsupportedOptionError(backend string, names ...OptionName) *UnsupportedOptionError {
+	return &UnsupportedOptionError{Backend: backend, Options: names}
+}
 
 // Option is a functional option applied to a Stream call. Options configure
 // model selection, session continuity, temperature, and backend-specific

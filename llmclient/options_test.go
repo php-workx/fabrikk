@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -476,4 +477,37 @@ func TestEnforceRequired_NilOptionSupportMap_NoRequirements(t *testing.T) {
 // apply is a helper that creates a default config and applies opts.
 func apply(opts ...llmclient.Option) llmclient.RequestConfig {
 	return llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+}
+
+// ─── fab-eopt: UnsupportedOptionError ────────────────────────────────────────
+
+func TestUnsupportedOptionError_Typed(t *testing.T) {
+	err := llmclient.NewUnsupportedOptionError("my-backend", llmclient.OptionModel, llmclient.OptionSession)
+
+	if !errors.Is(err, llmclient.ErrUnsupportedOption) {
+		t.Error("errors.Is(err, ErrUnsupportedOption) = false, want true")
+	}
+	var typed *llmclient.UnsupportedOptionError
+	if !errors.As(err, &typed) {
+		t.Fatal("errors.As failed for *UnsupportedOptionError")
+	}
+	if typed.Backend != "my-backend" {
+		t.Errorf("Backend = %q, want %q", typed.Backend, "my-backend")
+	}
+	if len(typed.Options) != 2 {
+		t.Errorf("Options length = %d, want 2", len(typed.Options))
+	}
+}
+
+func TestUnsupportedOptionError_ErrorString(t *testing.T) {
+	err := llmclient.NewUnsupportedOptionError("testbed", llmclient.OptionModel)
+	msg := err.Error()
+	if msg == "" {
+		t.Fatal("Error() returned empty string")
+	}
+	for _, want := range []string{"testbed", string(llmclient.OptionModel)} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() = %q, missing %q", msg, want)
+		}
+	}
 }
