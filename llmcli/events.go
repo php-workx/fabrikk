@@ -3,6 +3,7 @@ package llmcli
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -25,8 +26,9 @@ func emit(ctx context.Context, out chan<- llmclient.Event, ev llmclient.Event) b
 // terminalEmitter per Stream call and share it across all goroutines that may
 // produce terminal events (parser, subprocess wait, context cancellation).
 type terminalEmitter struct {
-	ch   chan<- llmclient.Event
-	once sync.Once
+	ch       chan<- llmclient.Event
+	once     sync.Once
+	hasFired atomic.Bool
 }
 
 // newTerminalEmitter returns a terminalEmitter that targets ch.
@@ -38,6 +40,7 @@ func newTerminalEmitter(ch chan<- llmclient.Event) *terminalEmitter {
 // has already been emitted, done is a no-op.
 func (te *terminalEmitter) done(ctx context.Context, msg *llmclient.AssistantMessage, usage *llmclient.Usage, reason llmclient.StopReason) {
 	te.once.Do(func() {
+		te.hasFired.Store(true)
 		defer close(te.ch)
 		ev := doneEvent(msg, usage, reason)
 		select {
@@ -55,6 +58,7 @@ func (te *terminalEmitter) done(ctx context.Context, msg *llmclient.AssistantMes
 // is always closed regardless.
 func (te *terminalEmitter) error(ctx context.Context, err error) { //nolint:predeclared // method on unexported type; no package-level shadow
 	te.once.Do(func() {
+		te.hasFired.Store(true)
 		defer close(te.ch)
 		select {
 		case te.ch <- errorEvent(err):
@@ -71,8 +75,17 @@ func (te *terminalEmitter) error(ctx context.Context, err error) { //nolint:pred
 // close is a no-op.
 func (te *terminalEmitter) close() { //nolint:predeclared // method on unexported type; no package-level shadow
 	te.once.Do(func() {
+		te.hasFired.Store(true)
 		close(te.ch)
 	})
+}
+
+// fired reports whether a terminal event has been emitted. It returns true
+// after the first call to done, error, or close completes. This is used by
+// structuredStream to detect when a parserFunc has already emitted a terminal
+// and skip the fallback terminal emission.
+func (te *terminalEmitter) fired() bool {
+	return te.hasFired.Load()
 }
 
 // startEvent returns an EventStart event carrying sessionID and fidelity.
