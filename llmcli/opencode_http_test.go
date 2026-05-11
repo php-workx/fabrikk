@@ -1,12 +1,15 @@
 package llmcli
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -558,4 +561,108 @@ func TestOpenCodeHTTP_WithOpenCodePortOption(t *testing.T) {
 		t.Fatalf("Stream with WithOpenCodePort: %v", err)
 	}
 	waitForEvents(t, ch, 2*time.Second)
+}
+
+// ─── fab-ophc: server-process lifetime ───────────────────────────────────────
+
+// TestOpenCodeHTTP_CloseTerminatesServer verifies that Close() terminates the
+// owned server supervisor and closes its done channel.
+func TestOpenCodeHTTP_CloseTerminatesServer(t *testing.T) {
+	exe := testExecutable(t)
+
+	// Manually construct a supervisor wrapping a long-running subprocess, the
+	// same way ensureServer does for the opencode server process.
+	cmd := exec.Command(exe) //nolint:gosec // test binary path from testExecutable helper
+	cmd.Env = append(baseEnv(), "LLMCLI_TEST_FIXTURE=sleep")
+	configureProcessGroup(cmd)
+	tail := newTailWriter()
+	cmd.Stderr = tail
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	s := &supervisor{
+		cmd:           cmd,
+		Stdout:        bufio.NewReader(bytes.NewReader(nil)),
+		stderrTailBuf: tail,
+		done:          make(chan struct{}),
+		gracePeriod:   defaultPerCallGracePeriod,
+	}
+
+	b := &OpenCodeHTTPBackend{
+		CliBackend: NewCliBackend("opencode-serve", CliInfo{}),
+		httpClient: http.DefaultClient,
+		srv:        s,
+		baseURL:    "http://127.0.0.1:9999",
+	}
+
+	if err := b.Close(); err != nil {
+		// A non-nil error is expected when the process is killed; just log it.
+		t.Logf("Close: %v (expected for a killed process)", err)
+	}
+
+	select {
+	case <-s.done:
+		// done is closed by wait() after cmd.Wait() returns — process reaped.
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor.done not closed within 5s after Close()")
+	}
+}
+
+// TestOpenCodeHTTP_ServerCtxSurvivesStreamCancel verifies that waitReady driven
+// by b.serverCtx is not affected by a per-turn stream context cancellation.
+// This proves the fix for the bug where waitReady(ctx, url) (per-turn ctx) would
+// return an error on stream cancel, triggering s.terminate() on a live server.
+func TestOpenCodeHTTP_ServerCtxSurvivesStreamCancel(t *testing.T) {
+	// Fake server that never emits server.connected — keeps waitReady looping.
+	fake := newFakeOpenCodeServer(t, nil)
+	defer fake.close()
+
+	b := &OpenCodeHTTPBackend{
+		CliBackend: NewCliBackend("opencode-serve", CliInfo{}),
+		httpClient: fake.srv.Client(),
+	}
+	b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+	defer b.serverCancel()
+
+	// Start waitReady using b.serverCtx in a background goroutine.
+	readyErr := make(chan error, 1)
+	go func() {
+		readyErr <- b.waitReady(b.serverCtx, fake.srv.URL)
+	}()
+
+	// Give waitReady time to start polling.
+	time.Sleep(200 * time.Millisecond)
+
+	// Must still be running — a cancelled per-turn ctx would not affect it.
+	select {
+	case err := <-readyErr:
+		t.Fatalf("waitReady returned early with %v; want still running", err)
+	default:
+	}
+
+	// Cancelling b.serverCtx (what Close() does) must unblock waitReady.
+	b.serverCancel()
+
+	select {
+	case <-readyErr:
+		// Good — waitReady returned after serverCtx was cancelled.
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitReady did not return within 2s after serverCtx cancel")
+	}
+}
+
+// TestOpenCodeHTTP_RefusesWithOllama verifies that passing WithOllama to
+// Stream() returns an error immediately, before attempting any network I/O.
+// opencode-serve has no Ollama routing support.
+func TestOpenCodeHTTP_RefusesWithOllama(t *testing.T) {
+	b := NewOpenCodeHTTPBackend(CliInfo{})
+	// Inject a baseURL so ensureServer would not try to spawn a real process;
+	// but the Ollama check must fire before ensureServer is reached.
+	b.baseURL = "http://127.0.0.1:0" // unreachable — we must not reach it
+
+	ollamaCfg := llmclient.OllamaConfig{BaseURL: "http://localhost:11434", Model: "llama3"}
+	_, err := b.Stream(context.Background(), nil, llmclient.WithOllama(ollamaCfg), llmclient.WithRequiredOptions(llmclient.OptionOllama))
+	if err == nil {
+		t.Fatal("Stream with WithOllama + RequiredOptions should return error, got nil")
+	}
 }

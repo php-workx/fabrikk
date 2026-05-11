@@ -57,6 +57,20 @@ type OpenCodeHTTPBackend struct {
 	baseURL string      // e.g. "http://127.0.0.1:4096"; set after ensureServer
 	port    int         // port backing baseURL; 0 means externally injected/test URL
 
+	// spawnMu serializes the slow spawn-and-wait path inside ensureServer so
+	// that concurrent Stream() calls don't each spawn their own process. b.mu
+	// is still used for all field accesses; spawnMu only gates the region
+	// where b.mu is intentionally released to allow Close() to cancel waitReady.
+	spawnMu sync.Mutex
+
+	// serverCtx/serverCancel govern the spawned server process lifetime.
+	// They are initialized lazily in ensureServer when we spawn the process.
+	// Close() cancels serverCtx to unblock any in-progress waitReady.
+	// All access is under b.mu except the cancel call in Close(), which is
+	// safe because context.CancelFunc is goroutine-safe.
+	serverCtx    context.Context
+	serverCancel context.CancelFunc
+
 	// password is the HTTP basic-auth secret read from
 	// OPENCODE_SERVER_PASSWORD. Empty means no auth is set.
 	password string
@@ -124,9 +138,18 @@ func (b *OpenCodeHTTPBackend) Close() error {
 	b.closeOnce.Do(func() {
 		b.mu.Lock()
 		b.closed = true
+		cancel := b.serverCancel
+		b.serverCancel = nil
+		b.serverCtx = nil
 		s := b.srv
 		b.srv = nil
 		b.mu.Unlock()
+
+		// Cancel serverCtx first to unblock any in-progress waitReady call
+		// that is running outside the lock in ensureServer.
+		if cancel != nil {
+			cancel()
+		}
 		if s != nil {
 			s.terminate(nil)
 			err = s.wait()
@@ -252,24 +275,146 @@ func (b *OpenCodeHTTPBackend) Stream(
 // previous call), the server is assumed ready.
 // If we already own a live process, it is reused. If the port is already in
 // use (external instance), we adopt it. Otherwise we spawn a new process.
+//
+// spawnMu serializes the slow "spawn + waitReady" path so that concurrent
+// Stream() calls don't each start their own process. b.mu is released before
+// waitReady so that a concurrent Close() can cancel b.serverCtx and unblock
+// the readiness probe without deadlocking.
 func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
+	// Fast path: check under b.mu whether a live server already exists.
+	b.mu.Lock()
+	if b.checkExistingServer(port) {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+
+	// Slow path: serialize spawn/adoption so concurrent callers don't each
+	// start their own process. After acquiring spawnMu, re-check state under
+	// b.mu to handle the case where another goroutine completed the spawn
+	// while we were waiting.
+	b.spawnMu.Lock()
+	defer b.spawnMu.Unlock()
+
+	b.mu.Lock()
+	if b.checkExistingServer(port) {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// Check if an external server is already listening on the port.
+	if isPortInUse(port) {
+		// Adopt the external server; do not spawn our own.
+		b.mu.Lock()
+		if b.serverCtx == nil {
+			b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+		}
+		serverCtx := b.serverCtx
+		b.mu.Unlock()
+
+		if err := b.waitReady(serverCtx, url); err != nil {
+			return err
+		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.closed {
+			return errors.New("llmcli opencode: backend closed during server adoption")
+		}
+		b.baseURL = url
+		b.port = port
+		return nil
+	}
+
+	// Spawn the server. Init a fresh serverCtx so Close() can cancel any
+	// in-progress waitReady without affecting the per-turn stream context.
+	b.mu.Lock()
+	if b.serverCancel != nil {
+		b.serverCancel()
+	}
+	b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+	serverCtx := b.serverCtx
+	path := b.info.Path
+	b.mu.Unlock()
+
+	//nolint:gosec // path is from exec.LookPath via CliInfo, not user input
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- b.info.Path is a detected CLI binary path and only fixed backend args are appended.
+	cmd := exec.Command(path, "serve", "--port", fmt.Sprint(port))
+	configureProcessGroup(cmd)
+
+	tail := newTailWriter()
+	cmd.Stderr = tail
+
+	if err := cmd.Start(); err != nil {
+		b.mu.Lock()
+		if b.serverCtx == serverCtx {
+			b.serverCancel()
+			b.serverCancel = nil
+			b.serverCtx = nil
+		}
+		b.mu.Unlock()
+		return fmt.Errorf("start opencode serve: %w", err)
+	}
+
+	// Wrap in a supervisor for lifecycle management.
+	s := &supervisor{
+		cmd:           cmd,
+		Stdout:        bufio.NewReader(bytes.NewReader(nil)), // opencode serve has no useful stdout
+		stderrTailBuf: tail,
+		done:          make(chan struct{}),
+		gracePeriod:   defaultPerCallGracePeriod,
+	}
+
+	// Use serverCtx (not the per-turn ctx) so that a cancelled per-turn ctx
+	// does not kill a successfully starting server process. Close() cancels
+	// serverCtx to abort this probe when the backend is shut down.
+	if err := b.waitReady(serverCtx, url); err != nil {
+		s.terminate(err)
+		_ = s.wait()
+		b.mu.Lock()
+		if b.serverCtx == serverCtx {
+			b.serverCancel()
+			b.serverCancel = nil
+			b.serverCtx = nil
+		}
+		b.mu.Unlock()
+		return err
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		s.terminate(nil)
+		_ = s.wait()
+		return errors.New("llmcli opencode: backend closed during server startup")
+	}
+	b.srv = s
+	b.baseURL = url
+	b.port = port
+	return nil
+}
 
+// checkExistingServer reports whether a live server matching the given port is
+// already available. As a side effect it clears stale state when the owned
+// process has exited. Must be called with b.mu held.
+func (b *OpenCodeHTTPBackend) checkExistingServer(port int) bool {
 	if b.srv != nil {
 		select {
 		case <-b.srv.done:
-			// Process exited; fall through to respawn.
+			// Process exited; caller must respawn.
 			b.srv = nil
 			b.baseURL = ""
 			b.port = 0
 		default:
 			if b.port == port {
-				return nil
+				return true
 			}
 			b.srv.terminate(nil)
 			_ = b.srv.wait()
@@ -281,53 +426,10 @@ func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error 
 
 	// Pre-configured base URL (test injection or caller-supplied external server).
 	if b.baseURL != "" && (b.port == 0 || b.port == port) {
-		return nil
+		return true
 	}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-
-	// Check if an external server is already listening on the port.
-	if isPortInUse(port) {
-		// Adopt the external server; do not spawn our own.
-		if err := b.waitReady(ctx, url); err != nil {
-			return err
-		}
-		b.baseURL = url
-		b.port = port
-		return nil
-	}
-
-	// Spawn the server.
-	//nolint:gosec // path is from exec.LookPath via CliInfo, not user input
-	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- b.info.Path is a detected CLI binary path and only fixed backend args are appended.
-	cmd := exec.Command(b.info.Path, "serve", "--port", fmt.Sprint(port))
-	configureProcessGroup(cmd)
-
-	tail := newTailWriter()
-	cmd.Stderr = tail
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start opencode serve: %w", err)
-	}
-
-	// Wrap in a supervisor for lifecycle management.
-	s := &supervisor{
-		cmd:           cmd,
-		Stdout:        bufio.NewReader(bytes.NewReader(nil)), // opencode serve has no useful stdout
-		stderrTailBuf: tail,
-		done:          make(chan struct{}),
-	}
-
-	if err := b.waitReady(ctx, url); err != nil {
-		s.terminate(err)
-		_ = s.wait()
-		return err
-	}
-
-	b.srv = s
-	b.baseURL = url
-	b.port = port
-	return nil
+	return false
 }
 
 // waitReady polls GET /event until the server emits a "server.connected" SSE
