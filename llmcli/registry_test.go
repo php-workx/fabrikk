@@ -123,11 +123,12 @@ func TestRegistry_RejectsDuplicateName(t *testing.T) {
 
 // TestRegistry_RegisteredNamesComplete verifies that the complete set of
 // expected backend factories is registered by their init() functions. The
-// expected set is the canonical source of truth: exactly these seven names must
+// expected set is the canonical source of truth: exactly these eight names must
 // be registered — no more, no fewer.
 func TestRegistry_RegisteredNamesComplete(t *testing.T) {
 	want := map[string]bool{
 		"claude":          true,
+		"claude-ipc":      true,
 		"codex-exec":      true,
 		"codex-appserver": true,
 		"opencode-run":    true,

@@ -390,7 +390,19 @@ func parseClaudeStream(
 	startFidelity *llmclient.Fidelity,
 ) error {
 	state := &claudeParseState{startFidelity: startFidelity}
+	return parseClaudeStreamFromState(ctx, r, out, te, state)
+}
 
+// parseClaudeStreamFromState is the inner parser loop. It accepts a
+// pre-initialized state so the IPC backend can pre-emit EventStart and seed
+// assembledMsg before the first frame arrives (no init frame between turns).
+func parseClaudeStreamFromState(
+	ctx context.Context,
+	r *bufio.Reader,
+	out chan<- llmclient.Event,
+	te *terminalEmitter,
+	state *claudeParseState,
+) error {
 	for {
 		line, readErr := internal.ReadBoundedLine(r, maxClaudeLineBytes)
 		state.bytesRead += len(line)
