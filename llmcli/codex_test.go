@@ -453,6 +453,45 @@ func TestCodexExec_TextFallbackFidelity(t *testing.T) {
 	assertContainsEventType(t, events, llmclient.EventTextEnd)
 }
 
+// TestCodexExec_StartEventOptionResults verifies that when OptionModel is
+// passed, the start event's Fidelity.OptionResults contains OptionModel=OptionApplied.
+func TestCodexExec_StartEventOptionResults(t *testing.T) {
+	t.Setenv("FABRIKK_LLMCLI_TEST_VERSION", "result")
+
+	exe := testExecutable(t)
+	b := NewCodexBackend(CliInfo{Path: exe})
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
+				{Type: llmclient.ContentText, Text: "hi"},
+			}},
+		},
+	}
+
+	ch, err := b.Stream(context.Background(), input, llmclient.WithModel("test-model"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainSubprocessChan(t, ch)
+	if len(events) == 0 {
+		t.Fatal("no events received")
+	}
+
+	start := events[0]
+	if start.Type != llmclient.EventStart {
+		t.Fatalf("events[0].Type = %q, want EventStart", start.Type)
+	}
+	if start.Fidelity == nil {
+		t.Fatal("start.Fidelity is nil")
+	}
+	got := start.Fidelity.OptionResults[llmclient.OptionModel]
+	if got != llmclient.OptionApplied {
+		t.Errorf("OptionResults[OptionModel] = %v, want OptionApplied", got)
+	}
+}
+
 // TestCodexExec_ExactlyOneTerminalEvent verifies that exactly one terminal
 // event (done or error) is emitted and is the last event in the channel.
 func TestCodexExec_ExactlyOneTerminalEvent(t *testing.T) {

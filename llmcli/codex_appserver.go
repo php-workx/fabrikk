@@ -451,8 +451,10 @@ func (b *CodexAppServerBackend) readTurnEvents(
 				return
 			}
 			if errors.Is(err, io.EOF) {
-				// Process closed stdout without a done notification — treat as
-				// successful end of turn.
+				// Process closed stdout without a done notification. Treat as
+				// end-of-turn, but reset the process reference so the next turn
+				// spawns a fresh process rather than reusing the now-dead one.
+				b.restartAfterProtocolError(io.EOF)
 				te.done(ctx, assembledMsg, nil, llmclient.StopEndTurn)
 				return
 			}

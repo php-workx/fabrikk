@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -446,6 +447,87 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 
 // ─── Criterion 2: basic Stream event mapping ─────────────────────────────────
 
+// TestCodexAppServer_EOFWithoutDone_ResetsProcess verifies that when the server
+// closes stdout without sending a "done" frame, the backend clears its process
+// reference so the next turn spawns a fresh process (not the dead one).
+func TestCodexAppServer_EOFWithoutDone_ResetsProcess(t *testing.T) {
+	b := newTestBackend()
+
+	proc1, server1 := newPipeProcess()
+	proc2, server2 := newPipeProcess()
+
+	callCount := 0
+	var factoryMu sync.Mutex
+	b.procFactory = func(_ context.Context, _ []string) (*codexProcess, error) {
+		factoryMu.Lock()
+		defer factoryMu.Unlock()
+		callCount++
+		switch callCount {
+		case 1:
+			return proc1, nil
+		case 2:
+			return proc2, nil
+		default:
+			return nil, fmt.Errorf("no more processes")
+		}
+	}
+
+	ctx := context.Background()
+
+	// Turn 1: server reads request then closes stdout without sending done.
+	eofDone := make(chan error, 1)
+	go func() {
+		if err := server1.drainOneRequest(); err != nil {
+			eofDone <- err
+			return
+		}
+		_ = server1.respWriter.Close() // EOF without done
+		eofDone <- nil
+	}()
+
+	ch1, err := b.Stream(ctx, simpleUserInput("turn1"))
+	if err != nil {
+		t.Fatalf("Stream turn1: %v", err)
+	}
+	drainChannel(ch1)
+	if err := <-eofDone; err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("server1: %v", err)
+	}
+
+	// Turn 2: server responds normally.
+	normalDone := make(chan error, 1)
+	go func() {
+		if err := server2.drainOneRequest(); err != nil {
+			normalDone <- err
+			return
+		}
+		_ = server2.sendTextBlock("ok")
+		_ = server2.sendDone()
+		_ = server2.respWriter.Close()
+		normalDone <- nil
+	}()
+
+	ch2, err := b.Stream(ctx, simpleUserInput("turn2"))
+	if err != nil {
+		t.Fatalf("Stream turn2: %v", err)
+	}
+	events := drainWithTimeout(t, ch2)
+	if err := <-normalDone; err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("server2: %v", err)
+	}
+
+	// Verify second turn succeeded (has text events).
+	assertContainsEventType(t, events, llmclient.EventTextDelta)
+
+	// Factory must have been called twice — once for proc1, once for proc2.
+	factoryMu.Lock()
+	count := callCount
+	factoryMu.Unlock()
+	if count != 2 {
+		t.Errorf("procFactory called %d times, want 2 (EOFed proc should be discarded)", count)
+	}
+}
+
 // TestCodexAppServer_StreamMapsTextEvents verifies that text_start,
 // text_delta, text_end, and done notifications from the server are mapped to
 // the correct normalized event sequence.
@@ -600,6 +682,84 @@ func TestCodexAppServerRegistry_PrefersOverCodexExec(t *testing.T) {
 // TestCodexAppServer_ContextCancelBeforeStream verifies that if the context is
 // already cancelled, Stream returns the context error immediately without
 // acquiring the semaphore.
+// ─── fab-o2la: Ollama routing ─────────────────────────────────────────────────
+
+// TestCodexAppServer_Ollama_InjectsEnv verifies that when WithOllama is passed,
+// the env slice forwarded to procFactory contains OPENAI_BASE_URL.
+func TestCodexAppServer_Ollama_InjectsEnv(t *testing.T) {
+	b := newTestBackend()
+
+	factoryCalled := make(chan []string, 1)
+	b.procFactory = func(_ context.Context, env []string) (*codexProcess, error) {
+		factoryCalled <- env
+		return nil, fmt.Errorf("test: env captured, aborting")
+	}
+
+	ollamaCfg := llmclient.OllamaConfig{BaseURL: "http://localhost:11434", Model: "llama3"}
+	ch, err := b.Stream(context.Background(), simpleUserInput("hi"), llmclient.WithOllama(ollamaCfg))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	drainChannel(ch)
+
+	var capturedEnv []string
+	select {
+	case capturedEnv = <-factoryCalled:
+	default:
+		t.Fatal("procFactory was not called")
+	}
+
+	found := false
+	for _, kv := range capturedEnv {
+		if strings.HasPrefix(kv, "OPENAI_BASE_URL=") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("OPENAI_BASE_URL not found in env passed to procFactory; got %v", capturedEnv)
+	}
+}
+
+// TestCodexAppServerRegistry_StaticCapabilities_Ollama verifies that the
+// registered capabilities declare OllamaRouting=true.
+func TestCodexAppServerRegistry_StaticCapabilities_Ollama(t *testing.T) {
+	f, ok := factoryByName("codex-appserver")
+	if !ok {
+		t.Fatal("codex-appserver not registered")
+	}
+	if !f.Capabilities.OllamaRouting {
+		t.Error("OllamaRouting should be true for codex-appserver")
+	}
+}
+
+// TestCheckCodexAppServerRequiredOptions_Ollama verifies that requesting
+// OptionOllama as a required option is accepted (backend supports it fully).
+func TestCheckCodexAppServerRequiredOptions_Ollama(t *testing.T) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithOllama(llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}),
+		llmclient.WithRequiredOptions(llmclient.OptionOllama),
+	})
+	if err := checkCodexAppServerRequiredOptions(cfg); err != nil {
+		t.Errorf("checkCodexAppServerRequiredOptions rejected OptionOllama: %v", err)
+	}
+}
+
+// ─── fab-cpcx: CodexProfile unsupported ──────────────────────────────────────
+
+// TestCodexAppServer_CodexProfile_Unsupported verifies that when CodexProfile
+// is set, the fidelity OptionResults marks it as OptionUnsupported.
+func TestCodexAppServer_CodexProfile_Unsupported(t *testing.T) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithCodexProfile("my-profile"),
+	})
+	f := codexAppServerFidelity(cfg)
+	got := f.OptionResults[llmclient.OptionCodexProfile]
+	if got != llmclient.OptionUnsupported {
+		t.Errorf("OptionResults[OptionCodexProfile] = %v, want OptionUnsupported", got)
+	}
+}
+
 func TestCodexAppServer_ContextCancelBeforeStream(t *testing.T) {
 	b := newTestBackend()
 
