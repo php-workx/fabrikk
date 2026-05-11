@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/php-workx/fabrikk/llmclient"
@@ -14,11 +16,23 @@ import (
 // false means StreamingBufferedOnly is the appropriate fidelity; true means
 // StreamingTextChunk is safe to use.
 //
-// The current implementation conservatively returns false: reliably detecting
-// incremental output without making a live LLM request (which incurs latency
-// and cost) is not feasible. Callers must use StreamingBufferedOnly unless
-// out-of-band evidence of incremental pipe output is available.
-func probePipeStreaming(_ context.Context, _ string, _ []string) bool {
+// The default is conservative (false). Opt-in by setting the environment
+// variable FABRIKK_PIPE_STREAMING to a comma-separated list of binary names
+// (e.g. "codex,opencode"). When the base name of path appears in the list,
+// true is returned. Reliably probing a binary without making a live LLM
+// request is not feasible; the env var lets operators enable streaming for
+// known-capable binaries.
+func probePipeStreaming(_ context.Context, path string, _ []string) bool {
+	raw := os.Getenv("FABRIKK_PIPE_STREAMING")
+	if raw == "" {
+		return false
+	}
+	binaryName := filepath.Base(path)
+	for _, name := range strings.Split(raw, ",") {
+		if strings.TrimSpace(name) == binaryName {
+			return true
+		}
+	}
 	return false
 }
 
