@@ -15,6 +15,7 @@ const (
 	claudeBackendName  = "claude"
 	claudeTestModel    = "claude-opus-4-5"
 	claudeThinkingText = "let me think"
+	claudeTestSession  = "sess-abc"
 )
 
 // helloWorldText is used as a fixture text value in multiple tests.
@@ -311,6 +312,71 @@ func TestClaudeInitFidelity_OnlyReportsPassedOptions(t *testing.T) {
 	}
 }
 
+// TestClaudeFidelity_OptionResultsReflectInput verifies that claudeInitFidelity
+// populates OptionResults for each option that was actually set in the config,
+// and omits entries for options that were not set.
+func TestClaudeFidelity_OptionResultsReflectInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(*llmclient.RequestConfig)
+		present []llmclient.OptionName
+		absent  []llmclient.OptionName
+	}{
+		{
+			name:   "none set",
+			setup:  func(_ *llmclient.RequestConfig) {},
+			absent: []llmclient.OptionName{llmclient.OptionModel, llmclient.OptionSession, llmclient.OptionOllama},
+		},
+		{
+			name:    "model only",
+			setup:   func(cfg *llmclient.RequestConfig) { cfg.Model = "claude-opus" },
+			present: []llmclient.OptionName{llmclient.OptionModel},
+			absent:  []llmclient.OptionName{llmclient.OptionSession, llmclient.OptionOllama},
+		},
+		{
+			name:    "session only",
+			setup:   func(cfg *llmclient.RequestConfig) { cfg.SessionID = claudeTestSession },
+			present: []llmclient.OptionName{llmclient.OptionSession},
+			absent:  []llmclient.OptionName{llmclient.OptionModel, llmclient.OptionOllama},
+		},
+		{
+			name: "ollama only",
+			setup: func(cfg *llmclient.RequestConfig) {
+				cfg.Ollama = &llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}
+			},
+			present: []llmclient.OptionName{llmclient.OptionOllama},
+			absent:  []llmclient.OptionName{llmclient.OptionModel, llmclient.OptionSession},
+		},
+		{
+			name: "all set",
+			setup: func(cfg *llmclient.RequestConfig) {
+				cfg.Model = "claude-opus"
+				cfg.SessionID = claudeTestSession
+				cfg.Ollama = &llmclient.OllamaConfig{BaseURL: "http://localhost:11434"}
+			},
+			present: []llmclient.OptionName{llmclient.OptionModel, llmclient.OptionSession, llmclient.OptionOllama},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := llmclient.DefaultRequestConfig()
+			tc.setup(&cfg)
+			f := claudeInitFidelity(cfg)
+			for _, opt := range tc.present {
+				if f.OptionResults[opt] != llmclient.OptionApplied {
+					t.Errorf("OptionResults[%q] = %v, want OptionApplied", opt, f.OptionResults[opt])
+				}
+			}
+			for _, opt := range tc.absent {
+				if _, ok := f.OptionResults[opt]; ok {
+					t.Errorf("OptionResults[%q] should be absent when option not set", opt)
+				}
+			}
+		})
+	}
+}
+
 // ─── Stream parser tests ─────────────────────────────────────────────────────
 
 // TestClaudeStream_MapsTextEvents verifies that a Claude text block is mapped
@@ -591,6 +657,43 @@ func TestClaudeStream_AssembledMessageOnDone(t *testing.T) {
 	}
 	if block.Text != helloWorldText {
 		t.Errorf("Content[0].Text = %q, want %q", block.Text, helloWorldText)
+	}
+}
+
+// TestClaudeStream_UsageTokensOnDone verifies that when the result frame
+// includes a usage block with token counts, the done event carries a non-nil
+// Usage with matching InputTokens and OutputTokens.
+func TestClaudeStream_UsageTokensOnDone(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-5"}`,
+		`{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"result","subtype":"success","total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}`,
+	}
+	r := claudeJSONLReader(lines...)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	if err := parseClaudeStream(context.Background(), r, ch, te, nil); err != nil {
+		t.Fatalf("parseClaudeStream: %v", err)
+	}
+
+	events := drainChannel(ch)
+	done := findEvent(t, events, llmclient.EventDone)
+
+	if done.Usage == nil {
+		t.Fatal("done.Usage is nil, want non-nil Usage with token counts")
+	}
+	if done.Usage.InputTokens != 100 {
+		t.Errorf("Usage.InputTokens = %d, want 100", done.Usage.InputTokens)
+	}
+	if done.Usage.OutputTokens != 50 {
+		t.Errorf("Usage.OutputTokens = %d, want 50", done.Usage.OutputTokens)
+	}
+	if done.Usage.CacheWriteTokens != 10 {
+		t.Errorf("Usage.CacheWriteTokens = %d, want 10", done.Usage.CacheWriteTokens)
+	}
+	if done.Usage.CacheReadTokens != 5 {
+		t.Errorf("Usage.CacheReadTokens = %d, want 5", done.Usage.CacheReadTokens)
 	}
 }
 

@@ -339,10 +339,20 @@ type claudeFrame struct {
 	Message *claudeMessage `json:"message,omitempty"`
 
 	// result fields
-	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
+	Usage        *claudeUsage `json:"usage,omitempty"`
 
 	// system/hook fields — content emitted by SessionStart hooks
 	Content string `json:"content,omitempty"`
+}
+
+// claudeUsage carries the token counts reported by the Claude CLI in the
+// result frame. Field names match the stream-json format.
+type claudeUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 type claudeMessage struct {
@@ -703,13 +713,19 @@ func handleClaudeResultFrame(
 		if assembledMsg != nil {
 			assembledMsg.StopReason = reason
 		}
-		// Claude reports cost only, not token counts. Keep usage nil so
-		// callers checking ev.Usage != nil don't conclude token counts are
-		// known-zero rather than unavailable.
 		if frame.TotalCostUSD > 0 && assembledMsg != nil {
 			assembledMsg.Cost = &llmclient.Cost{TotalUSD: frame.TotalCostUSD}
 		}
-		te.done(ctx, assembledMsg, nil, reason)
+		var usage *llmclient.Usage
+		if u := frame.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
+			usage = &llmclient.Usage{
+				InputTokens:      u.InputTokens,
+				OutputTokens:     u.OutputTokens,
+				CacheReadTokens:  u.CacheReadInputTokens,
+				CacheWriteTokens: u.CacheCreationInputTokens,
+			}
+		}
+		te.done(ctx, assembledMsg, usage, reason)
 
 	case "error_max_turns":
 		te.error(ctx, errors.New("claude: max turns reached"))
