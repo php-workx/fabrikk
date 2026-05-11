@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -530,6 +532,117 @@ func TestClaudeIPC_WaitForReady_ContextCancelled(t *testing.T) {
 	_, err := waitForClaudeIPCReady(ctx, bufio.NewReader(pr))
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want context.Canceled", err)
+	}
+}
+
+// TestClaudeIPC_Timeout_ClearsProc verifies that a per-turn timeout (via
+// llmclient.WithTimeout) triggers restartAfterProtocolError so that proc is nil
+// after the timed-out turn, and a subsequent Stream() call succeeds using a
+// fresh process.
+//
+// The server goroutine for turn 1 delays indefinitely to force the timeout.
+// After asserting proc == nil, a second server handles turn 2 normally.
+func TestClaudeIPC_Timeout_ClearsProc(t *testing.T) {
+	srv1, srv2 := newTestServer(), newTestServer()
+	b := NewClaudeIPCBackend(CliInfo{Name: "claude-ipc", Path: "/fake/claude"})
+	b.procFactory = makeIPCProcFactory(t, srv1, srv2)
+	defer b.Close() //nolint:errcheck // best-effort shutdown in test cleanup
+
+	// Turn 1: very short timeout so it fires before the server responds.
+	ch1, err := b.Stream(context.Background(), simpleUserInput("t1"), llmclient.WithTimeout(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Stream 1: %v", err)
+	}
+
+	// Server 1: drain stdin, then delay. After the backend declares the turn
+	// done (proc cleared) close stdout so restartAfterProtocolError's drain exits.
+	go func() {
+		srv1.drainStdin(t)
+		// Give the timeout time to fire and restartAfterProtocolError to run.
+		time.Sleep(200 * time.Millisecond)
+		_ = srv1.stdoutW.Close()
+	}()
+
+	events1 := collectEvents(ch1)
+	if len(events1) == 0 {
+		t.Fatal("no events from turn 1")
+	}
+	last1 := events1[len(events1)-1]
+	if last1.Type != llmclient.EventDone {
+		t.Errorf("turn 1 last event = %q, want EventDone", last1.Type)
+	}
+
+	b.mu.Lock()
+	procAfter1 := b.proc
+	b.mu.Unlock()
+	if procAfter1 != nil {
+		t.Error("proc is non-nil after timeout — expected cleared")
+	}
+
+	// Turn 2: normal turn using the fresh server2.
+	ch2, err := b.Stream(context.Background(), simpleUserInput("t2"))
+	if err != nil {
+		t.Fatalf("Stream 2: %v", err)
+	}
+	go func() {
+		srv2.drainStdin(t)
+		srv2.writeTextTurn("ok")
+		_ = srv2.stdoutW.Close()
+	}()
+	events2 := collectEvents(ch2)
+	if len(events2) == 0 || events2[0].Type != llmclient.EventStart {
+		t.Error("turn 2: expected EventStart from fresh proc")
+	}
+	last2 := events2[len(events2)-1]
+	if last2.Type != llmclient.EventDone || last2.Reason != llmclient.StopEndTurn {
+		t.Errorf("turn 2 last event = %q reason = %q, want EventDone/StopEndTurn", last2.Type, last2.Reason)
+	}
+}
+
+// TestClaudeIPC_LargePrompt_NoArgLimit verifies that a user prompt larger than
+// the per-call backend's 32 KB stdin threshold is sent without truncation via the
+// JSON encoder, and that the backend emits a normal successful turn.
+//
+// Unlike the per-call backend which must switch from argv to stdin at 32 KB, the
+// IPC backend always sends user messages via the JSON encoder — there is no argv
+// size concern regardless of prompt length.
+func TestClaudeIPC_LargePrompt_NoArgLimit(t *testing.T) {
+	b, srv := newIPCTestPair(t)
+	defer b.Close() //nolint:errcheck // best-effort shutdown in test cleanup
+
+	// Build a prompt larger than the per-call 32 KB threshold.
+	largeText := strings.Repeat("x", 40_000)
+	largeInput := &llmclient.Context{
+		Messages: []llmclient.Message{{
+			Role:    llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: largeText}},
+		}},
+	}
+
+	ch, err := b.Stream(context.Background(), largeInput)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var receivedLen int
+	go func() {
+		line, readErr := srv.StdinReader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			t.Errorf("drainStdin: %v", readErr)
+		}
+		receivedLen = len(line)
+		srv.writeTextTurn("ok")
+		_ = srv.stdoutW.Close()
+	}()
+
+	events := collectEvents(ch)
+	last := events[len(events)-1]
+	if last.Type != llmclient.EventDone || last.Reason != llmclient.StopEndTurn {
+		t.Errorf("last event = %q reason = %q, want EventDone/StopEndTurn", last.Type, last.Reason)
+	}
+	// The JSON line must be at least as long as the large text itself.
+	if receivedLen < len(largeText) {
+		t.Errorf("stdin line length = %d, want >= %d (no truncation)", receivedLen, len(largeText))
 	}
 }
 
