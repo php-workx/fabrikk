@@ -18,10 +18,18 @@ import (
 // large enough to capture a meaningful tail.
 const defaultStderrTailBytes = 4096
 
-// defaultGracePeriod is the time allowed between SIGTERM and SIGKILL when
-// terminating a subprocess tree. Processes that handle SIGTERM cleanly will
-// typically exit well within this window.
-const defaultGracePeriod = 3 * time.Second
+// defaultPerCallGracePeriod is the time allowed between SIGTERM and SIGKILL
+// when no explicit GracePeriod is set on the processSpec.
+const defaultPerCallGracePeriod = 2 * time.Second
+
+// terminateProcessTreeMu guards terminateProcessTreeFn. terminate() holds the
+// read lock; tests hold the write lock when replacing the function.
+var terminateProcessTreeMu sync.RWMutex
+
+// terminateProcessTreeFn is the function used to send SIGTERM/SIGKILL to a
+// process tree. Tests may replace it (under terminateProcessTreeMu write lock)
+// to observe grace period arguments.
+var terminateProcessTreeFn = terminateProcessTree
 
 // processSpec describes a subprocess to start. It contains the minimum
 // information needed to launch the subprocess and plumb its I/O.
@@ -39,6 +47,10 @@ type processSpec struct {
 	// Dir is the working directory for the subprocess.
 	// An empty string inherits the parent working directory.
 	Dir string
+
+	// GracePeriod is the time between SIGTERM and SIGKILL. Zero means
+	// defaultPerCallGracePeriod.
+	GracePeriod time.Duration
 
 	// RawCapture receives cloned stdout/stderr chunks before backend parsers
 	// normalize stdout or stderr tail buffering trims stderr.
@@ -62,6 +74,8 @@ type supervisor struct {
 	// done is closed by wait() after cmd.Wait() returns. The background
 	// lifecycle goroutine uses this to exit when the process ends naturally.
 	done chan struct{}
+
+	gracePeriod time.Duration
 
 	waitOnce sync.Once
 	waitErr  error
@@ -113,11 +127,16 @@ func startSupervised(ctx context.Context, spec processSpec) (*supervisor, error)
 		return nil, fmt.Errorf("llmcli: start process: %w", err)
 	}
 
+	grace := spec.GracePeriod
+	if grace == 0 {
+		grace = defaultPerCallGracePeriod
+	}
 	s := &supervisor{
 		cmd:           cmd,
 		Stdout:        bufio.NewReader(stdoutReader(stdoutPipe, spec.RawCapture)),
 		stderrTailBuf: tail,
 		done:          make(chan struct{}),
+		gracePeriod:   grace,
 	}
 
 	// Background goroutine: terminate the process tree when ctx is done, or
@@ -202,7 +221,10 @@ func (s *supervisor) terminate(_ error) {
 		return
 	}
 
-	_ = terminateProcessTree(s.cmd.Process.Pid, defaultGracePeriod, s.done)
+	terminateProcessTreeMu.RLock()
+	fn := terminateProcessTreeFn
+	terminateProcessTreeMu.RUnlock()
+	_ = fn(s.cmd.Process.Pid, s.gracePeriod, s.done)
 }
 
 // stderrTail returns the tail of stderr captured from the subprocess. For a

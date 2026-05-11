@@ -331,3 +331,95 @@ func TestResolveProcessEnvExplicitEmptyReplacement(t *testing.T) {
 		t.Fatalf("resolveProcessEnv length = %d, want 0; env=%v", len(env), env)
 	}
 }
+
+// ─── fab-grce: GracePeriod ────────────────────────────────────────────────────
+
+// observeGracePeriod installs a terminateProcessTreeFn spy that sends the
+// observed grace duration on a buffered channel. The channel send happens
+// before the channel receive in the test goroutine, giving the race detector
+// a correct happens-before edge so that the defer restore is safe.
+func observeGracePeriod(t *testing.T) (graceCh <-chan time.Duration, restore func()) {
+	t.Helper()
+	ch := make(chan time.Duration, 1)
+	terminateProcessTreeMu.Lock()
+	orig := terminateProcessTreeFn
+	terminateProcessTreeFn = func(pid int, grace time.Duration, done <-chan struct{}) error {
+		ch <- grace // HB: send before receive in test
+		return orig(pid, grace, done)
+	}
+	terminateProcessTreeMu.Unlock()
+	graceCh = ch
+	restore = func() {
+		terminateProcessTreeMu.Lock()
+		terminateProcessTreeFn = orig
+		terminateProcessTreeMu.Unlock()
+	}
+	return graceCh, restore
+}
+
+// TestSupervisor_GracePeriod_DefaultTwoSeconds verifies that when no GracePeriod
+// is set on processSpec, terminateProcessTree is called with defaultPerCallGracePeriod.
+func TestSupervisor_GracePeriod_DefaultTwoSeconds(t *testing.T) {
+	graceCh, restore := observeGracePeriod(t)
+
+	exe := testExecutable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	spec := processSpec{
+		Command: exe,
+		Env:     append(baseEnv(), "LLMCLI_TEST_FIXTURE=sleep"),
+	}
+	s, err := startSupervised(ctx, spec)
+	if err != nil {
+		t.Fatalf("startSupervised: %v", err)
+	}
+
+	cancel()
+	_, _ = io.Copy(io.Discard, s.Stdout)
+	_ = s.wait()
+
+	// Receive after wait() to ensure the spy has already run and we have HB.
+	select {
+	case observedGrace := <-graceCh:
+		restore() // restore after channel receive — no race on terminateProcessTreeFn
+		if observedGrace != defaultPerCallGracePeriod {
+			t.Errorf("grace = %v, want %v (defaultPerCallGracePeriod)", observedGrace, defaultPerCallGracePeriod)
+		}
+	case <-time.After(5 * time.Second):
+		restore()
+		t.Fatal("timeout: terminateProcessTreeFn was not called")
+	}
+}
+
+// TestSupervisor_GracePeriod_Override verifies that a non-zero GracePeriod on
+// processSpec is passed through to terminateProcessTree unchanged.
+func TestSupervisor_GracePeriod_Override(t *testing.T) {
+	const want = 7 * time.Second
+	graceCh, restore := observeGracePeriod(t)
+
+	exe := testExecutable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	spec := processSpec{
+		Command:     exe,
+		Env:         append(baseEnv(), "LLMCLI_TEST_FIXTURE=sleep"),
+		GracePeriod: want,
+	}
+	s, err := startSupervised(ctx, spec)
+	if err != nil {
+		t.Fatalf("startSupervised: %v", err)
+	}
+
+	cancel()
+	_, _ = io.Copy(io.Discard, s.Stdout)
+	_ = s.wait()
+
+	select {
+	case observedGrace := <-graceCh:
+		restore()
+		if observedGrace != want {
+			t.Errorf("grace = %v, want %v", observedGrace, want)
+		}
+	case <-time.After(5 * time.Second):
+		restore()
+		t.Fatal("timeout: terminateProcessTreeFn was not called")
+	}
+}
