@@ -865,6 +865,89 @@ func findEvent(t *testing.T, events []llmclient.Event, et llmclient.EventType) l
 	return llmclient.Event{}
 }
 
+// TestClaudeStream_ObserverFires verifies that DefaultObserver hooks fire
+// correctly when Stream drives a real subprocess via structuredStream:
+// OnStreamStart is called once, OnEventEmitted fires for each event (including
+// start, text and done), and OnStreamEnd is called once with success=true.
+func TestClaudeStream_ObserverFires(t *testing.T) {
+	spy := &spyObserver{}
+	orig := DefaultObserver
+	DefaultObserver = spy
+	t.Cleanup(func() { DefaultObserver = orig })
+
+	exe := testExecutable(t)
+	b := NewClaudeBackend(CliInfo{
+		Name:    "claude",
+		Binary:  "claude",
+		Path:    exe,
+		Version: "0.0.0-test",
+	})
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{
+			{Role: llmclient.RoleUser, Content: []llmclient.ContentBlock{
+				{Type: llmclient.ContentText, Text: "hi"},
+			}},
+		},
+	}
+
+	ch, err := b.Stream(
+		context.Background(),
+		input,
+		llmclient.WithEnvironment(append(baseEnv(), "LLMCLI_TEST_FIXTURE=claude_jsonl")),
+	)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := waitForEvents(t, ch, 5*time.Second)
+
+	// Verify the event stream is sane.
+	if len(events) == 0 {
+		t.Fatal("no events received from Stream")
+	}
+	last := events[len(events)-1]
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event = %v, want EventDone", last.Type)
+	}
+
+	// Give the observer goroutine in observeStream a moment to call OnStreamEnd
+	// (it runs after the channel is closed, which waitForEvents has already seen).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		spy.mu.Lock()
+		done := len(spy.ends) >= 1
+		spy.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	spy.mu.Lock()
+	starts := spy.starts
+	ends := spy.ends
+	evTypes := spy.eventTypes
+	spy.mu.Unlock()
+
+	// OnStreamStart must fire exactly once.
+	if starts != 1 {
+		t.Errorf("OnStreamStart: called %d times, want 1", starts)
+	}
+
+	// At minimum: EventStart + EventTextStart + EventTextDelta + EventTextEnd + EventDone = 5.
+	if len(evTypes) < 3 {
+		t.Errorf("OnEventEmitted: called %d times, want >= 3 (start + text + done)", len(evTypes))
+	}
+
+	// OnStreamEnd must fire exactly once with success=true.
+	if len(ends) != 1 {
+		t.Errorf("OnStreamEnd: called %d times, want 1", len(ends))
+	} else if !ends[0].success {
+		t.Errorf("OnStreamEnd: success=%v, want true", ends[0].success)
+	}
+}
+
 // TestClaudeStream_HookOutputBeforeInit verifies that SessionStart hook
 // output (non-init system frames) is surfaced as complete TextStart/Delta/End
 // triplets with distinct ContentIndex values, and that the parser does NOT

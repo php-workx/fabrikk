@@ -166,7 +166,6 @@ func (b *ClaudeBackend) Stream(
 		cancelTimeout()
 		return nil, err
 	}
-	model, started := observeStreamStart(b.Name(), cfg)
 
 	prompt := promptForClaude(input, cfg)
 	useStdin := len(prompt) > stdinThreshold
@@ -195,35 +194,26 @@ func (b *ClaudeBackend) Stream(
 		return nil, fmt.Errorf("llmcli claude: start subprocess: %w", err)
 	}
 
-	ch := make(chan llmclient.Event, 16)
-	te := newTerminalEmitter(ch)
+	fidelity := claudeInitFidelity(cfg)
+	sessionID := cfg.SessionID
 
-	go func() {
-		defer cancelTimeout()
-		defer te.close() // safety guard; real terminal comes from parser or wait goroutine
-
-		parseErr := parseClaudeStream(streamCtx, s.Stdout, ch, te, claudeInitFidelity(cfg))
-
-		// Drain stdout so cmd.Wait does not deadlock on a live reader.
+	// parseFn wraps the Claude JSONL parser. structuredStream has already emitted
+	// EventStart, so we seed startEmitted=true in the parse state to prevent a
+	// duplicate start event from the system/init frame handler.
+	parseFn := func(ctx context.Context, out chan<- llmclient.Event, te *terminalEmitter) error {
+		state := &claudeParseState{startEmitted: true, startFidelity: fidelity}
+		parseErr := parseClaudeStreamFromState(ctx, s.Stdout, out, te, state)
 		_, _ = io.Copy(io.Discard, s.Stdout)
-
 		waitErr := s.wait()
-
-		switch {
-		case parseErr != nil &&
-			!errors.Is(parseErr, context.Canceled) &&
-			!errors.Is(parseErr, context.DeadlineExceeded):
-			te.error(ctx, fmt.Errorf("llmcli claude: parse: %w", parseErr))
-		case streamCtx.Err() != nil:
-			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
-		case waitErr != nil:
-			te.error(streamCtx, fmt.Errorf("llmcli claude: subprocess: %w; stderr: %s", waitErr, s.stderrTail()))
-		default:
-			// Normal exit — parseClaudeStream already emitted done via te.
+		if parseErr != nil && !errors.Is(parseErr, context.Canceled) && !errors.Is(parseErr, context.DeadlineExceeded) {
+			return parseErr
 		}
-	}()
-
-	return observeStream(b.Name(), model, started, ch), nil
+		if waitErr != nil {
+			return fmt.Errorf("subprocess: %w; stderr: %s", waitErr, s.stderrTail())
+		}
+		return nil
+	}
+	return structuredStream(streamCtx, b.Name(), sessionID, cfg.Model, fidelity, parseFn, cancelTimeout), nil
 }
 
 // buildClaudeArgs constructs the argument list for `claude -p ...`.

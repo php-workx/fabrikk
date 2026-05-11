@@ -33,9 +33,9 @@ func structuredStream(
 	backend string,
 	sessionID string,
 	model string,
-	fidelity *llmclient.Fidelity, //nolint:unparam // will be non-nil once backends adopt structuredStream in Wave 5
+	fidelity *llmclient.Fidelity,
 	parseFn parserFunc,
-	onClose func(), //nolint:unparam // will be non-nil once backends adopt structuredStream in Wave 5
+	onClose func(),
 ) <-chan llmclient.Event {
 	ch := make(chan llmclient.Event, 16)
 	te := newTerminalEmitter(ch)

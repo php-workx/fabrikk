@@ -61,6 +61,18 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintln(os.Stdout, `{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":3,"output_tokens":7,"total_tokens":18}}`)
 		_, _ = fmt.Fprintln(os.Stderr, "jsonl-stderr")
 		os.Exit(0)
+	case "claude_jsonl":
+		// Emit a minimal valid Claude stream-json session: init, text, result.
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"system","subtype":"init","session_id":"test-sess","model":"claude-opus-4-5"}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"assistant","message":{"id":"msg1","role":"assistant","content":[{"type":"text","text":"hello from fixture"}]}}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success","total_cost_usd":0.001,"session_id":"test-sess"}`)
+		os.Exit(0)
+	case "omp_jsonl":
+		// Emit a minimal valid omp print-mode session: ready, text_delta, done.
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"ready","session_id":"omp-test-sess"}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"text_delta","content":"hello from omp fixture"}`)
+		_, _ = fmt.Fprintln(os.Stdout, `{"type":"done","message":{"id":"msg1","model":"claude-opus-4-5","usage":{"inputTokens":5,"outputTokens":3}}}`)
+		os.Exit(0)
 	}
 
 	os.Exit(m.Run())
