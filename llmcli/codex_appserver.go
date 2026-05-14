@@ -51,9 +51,13 @@ func (p *codexProcess) terminate(reason error) {
 
 // drain discards remaining stdout and waits for the process to exit. Must only
 // be called after terminate or after the process has already closed stdout.
+//
+// Note: p.sup.Stdout is the same *bufio.Reader used by readTurnEvents; calling
+// io.Copy on it while readTurnEvents may still be reading would be a data race.
+// readTurnEvents owns the reader and reads it to EOF naturally after terminate
+// closes the pipe, so drain only waits for the process to exit.
 func (p *codexProcess) drain() {
 	if p.sup != nil {
-		_, _ = io.Copy(io.Discard, p.sup.Stdout)
 		_ = p.sup.wait()
 	}
 }

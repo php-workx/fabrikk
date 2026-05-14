@@ -25,9 +25,9 @@ type parserFunc func(ctx context.Context, out chan<- llmclient.Event, te *termin
 // Observer hooks (via DefaultObserver) fire at stream start, per-event, and at
 // stream end.
 //
-// onClose is called (when non-nil) after parseFn returns, before the terminal
-// event is emitted. Use it for cleanup such as releasing semaphores or closing
-// SSE response bodies.
+// onClose is called (when non-nil) after parseFn returns and after exactly one
+// terminal event has been emitted. Use it for cleanup such as releasing
+// semaphores or closing SSE response bodies.
 func structuredStream(
 	ctx context.Context,
 	backend string,
