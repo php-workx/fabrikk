@@ -181,8 +181,12 @@ type ompFrame struct {
 	Error     *ompError    `json:"error,omitempty"`      // error
 	// response frame fields
 	Command string `json:"command,omitempty"` // response: which command this answers
-	ID      string `json:"id,omitempty"`      // response: command id echoed back
+	ID      string `json:"id,omitempty"`      // response/host_tool_call: command id / Snowflake correlation id
 	Success bool   `json:"success,omitempty"` // response: whether the command succeeded
+	// host_tool_call fields
+	ToolCallID string                 `json:"toolCallId,omitempty"` // model-issued tool call id
+	ToolName   string                 `json:"toolName,omitempty"`   // tool name to invoke
+	Arguments  map[string]interface{} `json:"arguments,omitempty"`  // tool arguments
 }
 
 type ompToolCall struct {
@@ -227,6 +231,12 @@ type ompParseState struct {
 	// pending tool call awaiting toolcall_end
 	pendingToolCall *llmclient.ToolCall
 	pendingToolIdx  int
+
+	// hostToolHandler is set only for the omp-rpc path. When non-nil,
+	// ompDispatchFrame calls it for "host_tool_call" frames instead of
+	// silently dropping them. For omp-print (nil), host_tool_call hits
+	// the default case and is ignored.
+	hostToolHandler func(ctx context.Context, frame ompFrame, out chan<- llmclient.Event) error
 }
 
 // parseOmpStream reads JSONL frames from r and emits normalized events for
@@ -248,16 +258,21 @@ func parseOmpStream(
 // parseOmpRPCTurn reads JSONL frames from r and emits normalized events for a
 // single RPC turn. The start event must have been emitted by the caller before
 // this function is invoked (startEmitted=true skips the ready-event check).
+// proc and cfg are used to set up the host tool handler for this turn.
 func parseOmpRPCTurn(
 	ctx context.Context,
 	r *bufio.Reader,
 	out chan<- llmclient.Event,
 	te *terminalEmitter,
+	proc *ompRPCProc,
+	cfg llmclient.RequestConfig, //nolint:gocritic // RequestConfig is passed by value throughout parse helpers.
 ) error {
-	return parseOmpLines(ctx, r, out, te, &ompParseState{
+	state := &ompParseState{
 		startEmitted: true,
 		assembledMsg: &llmclient.AssistantMessage{Role: "assistant"},
-	})
+	}
+	state.hostToolHandler = makeOmpHostToolHandler(proc, cfg)
+	return parseOmpLines(ctx, r, out, te, state)
 }
 
 // parseOmpLines is the shared parse loop used by both print and RPC parsers.
@@ -356,6 +371,12 @@ func ompDispatchFrame(
 		if !frame.Success && frame.Command == "set_host_tools" {
 			te.error(context.Background(), fmt.Errorf("omp: set_host_tools failed (id=%s)", frame.ID))
 		}
+		return false, nil
+	case "host_tool_call":
+		if state.hostToolHandler != nil {
+			return false, state.hostToolHandler(ctx, frame, out)
+		}
+		// omp-print path: no responder configured — silently ignore
 		return false, nil
 	}
 	// Unknown types are silently ignored.

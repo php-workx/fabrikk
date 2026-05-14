@@ -40,6 +40,7 @@ type ompRPCProc struct {
 	sessionID string
 	cancel    context.CancelFunc
 	turnMu    sync.Mutex // serializes concurrent turns
+	sendMu    sync.Mutex // protects enc for concurrent host tool result writes
 }
 
 // ompRPCGenericCmd is the envelope for simple single-field RPC commands.
@@ -65,6 +66,20 @@ type ompRPCHostToolsCmd struct {
 	ID    string            `json:"id"`
 	Type  string            `json:"type"`
 	Tools []ompHostToolSpec `json:"tools"`
+}
+
+// ompHostToolResultCmd is the outbound wire shape for a host_tool_result reply.
+// The ID field must echo the Snowflake correlation id from the host_tool_call frame.
+type ompHostToolResultCmd struct {
+	Type    string            `json:"type"` // "host_tool_result"
+	ID      string            `json:"id"`   // echoes frame.ID (Snowflake)
+	Result  ompHostToolResult `json:"result"`
+	IsError bool              `json:"isError,omitempty"` // true when result is an error
+}
+
+// ompHostToolResult carries the content blocks returned to omp for a host tool call.
+type ompHostToolResult struct {
+	Content []llmclient.ContentBlock `json:"content"`
 }
 
 // ompCmdCounter provides monotonically increasing command IDs.
@@ -208,7 +223,7 @@ func (b *OmpRPCBackend) Stream(
 		defer proc.turnMu.Unlock()
 		defer te.close() // safety guard; real terminal comes from parser
 
-		parseErr := parseOmpRPCTurn(ctx, proc.sup.Stdout, ch, te)
+		parseErr := parseOmpRPCTurn(ctx, proc.sup.Stdout, ch, te, proc, cfg)
 
 		switch {
 		case parseErr != nil &&
@@ -388,6 +403,92 @@ func sendSetHostTools(proc *ompRPCProc, tools []llmclient.Tool) error {
 		Type:  "set_host_tools",
 		Tools: specs,
 	})
+}
+
+// makeOmpHostToolHandler returns a closure that handles an incoming
+// host_tool_call frame. It emits EventToolCallStart + EventToolCallEnd on out,
+// then spawns a goroutine (bound to ctx) that invokes cfg.HostToolResponder
+// (or synthesizes an error result if nil) and writes a host_tool_result back to
+// the omp process stdin, protected by proc.sendMu.
+func makeOmpHostToolHandler(proc *ompRPCProc, cfg llmclient.RequestConfig) func(ctx context.Context, frame ompFrame, out chan<- llmclient.Event) error { //nolint:gocritic // RequestConfig is passed by value throughout handler helpers.
+	return func(ctx context.Context, frame ompFrame, out chan<- llmclient.Event) error {
+		// Build the ToolCall descriptor from the frame fields.
+		tc := &llmclient.ToolCall{
+			ID:        frame.ToolCallID,
+			Name:      frame.ToolName,
+			Arguments: frame.Arguments,
+		}
+
+		// Emit the toolcall events so consumers see the call on the stream.
+		if !emit(ctx, out, llmclient.Event{Type: llmclient.EventToolCallStart, ToolCall: tc}) {
+			return ctx.Err()
+		}
+		if !emit(ctx, out, llmclient.Event{Type: llmclient.EventToolCallEnd, ToolCall: tc}) {
+			return ctx.Err()
+		}
+
+		// Capture the Snowflake correlation id from the frame for the reply.
+		correlationID := frame.ID
+
+		// Spawn a goroutine to call the responder and write the result back.
+		// The goroutine respects ctx cancellation.
+		go func() {
+			var (
+				resultBlocks []llmclient.ContentBlock
+				isError      bool
+			)
+
+			if cfg.HostToolResponder != nil {
+				var err error
+				resultBlocks, isError, err = cfg.HostToolResponder(ctx, *tc)
+				if err != nil {
+					// Transport-level failure: send an error result to unblock omp.
+					resultBlocks = []llmclient.ContentBlock{{
+						Type: llmclient.ContentText,
+						Text: err.Error(),
+					}}
+					isError = true
+				}
+			} else {
+				// No responder configured — send an error result.
+				resultBlocks = []llmclient.ContentBlock{{
+					Type: llmclient.ContentText,
+					Text: "no host tool responder configured",
+				}}
+				isError = true
+			}
+
+			// Synthesize a fallback message when the result has no content blocks.
+			if len(resultBlocks) == 0 && isError {
+				resultBlocks = []llmclient.ContentBlock{{
+					Type: llmclient.ContentText,
+					Text: "no host tool responder configured",
+				}}
+			}
+
+			cmd := ompHostToolResultCmd{
+				Type:    "host_tool_result",
+				ID:      correlationID,
+				Result:  ompHostToolResult{Content: resultBlocks},
+				IsError: isError,
+			}
+
+			// Acquire sendMu so concurrent host tool results don't interleave.
+			proc.sendMu.Lock()
+			defer proc.sendMu.Unlock()
+
+			// Best-effort: if the context has been cancelled, skip the write.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			_ = proc.enc.Encode(cmd)
+		}()
+
+		return nil
+	}
 }
 
 // — Static capabilities and fidelity -----------------------------------------

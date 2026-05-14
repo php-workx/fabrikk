@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
 )
@@ -194,7 +196,7 @@ func TestOmpRPC_SerializesTurns(t *testing.T) {
 	// Parse first turn — should stop at done and return nil.
 	ch1 := make(chan llmclient.Event, 32)
 	te1 := newTerminalEmitter(ch1)
-	err := parseOmpRPCTurn(context.Background(), r, ch1, te1)
+	err := parseOmpRPCTurn(context.Background(), r, ch1, te1, nil, llmclient.DefaultRequestConfig())
 	if err != nil {
 		t.Fatalf("parseOmpRPCTurn (turn 1): unexpected error: %v", err)
 	}
@@ -209,7 +211,7 @@ func TestOmpRPC_SerializesTurns(t *testing.T) {
 	// Parse second turn from the same reader — should get the error event.
 	ch2 := make(chan llmclient.Event, 32)
 	te2 := newTerminalEmitter(ch2)
-	err = parseOmpRPCTurn(context.Background(), r, ch2, te2)
+	err = parseOmpRPCTurn(context.Background(), r, ch2, te2, nil, llmclient.DefaultRequestConfig())
 	if err != nil {
 		t.Fatalf("parseOmpRPCTurn (turn 2): unexpected error: %v", err)
 	}
@@ -449,7 +451,7 @@ func TestOmpRPC_ParseTurnIgnoresReadyEvents(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpRPCTurn(context.Background(), r, ch, te)
+	err := parseOmpRPCTurn(context.Background(), r, ch, te, nil, llmclient.DefaultRequestConfig())
 	if err != nil {
 		t.Fatalf("parseOmpRPCTurn: %v", err)
 	}
@@ -597,7 +599,7 @@ func TestOmpRPC_SetHostToolsResponse(t *testing.T) {
 	ch := make(chan llmclient.Event, 32)
 	te := newTerminalEmitter(ch)
 
-	err := parseOmpRPCTurn(context.Background(), r, ch, te)
+	err := parseOmpRPCTurn(context.Background(), r, ch, te, nil, llmclient.DefaultRequestConfig())
 	if err != nil {
 		t.Fatalf("parseOmpRPCTurn: unexpected error: %v", err)
 	}
@@ -625,5 +627,271 @@ func TestOmpRPCRegistry_StaticCapabilities_Ollama(t *testing.T) {
 	}
 	if f.Capabilities.OptionSupport[llmclient.OptionOllama] == "" {
 		t.Error("OptionSupport[OptionOllama] should be set for omp-rpc")
+	}
+}
+
+// ─── fab-omth: host_tool_call → host_tool_result round-trip ──────────────────
+
+// newMockRPCProc returns an ompRPCProc whose encoder writes into a pipe that
+// the caller can read. The write end is closed when cancel is called, which
+// unblocks any readers on the returned bufio.Reader.
+func newMockRPCProc() (*ompRPCProc, *bufio.Reader, context.CancelFunc) {
+	r, w := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	proc := &ompRPCProc{
+		enc:    json.NewEncoder(w),
+		stdinW: w,
+		cancel: cancel,
+	}
+	// Close the write end when ctx is cancelled so readers unblock.
+	go func() {
+		<-ctx.Done()
+		_ = w.Close()
+	}()
+	return proc, bufio.NewReader(r), cancel
+}
+
+// collectHostToolResults reads host_tool_result frames from r and sends them on
+// the returned channel. It stops reading when the pipe is closed (EOF/error).
+func collectHostToolResults(r *bufio.Reader) <-chan map[string]interface{} {
+	ch := make(chan map[string]interface{}, 16)
+	go func() {
+		defer close(ch)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var m map[string]interface{}
+			if json.Unmarshal(line, &m) == nil && m["type"] == "host_tool_result" {
+				ch <- m
+			}
+		}
+	}()
+	return ch
+}
+
+// waitForNResults collects n items from ch within 2 seconds, fataling on timeout.
+func waitForNResults(t *testing.T, ch <-chan map[string]interface{}, n int) []map[string]interface{} {
+	t.Helper()
+	results := make([]map[string]interface{}, 0, n)
+	deadline := time.After(2 * time.Second)
+	for len(results) < n {
+		select {
+		case m, ok := <-ch:
+			if !ok {
+				t.Fatalf("results channel closed before receiving %d items (got %d)", n, len(results))
+			}
+			results = append(results, m)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d host_tool_result(s); got %d", n, len(results))
+		}
+	}
+	return results
+}
+
+// TestOmpRPC_HostToolRoundTrip verifies that when omp emits a host_tool_call
+// and cfg.HostToolResponder is set, the backend invokes the responder, writes a
+// host_tool_result frame to stdin with the correct id, and the stream terminates
+// with EventDone.
+func TestOmpRPC_HostToolRoundTrip(t *testing.T) {
+	proc, stdinReader, cancel := newMockRPCProc()
+	defer cancel()
+
+	// Collect host_tool_result frames written to the mock stdin pipe.
+	resultsCh := collectHostToolResults(stdinReader)
+
+	// Mock omp stdout: host_tool_call then done.
+	lines := []string{
+		`{"type":"host_tool_call","id":"s1","toolCallId":"tc-1","toolName":"echo","arguments":{"msg":"hi"}}`,
+		`{"type":"done","message":{"id":"m1"}}`,
+	}
+	r := ompJSONLReader(lines...)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithHostToolResponder(func(_ context.Context, _ llmclient.ToolCall) ([]llmclient.ContentBlock, bool, error) {
+			return []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "HI"}}, false, nil
+		}),
+	})
+
+	if err := parseOmpRPCTurn(context.Background(), r, ch, te, proc, cfg); err != nil {
+		t.Fatalf("parseOmpRPCTurn: %v", err)
+	}
+
+	// Verify the stream emitted EventDone.
+	events := drainChannel(ch)
+	if findEventOr(events, llmclient.EventDone) == nil {
+		t.Error("expected EventDone, got none")
+	}
+
+	// Verify EventToolCallStart and EventToolCallEnd were emitted.
+	if findEventOr(events, llmclient.EventToolCallStart) == nil {
+		t.Error("expected EventToolCallStart, got none")
+	}
+	if findEventOr(events, llmclient.EventToolCallEnd) == nil {
+		t.Error("expected EventToolCallEnd, got none")
+	}
+
+	// Wait for the host_tool_result frame to be written to mock stdin.
+	results := waitForNResults(t, resultsCh, 1)
+	res := results[0]
+
+	if res["id"] != "s1" {
+		t.Errorf("host_tool_result id = %q, want s1", res["id"])
+	}
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Error("expected isError=false for successful responder")
+	}
+	result, ok := res["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result field missing or wrong type: %v", res["result"])
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("result.content missing or empty: %v", result["content"])
+	}
+	first, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("result.content[0] is not an object")
+	}
+	if first["text"] != "HI" {
+		t.Errorf("result.content[0].text = %q, want HI", first["text"])
+	}
+}
+
+// TestOmpRPC_HostToolNoResponder verifies that when no HostToolResponder is
+// configured and a host_tool_call arrives, the backend sends a host_tool_result
+// with isError:true and a descriptive message so omp can complete the turn.
+func TestOmpRPC_HostToolNoResponder(t *testing.T) {
+	proc, stdinReader, cancel := newMockRPCProc()
+	defer cancel()
+
+	resultsCh := collectHostToolResults(stdinReader)
+
+	lines := []string{
+		`{"type":"host_tool_call","id":"s1","toolCallId":"tc-1","toolName":"echo","arguments":{"msg":"hi"}}`,
+		`{"type":"done","message":{"id":"m1"}}`,
+	}
+	r := ompJSONLReader(lines...)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	// No WithHostToolResponder — cfg.HostToolResponder is nil.
+	cfg := llmclient.DefaultRequestConfig()
+
+	if err := parseOmpRPCTurn(context.Background(), r, ch, te, proc, cfg); err != nil {
+		t.Fatalf("parseOmpRPCTurn: %v", err)
+	}
+
+	events := drainChannel(ch)
+	if findEventOr(events, llmclient.EventDone) == nil {
+		t.Error("expected EventDone, got none")
+	}
+
+	results := waitForNResults(t, resultsCh, 1)
+	res := results[0]
+
+	if res["id"] != "s1" {
+		t.Errorf("host_tool_result id = %q, want s1", res["id"])
+	}
+	isErr, _ := res["isError"].(bool)
+	if !isErr {
+		t.Error("expected isError=true when no responder is configured")
+	}
+	// Verify the error message mentions "no host tool responder configured".
+	result, ok := res["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result field missing or wrong type: %v", res["result"])
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("result.content missing or empty: %v", result["content"])
+	}
+	first, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("result.content[0] is not an object")
+	}
+	if text, _ := first["text"].(string); !strings.Contains(text, "no host tool responder configured") {
+		t.Errorf("error message = %q, want to contain 'no host tool responder configured'", text)
+	}
+}
+
+// TestOmpRPC_HostToolResultCorrelation verifies that two sequential host_tool_call
+// frames with distinct ids produce host_tool_result frames whose ids match the
+// originating call ids without cross-wiring.
+func TestOmpRPC_HostToolResultCorrelation(t *testing.T) {
+	proc, stdinReader, cancel := newMockRPCProc()
+	defer cancel()
+
+	resultsCh := collectHostToolResults(stdinReader)
+
+	lines := []string{
+		`{"type":"host_tool_call","id":"id-A","toolCallId":"tc-A","toolName":"toolA","arguments":{}}`,
+		`{"type":"host_tool_call","id":"id-B","toolCallId":"tc-B","toolName":"toolB","arguments":{}}`,
+		`{"type":"done","message":{"id":"m1"}}`,
+	}
+	r := ompJSONLReader(lines...)
+	ch := make(chan llmclient.Event, 32)
+	te := newTerminalEmitter(ch)
+
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), []llmclient.Option{
+		llmclient.WithHostToolResponder(func(_ context.Context, tc llmclient.ToolCall) ([]llmclient.ContentBlock, bool, error) {
+			// Echo the tool name as the result text so we can correlate.
+			return []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "result-for-" + tc.Name}}, false, nil
+		}),
+	})
+
+	if err := parseOmpRPCTurn(context.Background(), r, ch, te, proc, cfg); err != nil {
+		t.Fatalf("parseOmpRPCTurn: %v", err)
+	}
+
+	events := drainChannel(ch)
+	if findEventOr(events, llmclient.EventDone) == nil {
+		t.Error("expected EventDone, got none")
+	}
+
+	// Collect both results.
+	results := waitForNResults(t, resultsCh, 2)
+
+	// Build a map from id → result frame.
+	byID := make(map[string]map[string]interface{}, 2)
+	for _, res := range results {
+		id, _ := res["id"].(string)
+		byID[id] = res
+	}
+
+	for _, wantID := range []string{"id-A", "id-B"} {
+		res, ok := byID[wantID]
+		if !ok {
+			t.Errorf("no host_tool_result with id=%q", wantID)
+			continue
+		}
+		if isErr, _ := res["isError"].(bool); isErr {
+			t.Errorf("id=%q: unexpected isError=true", wantID)
+		}
+		result, ok := res["result"].(map[string]interface{})
+		if !ok {
+			t.Errorf("id=%q: result field missing: %v", wantID, res["result"])
+			continue
+		}
+		content, ok := result["content"].([]interface{})
+		if !ok || len(content) == 0 {
+			t.Errorf("id=%q: content missing: %v", wantID, result["content"])
+			continue
+		}
+		first, _ := content[0].(map[string]interface{})
+		text, _ := first["text"].(string)
+		// id-A → toolA → "result-for-toolA"; id-B → toolB → "result-for-toolB"
+		var wantTool string
+		if wantID == "id-A" {
+			wantTool = "result-for-toolA"
+		} else {
+			wantTool = "result-for-toolB"
+		}
+		if text != wantTool {
+			t.Errorf("id=%q: content text = %q, want %q", wantID, text, wantTool)
+		}
 	}
 }
