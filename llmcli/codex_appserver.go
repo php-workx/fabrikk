@@ -150,6 +150,13 @@ type codexRPCError struct {
 
 // ─── Inbound notification param structs ──────────────────────────────────────
 
+// ThreadItem type constants for codexThreadItem.Type.
+const (
+	codexItemTypeDynamicToolCall  = "dynamicToolCall"
+	codexItemTypeMCPToolCall      = "mcpToolCall"
+	codexItemTypeCommandExecution = "commandExecution"
+)
+
 // codexThreadStartedParams is the params shape for the "thread/started"
 // notification. The thread.id field becomes the threadID for all subsequent
 // turn/start requests.
@@ -168,11 +175,18 @@ type codexAgentMessageDeltaParams struct {
 	TurnID   string `json:"turnId"`
 }
 
-// codexThreadItem is a completed item carried by "item/completed" params.
+// codexThreadItem is a completed item carried by "item/started" and
+// "item/completed" params. It is a discriminated union on the Type field.
 type codexThreadItem struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Text string `json:"text"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Text      string          `json:"text,omitempty"`      // agentMessage
+	Tool      string          `json:"tool,omitempty"`      // dynamicToolCall, mcpToolCall
+	Namespace string          `json:"namespace,omitempty"` // dynamicToolCall
+	Server    string          `json:"server,omitempty"`    // mcpToolCall
+	Command   string          `json:"command,omitempty"`   // commandExecution
+	Arguments json.RawMessage `json:"arguments,omitempty"` // dynamicToolCall, mcpToolCall
+	Status    string          `json:"status,omitempty"`
 }
 
 // codexItemCompletedParams is the params shape for the "item/completed"
@@ -181,6 +195,26 @@ type codexItemCompletedParams struct {
 	Item     codexThreadItem `json:"item"`
 	ThreadID string          `json:"threadId"`
 	TurnID   string          `json:"turnId"`
+}
+
+// codexItemStartedParams is the params shape for the "item/started"
+// notification.
+type codexItemStartedParams struct {
+	Item     codexThreadItem `json:"item"`
+	ThreadID string          `json:"threadId"`
+	TurnID   string          `json:"turnId"`
+}
+
+// codexReasoningDeltaParams is the params shape for the
+// "item/reasoning/textDelta" and "item/reasoning/summaryTextDelta"
+// notifications.
+type codexReasoningDeltaParams struct {
+	ThreadID     string `json:"threadId"`
+	TurnID       string `json:"turnId"`
+	ItemID       string `json:"itemId"`
+	Delta        string `json:"delta"`
+	ContentIndex int    `json:"contentIndex"`
+	PartIndex    int    `json:"partIndex,omitempty"` // summaryTextDelta only
 }
 
 // codexErrorParams is the params shape for the "error" notification.
@@ -741,8 +775,12 @@ func (b *CodexAppServerBackend) dispatchCodexFrame(
 		return false
 	case "item/agentMessage/delta":
 		return b.handleAgentMessageDelta(ctx, frame, ch, te, nextIndex, itemIndex)
+	case "item/started":
+		return b.handleItemStarted(ctx, frame, ch, te, nextIndex, itemIndex)
 	case "item/completed":
 		return b.handleItemCompleted(ctx, frame, ch, te, nextIndex, itemIndex, assembledMsg)
+	case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
+		return b.handleReasoningDelta(ctx, frame, ch, te)
 	case "turn/completed":
 		if assembledMsg != nil {
 			assembledMsg.StopReason = llmclient.StopEndTurn
@@ -786,6 +824,89 @@ func (b *CodexAppServerBackend) handleAgentMessageDelta(
 	return false
 }
 
+// parseToolArguments unmarshals raw JSON arguments into a map. Returns an empty
+// map if raw is nil or invalid JSON — forward-compat: bad args are tolerated.
+func parseToolArguments(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+// toolCallName returns the canonical tool name for a codexThreadItem, following
+// the same mapping used by handleItemStarted.
+func toolCallName(item codexThreadItem) string {
+	switch item.Type {
+	case codexItemTypeDynamicToolCall:
+		return item.Tool
+	case codexItemTypeMCPToolCall:
+		if item.Server != "" {
+			return item.Server + "/" + item.Tool
+		}
+		return item.Tool
+	case codexItemTypeCommandExecution:
+		return codexItemTypeCommandExecution
+	default:
+		return ""
+	}
+}
+
+// isToolCallType reports whether the ThreadItem type is a tool-call variant
+// that maps to EventToolCallStart / EventToolCallEnd.
+func isToolCallType(t string) bool {
+	return t == codexItemTypeDynamicToolCall || t == codexItemTypeMCPToolCall || t == codexItemTypeCommandExecution
+}
+
+func (b *CodexAppServerBackend) handleItemStarted(
+	ctx context.Context,
+	frame codexRPCFrame,
+	ch chan<- llmclient.Event,
+	te *terminalEmitter,
+	nextIndex *int,
+	itemIndex map[string]int,
+) bool {
+	var p codexItemStartedParams
+	if len(frame.Params) > 0 {
+		if err := json.Unmarshal(frame.Params, &p); err != nil {
+			return false
+		}
+	}
+	if !isToolCallType(p.Item.Type) {
+		// Unknown item type — skip silently for forward compatibility.
+		return false
+	}
+
+	idx, seen := itemIndex[p.Item.ID]
+	if !seen {
+		idx = *nextIndex
+		itemIndex[p.Item.ID] = idx
+		*nextIndex++
+	}
+
+	var args map[string]any
+	if p.Item.Type == codexItemTypeCommandExecution {
+		args = map[string]any{"command": p.Item.Command}
+	} else {
+		args = parseToolArguments(p.Item.Arguments)
+	}
+
+	name := toolCallName(p.Item)
+	tc := &llmclient.ToolCall{
+		ID:        p.Item.ID,
+		Name:      name,
+		Arguments: args,
+	}
+	if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventToolCallStart, ContentIndex: idx, ToolCall: tc}) {
+		te.done(ctx, nil, nil, llmclient.StopCancelled)
+		return true
+	}
+	return false
+}
+
 func (b *CodexAppServerBackend) handleItemCompleted(
 	ctx context.Context,
 	frame codexRPCFrame,
@@ -801,24 +922,68 @@ func (b *CodexAppServerBackend) handleItemCompleted(
 			return false
 		}
 	}
-	if p.Item.Type != "agentMessage" {
-		return false
+
+	switch {
+	case p.Item.Type == "agentMessage":
+		idx, seen := itemIndex[p.Item.ID]
+		if !seen {
+			idx = *nextIndex
+			itemIndex[p.Item.ID] = idx
+			*nextIndex++
+		}
+		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx, Content: p.Item.Text}) {
+			te.done(ctx, nil, nil, llmclient.StopCancelled)
+			return true
+		}
+		if assembledMsg != nil {
+			assembledMsg.Content = append(assembledMsg.Content, llmclient.ContentBlock{
+				Type: llmclient.ContentText,
+				Text: p.Item.Text,
+			})
+		}
+
+	case isToolCallType(p.Item.Type):
+		idx, seen := itemIndex[p.Item.ID]
+		if !seen {
+			idx = *nextIndex
+			itemIndex[p.Item.ID] = idx
+			*nextIndex++
+		}
+		var args map[string]any
+		if p.Item.Type == codexItemTypeCommandExecution {
+			args = map[string]any{"command": p.Item.Command}
+		} else {
+			args = parseToolArguments(p.Item.Arguments)
+		}
+		tc := &llmclient.ToolCall{
+			ID:        p.Item.ID,
+			Name:      toolCallName(p.Item),
+			Arguments: args,
+		}
+		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventToolCallEnd, ContentIndex: idx, ToolCall: tc}) {
+			te.done(ctx, nil, nil, llmclient.StopCancelled)
+			return true
+		}
 	}
-	idx, seen := itemIndex[p.Item.ID]
-	if !seen {
-		idx = *nextIndex
-		itemIndex[p.Item.ID] = idx
-		*nextIndex++
+
+	return false
+}
+
+func (b *CodexAppServerBackend) handleReasoningDelta(
+	ctx context.Context,
+	frame codexRPCFrame,
+	ch chan<- llmclient.Event,
+	te *terminalEmitter,
+) bool {
+	var p codexReasoningDeltaParams
+	if len(frame.Params) > 0 {
+		if err := json.Unmarshal(frame.Params, &p); err != nil {
+			return false
+		}
 	}
-	if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx, Content: p.Item.Text}) {
+	if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventThinkingDelta, ContentIndex: p.ContentIndex, Delta: p.Delta}) {
 		te.done(ctx, nil, nil, llmclient.StopCancelled)
 		return true
-	}
-	if assembledMsg != nil {
-		assembledMsg.Content = append(assembledMsg.Content, llmclient.ContentBlock{
-			Type: llmclient.ContentText,
-			Text: p.Item.Text,
-		})
 	}
 	return false
 }
@@ -883,6 +1048,7 @@ func codexAppServerStaticCapabilities(version string) llmclient.Capabilities {
 		Version:       version,
 		Streaming:     llmclient.StreamingStructured,
 		ToolEvents:    true,
+		Thinking:      true,
 		MultiTurn:     true,
 		OllamaRouting: true,
 		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{

@@ -1128,6 +1128,10 @@ func TestCodexAppServerRegistry_StaticCapabilities(t *testing.T) {
 		t.Error("ToolEvents should be true")
 	}
 
+	if !caps.Thinking {
+		t.Error("Thinking should be true")
+	}
+
 	if !caps.MultiTurn {
 		t.Error("MultiTurn should be true")
 	}
@@ -1356,5 +1360,330 @@ func assertExactlyOneTerminal(t *testing.T, events []llmclient.Event, label stri
 
 	if count != 1 {
 		t.Errorf("%s: terminal event count = %d; want 1", label, count)
+	}
+}
+
+// ─── fab-citr: tool-call and reasoning event mapping ─────────────────────────
+
+// TestCodexAppServer_ToolCallMapping verifies that item/started with a
+// dynamicToolCall item emits EventToolCallStart and the matching item/completed
+// emits EventToolCallEnd with the parsed tool name and ID.
+func TestCodexAppServer_ToolCallMapping(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const (
+		mockThreadID = "thread-toolcall-test"
+		callID       = "call1"
+		toolName     = "echo"
+	)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+
+		// item/started — dynamicToolCall
+		started := mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/started",
+			"params": map[string]any{
+				"threadId": mockThreadID,
+				"turnId":   "turn-1",
+				"item": map[string]any{
+					"type":      "dynamicToolCall",
+					"id":        callID,
+					"tool":      toolName,
+					"namespace": nil,
+					"arguments": map[string]any{"msg": "hi"},
+					"status":    "inProgress",
+				},
+			},
+		})
+		if err := server.sendNDJSON(started); err != nil {
+			serverDone <- fmt.Errorf("send item/started: %w", err)
+			return
+		}
+
+		// item/completed — dynamicToolCall (status completed)
+		completed := mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/completed",
+			"params": map[string]any{
+				"threadId": mockThreadID,
+				"turnId":   "turn-1",
+				"item": map[string]any{
+					"type":      "dynamicToolCall",
+					"id":        callID,
+					"tool":      toolName,
+					"arguments": map[string]any{"msg": "hi"},
+					"status":    "completed",
+				},
+			},
+		})
+		if err := server.sendNDJSON(completed); err != nil {
+			serverDone <- fmt.Errorf("send item/completed: %w", err)
+			return
+		}
+
+		if err := server.sendDone(); err != nil {
+			serverDone <- fmt.Errorf("sendDone: %w", err)
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("run echo"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	var toolStarts []llmclient.Event
+	var toolEnds []llmclient.Event
+	for _, ev := range events {
+		switch ev.Type {
+		case llmclient.EventToolCallStart:
+			toolStarts = append(toolStarts, ev)
+		case llmclient.EventToolCallEnd:
+			toolEnds = append(toolEnds, ev)
+		}
+	}
+
+	if len(toolStarts) != 1 {
+		t.Fatalf("EventToolCallStart count = %d; want 1", len(toolStarts))
+	}
+	if len(toolEnds) != 1 {
+		t.Fatalf("EventToolCallEnd count = %d; want 1", len(toolEnds))
+	}
+
+	start := toolStarts[0]
+	if start.ToolCall == nil {
+		t.Fatal("EventToolCallStart.ToolCall is nil")
+	}
+	if start.ToolCall.ID != callID {
+		t.Errorf("ToolCallStart.ID = %q; want %q", start.ToolCall.ID, callID)
+	}
+	if start.ToolCall.Name != toolName {
+		t.Errorf("ToolCallStart.Name = %q; want %q", start.ToolCall.Name, toolName)
+	}
+
+	end := toolEnds[0]
+	if end.ToolCall == nil {
+		t.Fatal("EventToolCallEnd.ToolCall is nil")
+	}
+	if end.ToolCall.ID != callID {
+		t.Errorf("ToolCallEnd.ID = %q; want %q", end.ToolCall.ID, callID)
+	}
+}
+
+// TestCodexAppServer_MCPToolCallMapping verifies that item/started with a
+// mcpToolCall item emits EventToolCallStart with a name containing the tool
+// field, and the matching item/completed emits EventToolCallEnd.
+func TestCodexAppServer_MCPToolCallMapping(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const (
+		mockThreadID = "thread-mcptool-test"
+		callID       = "mcp1"
+		serverName   = "fs"
+		toolName     = "read_file"
+	)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+
+		// item/started — mcpToolCall
+		started := mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/started",
+			"params": map[string]any{
+				"threadId": mockThreadID,
+				"turnId":   "turn-1",
+				"item": map[string]any{
+					"type":      "mcpToolCall",
+					"id":        callID,
+					"server":    serverName,
+					"tool":      toolName,
+					"arguments": map[string]any{"path": "/tmp/x"},
+					"status":    "inProgress",
+				},
+			},
+		})
+		if err := server.sendNDJSON(started); err != nil {
+			serverDone <- fmt.Errorf("send item/started: %w", err)
+			return
+		}
+
+		// item/completed — mcpToolCall
+		completed := mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/completed",
+			"params": map[string]any{
+				"threadId": mockThreadID,
+				"turnId":   "turn-1",
+				"item": map[string]any{
+					"type":      "mcpToolCall",
+					"id":        callID,
+					"server":    serverName,
+					"tool":      toolName,
+					"arguments": map[string]any{"path": "/tmp/x"},
+					"status":    "completed",
+				},
+			},
+		})
+		if err := server.sendNDJSON(completed); err != nil {
+			serverDone <- fmt.Errorf("send item/completed: %w", err)
+			return
+		}
+
+		if err := server.sendDone(); err != nil {
+			serverDone <- fmt.Errorf("sendDone: %w", err)
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("read a file"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	var toolStarts []llmclient.Event
+	var toolEnds []llmclient.Event
+	for _, ev := range events {
+		switch ev.Type {
+		case llmclient.EventToolCallStart:
+			toolStarts = append(toolStarts, ev)
+		case llmclient.EventToolCallEnd:
+			toolEnds = append(toolEnds, ev)
+		}
+	}
+
+	if len(toolStarts) != 1 {
+		t.Fatalf("EventToolCallStart count = %d; want 1", len(toolStarts))
+	}
+	if len(toolEnds) != 1 {
+		t.Fatalf("EventToolCallEnd count = %d; want 1", len(toolEnds))
+	}
+
+	start := toolStarts[0]
+	if start.ToolCall == nil {
+		t.Fatal("EventToolCallStart.ToolCall is nil")
+	}
+	if !strings.Contains(start.ToolCall.Name, toolName) {
+		t.Errorf("ToolCallStart.Name = %q; want it to contain %q", start.ToolCall.Name, toolName)
+	}
+	if start.ToolCall.ID != callID {
+		t.Errorf("ToolCallStart.ID = %q; want %q", start.ToolCall.ID, callID)
+	}
+}
+
+// TestCodexAppServer_ReasoningMapping verifies that item/reasoning/textDelta
+// notifications are mapped to EventThinkingDelta events with the correct delta
+// and contentIndex.
+func TestCodexAppServer_ReasoningMapping(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const (
+		mockThreadID  = "thread-reasoning-test"
+		reasoningItem = "reasoning1"
+		thinkingText  = "let me think"
+	)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+
+		// item/reasoning/textDelta
+		delta := mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/reasoning/textDelta",
+			"params": map[string]any{
+				"threadId":     mockThreadID,
+				"turnId":       "turn-1",
+				"itemId":       reasoningItem,
+				"delta":        thinkingText,
+				"contentIndex": 0,
+			},
+		})
+		if err := server.sendNDJSON(delta); err != nil {
+			serverDone <- fmt.Errorf("send textDelta: %w", err)
+			return
+		}
+
+		if err := server.sendDone(); err != nil {
+			serverDone <- fmt.Errorf("sendDone: %w", err)
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("think about it"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	var thinkingDeltas []llmclient.Event
+	for _, ev := range events {
+		if ev.Type == llmclient.EventThinkingDelta {
+			thinkingDeltas = append(thinkingDeltas, ev)
+		}
+	}
+
+	if len(thinkingDeltas) != 1 {
+		t.Fatalf("EventThinkingDelta count = %d; want 1", len(thinkingDeltas))
+	}
+	if thinkingDeltas[0].Delta != thinkingText {
+		t.Errorf("ThinkingDelta.Delta = %q; want %q", thinkingDeltas[0].Delta, thinkingText)
 	}
 }
