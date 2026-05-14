@@ -47,56 +47,142 @@ func newPipeProcess() (*codexProcess, *fakeServer) {
 	return proc, server
 }
 
-// sendFrame writes one LSP-framed JSON body to the server's response writer.
-func (s *fakeServer) sendFrame(body string) error {
-	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-	if _, err := io.WriteString(s.respWriter, header); err != nil {
-		return err
-	}
-	_, err := io.WriteString(s.respWriter, body)
+// sendNDJSON writes body followed by a single newline to the server's response
+// writer. This is the NDJSON framing used by the real codex app-server.
+func (s *fakeServer) sendNDJSON(body string) error {
+	_, err := io.WriteString(s.respWriter, body+"\n")
 	return err
 }
 
-// sendDone sends the terminal "done" notification with stop_reason "end_turn".
+// readRequest reads one NDJSON line from the request reader and returns the
+// raw bytes. Used to read what the backend sent.
+func (s *fakeServer) readRequest() ([]byte, error) {
+	return internal.ReadBoundedLine(s.reqReader, maxCodexBodyBytes)
+}
+
+// handleHandshake handles the initialize → initialized → thread/start sequence
+// that the backend sends on a fresh process. It reads three outbound requests
+// and sends back the expected responses including a thread/started notification.
+// threadID is the mock thread id to echo back.
+func (s *fakeServer) handleHandshake(threadID string) error {
+	// 1. Read initialize request.
+	_, err := s.readRequest()
+	if err != nil {
+		return fmt.Errorf("read initialize: %w", err)
+	}
+
+	// 2. Send initialize response (id=1).
+	initResp := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"userAgent":      "codex-test",
+			"codexHome":      "/tmp/.codex",
+			"platformFamily": "unix",
+			"platformOs":     "macos",
+		},
+	}
+	b, err := json.Marshal(initResp)
+	if err != nil {
+		return err
+	}
+	if err := s.sendNDJSON(string(b)); err != nil {
+		return fmt.Errorf("send initialize response: %w", err)
+	}
+
+	// 3. Read initialized notification.
+	_, err = s.readRequest()
+	if err != nil {
+		return fmt.Errorf("read initialized: %w", err)
+	}
+
+	// 4. Read thread/start request.
+	_, err = s.readRequest()
+	if err != nil {
+		return fmt.Errorf("read thread/start: %w", err)
+	}
+
+	// 5. Send thread/started notification.
+	threadStarted := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "thread/started",
+		"params": map[string]any{
+			"thread": map[string]any{
+				"id":        threadID,
+				"sessionId": threadID,
+				"status":    "active",
+			},
+		},
+	}
+	b, err = json.Marshal(threadStarted)
+	if err != nil {
+		return err
+	}
+	return s.sendNDJSON(string(b))
+}
+
+// sendDone sends the terminal "turn/completed" notification.
 func (s *fakeServer) sendDone() error {
-	params := map[string]any{"stop_reason": "end_turn"}
 	b, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"method":  "done",
-		"params":  params,
+		"method":  "turn/completed",
+		"params": map[string]any{
+			"threadId": "mock-thread",
+			"turn": map[string]any{
+				"id":     "turn-1",
+				"status": "completed",
+			},
+		},
 	})
 	if err != nil {
 		return err
 	}
-	return s.sendFrame(string(b))
+	return s.sendNDJSON(string(b))
 }
 
-// sendTextBlock sends text_start → text_delta → text_end notifications for
-// content block index 0.
+// sendTextBlock sends item/agentMessage/delta (one delta) and item/completed
+// notifications for a single text block, simulating a complete message.
 func (s *fakeServer) sendTextBlock(text string) error {
-	const idx = 0
-	events := []map[string]any{
-		{"jsonrpc": "2.0", "method": "text_start", "params": map[string]any{"content_index": idx}},
-		{"jsonrpc": "2.0", "method": "text_delta", "params": map[string]any{"content_index": idx, "delta": text}},
-		{"jsonrpc": "2.0", "method": "text_end", "params": map[string]any{"content_index": idx, "content": text}},
-	}
-	for _, ev := range events {
-		b, err := json.Marshal(ev)
-		if err != nil {
-			return err
-		}
-		if err := s.sendFrame(string(b)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+	const itemID = "item-0"
 
-// drainOneRequest reads and discards one LSP-framed request from the request
-// reader. Used by server goroutines that don't need to inspect the request.
-func (s *fakeServer) drainOneRequest() error {
-	_, err := internal.ReadFrame(s.reqReader, 4096, 8<<20)
-	return err
+	// item/agentMessage/delta
+	delta := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "item/agentMessage/delta",
+		"params": map[string]any{
+			"threadId": "mock-thread",
+			"turnId":   "turn-1",
+			"itemId":   itemID,
+			"delta":    text,
+		},
+	}
+	b, err := json.Marshal(delta)
+	if err != nil {
+		return err
+	}
+	if err := s.sendNDJSON(string(b)); err != nil {
+		return err
+	}
+
+	// item/completed
+	completed := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "item/completed",
+		"params": map[string]any{
+			"threadId": "mock-thread",
+			"turnId":   "turn-1",
+			"item": map[string]any{
+				"type": "agentMessage",
+				"id":   itemID,
+				"text": text,
+			},
+		},
+	}
+	b, err = json.Marshal(completed)
+	if err != nil {
+		return err
+	}
+	return s.sendNDJSON(string(b))
 }
 
 // newTestBackend creates a CodexAppServerBackend with a fake info and injects
@@ -127,6 +213,381 @@ func injectProc(b *CodexAppServerBackend, proc *codexProcess) {
 	}
 }
 
+// ─── New acceptance tests ─────────────────────────────────────────────────────
+
+// TestCodexAppServer_NDJSONFraming verifies that the backend communicates over
+// plain NDJSON (newline-delimited JSON) with no Content-Length framing.
+// A mock that emits NDJSON produces correct events on the stream channel.
+func TestCodexAppServer_NDJSONFraming(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const (
+		mockThreadID = "thread-ndjson-test"
+		wantText     = "hello from codex NDJSON"
+	)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		// Read turn/start.
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+		if err := server.sendTextBlock(wantText); err != nil {
+			serverDone <- fmt.Errorf("sendTextBlock: %w", err)
+			return
+		}
+		if err := server.sendDone(); err != nil {
+			serverDone <- fmt.Errorf("sendDone: %w", err)
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("hello"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	// Must contain EventStart, EventTextStart, EventTextDelta, EventTextEnd, EventDone.
+	assertContainsEventType(t, events, llmclient.EventStart)
+	assertContainsEventType(t, events, llmclient.EventTextDelta)
+	assertContainsEventType(t, events, llmclient.EventDone)
+
+	// Verify terminal is EventDone.
+	last := events[len(events)-1]
+	if last.Type != llmclient.EventDone {
+		t.Errorf("last event = %v; want EventDone", last.Type)
+	}
+}
+
+// TestCodexAppServer_Handshake verifies that on a fresh process the backend
+// sends initialize → initialized → thread/start in that order, and that the
+// thread id from the thread/started notification is echoed in the turn/start
+// request's threadId field.
+//
+//nolint:gocognit // sequential protocol handshake test; each step is necessary
+func TestCodexAppServer_Handshake(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const mockThreadID = "thread-handshake-abc"
+
+	type rpcMsg struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id,omitempty"`
+		Params json.RawMessage `json:"params,omitempty"`
+	}
+
+	capturedMethods := make(chan string, 10)
+	capturedTurnStart := make(chan rpcMsg, 1)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		// 1. Read initialize — must be method "initialize" with id=1.
+		raw, err := server.readRequest()
+		if err != nil {
+			serverDone <- fmt.Errorf("read initialize: %w", err)
+			return
+		}
+		var msg rpcMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			serverDone <- fmt.Errorf("unmarshal initialize: %w", err)
+			return
+		}
+		capturedMethods <- msg.Method
+
+		// Send initialize response.
+		resp := `{"jsonrpc":"2.0","id":1,"result":{"userAgent":"test"}}`
+		if err := server.sendNDJSON(resp); err != nil {
+			serverDone <- err
+			return
+		}
+
+		// 2. Read initialized notification.
+		raw, err = server.readRequest()
+		if err != nil {
+			serverDone <- fmt.Errorf("read initialized: %w", err)
+			return
+		}
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			serverDone <- err
+			return
+		}
+		capturedMethods <- msg.Method
+
+		// 3. Read thread/start.
+		raw, err = server.readRequest()
+		if err != nil {
+			serverDone <- fmt.Errorf("read thread/start: %w", err)
+			return
+		}
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			serverDone <- err
+			return
+		}
+		capturedMethods <- msg.Method
+
+		// Send thread/started notification with the mock thread id.
+		notif := fmt.Sprintf(`{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":%q,"sessionId":%q,"status":"active"}}}`,
+			mockThreadID, mockThreadID)
+		if err := server.sendNDJSON(notif); err != nil {
+			serverDone <- err
+			return
+		}
+
+		// 4. Read turn/start — capture it for assertion.
+		raw, err = server.readRequest()
+		if err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			serverDone <- err
+			return
+		}
+		capturedMethods <- msg.Method
+		capturedTurnStart <- msg
+
+		// Send a minimal text block and done.
+		if err := server.sendTextBlock("ok"); err != nil {
+			serverDone <- err
+			return
+		}
+		if err := server.sendDone(); err != nil {
+			serverDone <- err
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ch, err := b.Stream(context.Background(), simpleUserInput("test"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	// Collect captured methods (drain channel).
+	close(capturedMethods)
+	var methods []string
+	for m := range capturedMethods {
+		methods = append(methods, m)
+	}
+
+	// Verify ordering: initialize → initialized → thread/start → turn/start.
+	wantOrder := []string{"initialize", "initialized", "thread/start", "turn/start"}
+	if len(methods) != len(wantOrder) {
+		t.Fatalf("captured methods = %v; want %v", methods, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if methods[i] != want {
+			t.Errorf("methods[%d] = %q; want %q", i, methods[i], want)
+		}
+	}
+
+	// Verify that turn/start params.threadId matches the mock thread id.
+	ts := <-capturedTurnStart
+	var tsParams struct {
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.Unmarshal(ts.Params, &tsParams); err != nil {
+		t.Fatalf("unmarshal turn/start params: %v", err)
+	}
+	if tsParams.ThreadID != mockThreadID {
+		t.Errorf("turn/start.threadId = %q; want %q", tsParams.ThreadID, mockThreadID)
+	}
+}
+
+// TestCodexAppServer_AgentMessageDelta verifies that item/agentMessage/delta
+// notifications are mapped to EventTextStart + EventTextDelta events with a
+// per-item contentIndex, and that item/completed emits EventTextEnd.
+//
+//nolint:gocognit,cyclop // multi-item delta sequencing test; verification logic is necessarily detailed
+func TestCodexAppServer_AgentMessageDelta(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const (
+		mockThreadID = "thread-delta-test"
+		itemID1      = "item-1"
+		itemID2      = "item-2"
+		delta1a      = "hello "
+		delta1b      = "world"
+		fullText1    = "hello world"
+		delta2       = "second item"
+	)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		// Read turn/start.
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+
+		// Emit two deltas for item 1.
+		if err := server.sendNDJSON(mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/agentMessage/delta",
+			"params":  map[string]any{"threadId": mockThreadID, "turnId": "t1", "itemId": itemID1, "delta": delta1a},
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+		if err := server.sendNDJSON(mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/agentMessage/delta",
+			"params":  map[string]any{"threadId": mockThreadID, "turnId": "t1", "itemId": itemID1, "delta": delta1b},
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+		// Complete item 1.
+		if err := server.sendNDJSON(mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/completed",
+			"params": map[string]any{
+				"threadId": mockThreadID, "turnId": "t1",
+				"item": map[string]any{"type": "agentMessage", "id": itemID1, "text": fullText1},
+			},
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+
+		// Emit one delta for item 2.
+		if err := server.sendNDJSON(mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/agentMessage/delta",
+			"params":  map[string]any{"threadId": mockThreadID, "turnId": "t1", "itemId": itemID2, "delta": delta2},
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+		// Complete item 2.
+		if err := server.sendNDJSON(mustMarshal(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "item/completed",
+			"params": map[string]any{
+				"threadId": mockThreadID, "turnId": "t1",
+				"item": map[string]any{"type": "agentMessage", "id": itemID2, "text": delta2},
+			},
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+
+		if err := server.sendDone(); err != nil {
+			serverDone <- err
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("multi-item"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	// Collect text-related events.
+	var textStarts []llmclient.Event
+	var textDeltas []llmclient.Event
+	var textEnds []llmclient.Event
+	for _, ev := range events {
+		switch ev.Type {
+		case llmclient.EventTextStart:
+			textStarts = append(textStarts, ev)
+		case llmclient.EventTextDelta:
+			textDeltas = append(textDeltas, ev)
+		case llmclient.EventTextEnd:
+			textEnds = append(textEnds, ev)
+		}
+	}
+
+	// Two items → two TextStart events.
+	if len(textStarts) != 2 {
+		t.Errorf("TextStart count = %d; want 2", len(textStarts))
+	}
+
+	// Item 1 has 2 deltas, item 2 has 1 delta → 3 total.
+	if len(textDeltas) != 3 {
+		t.Errorf("TextDelta count = %d; want 3", len(textDeltas))
+	}
+
+	// Two items → two TextEnd events.
+	if len(textEnds) != 2 {
+		t.Errorf("TextEnd count = %d; want 2", len(textEnds))
+	}
+
+	// Verify the two items have different content indices (0 and 1).
+	if len(textStarts) == 2 {
+		idx0 := textStarts[0].ContentIndex
+		idx1 := textStarts[1].ContentIndex
+		if idx0 == idx1 {
+			t.Errorf("both items have the same ContentIndex %d; want distinct indices", idx0)
+		}
+	}
+
+	// Verify item 1 deltas.
+	if len(textDeltas) >= 2 {
+		if textDeltas[0].Delta != delta1a {
+			t.Errorf("delta[0] = %q; want %q", textDeltas[0].Delta, delta1a)
+		}
+		if textDeltas[1].Delta != delta1b {
+			t.Errorf("delta[1] = %q; want %q", textDeltas[1].Delta, delta1b)
+		}
+	}
+
+	// Verify TextEnd for item 1 carries full text.
+	if len(textEnds) >= 1 {
+		if textEnds[0].Content != fullText1 {
+			t.Errorf("textEnd[0].Content = %q; want %q", textEnds[0].Content, fullText1)
+		}
+	}
+}
+
+// mustMarshal marshals v to a JSON string or panics. Used only in tests.
+func mustMarshal(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("mustMarshal: %v", err))
+	}
+	return string(b)
+}
+
 // ─── Criterion 2: StreamSerializesTurns ──────────────────────────────────────
 
 // TestCodexAppServer_StreamSerializesTurns verifies that concurrent calls to
@@ -139,17 +600,24 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 	proc, server := newPipeProcess()
 	injectProc(b, proc)
 
-	// Keep a count of requests that the server received.
+	// Keep a count of turn/start requests that the server received.
 	var (
 		mu       sync.Mutex
 		received []int
 	)
 
-	// Server goroutine: service two sequential turn requests, recording order.
+	// Server goroutine: handle handshake once, then service two sequential
+	// turn/start requests.
 	serverDone := make(chan error, 1)
 	go func() {
+		const threadID = "thread-serialize"
+		if err := server.handleHandshake(threadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+
 		for i := 1; i <= 2; i++ {
-			if err := server.drainOneRequest(); err != nil {
+			if _, err := server.readRequest(); err != nil { // turn/start
 				serverDone <- err
 				return
 			}
@@ -192,7 +660,7 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 	assertExactlyOneTerminal(t, events1, "stream1")
 	assertExactlyOneTerminal(t, events2, "stream2")
 
-	// Server must have received exactly two requests.
+	// Server must have received exactly two turn/start requests.
 	mu.Lock()
 	defer mu.Unlock()
 	if len(received) != 2 {
@@ -220,8 +688,13 @@ func TestCodexAppServer_CloseTerminatesProcess(t *testing.T) {
 	serverClosed := make(chan error, 1)
 	go func() {
 		close(serverReady)
-		// Drain the request, then wait for stdin to close (Close() call).
-		if err := server.drainOneRequest(); err != nil {
+		const threadID = "thread-close-test"
+		if err := server.handleHandshake(threadID); err != nil {
+			serverClosed <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		// Drain the turn/start request.
+		if _, err := server.readRequest(); err != nil {
 			serverClosed <- err
 			return
 		}
@@ -266,7 +739,7 @@ func TestCodexAppServer_CloseTerminatesProcess(t *testing.T) {
 // ─── Criterion 3: ProtocolCorruptionEmitsOneError ────────────────────────────
 
 // TestCodexAppServer_ProtocolCorruptionEmitsOneError verifies that when the
-// process sends a malformed LSP frame (invalid Content-Length), exactly one
+// process sends a malformed NDJSON frame (truncated JSON), exactly one
 // EventError is emitted on the stream channel and the backend marks itself
 // unhealthy.
 func TestCodexAppServer_ProtocolCorruptionEmitsOneError(t *testing.T) {
@@ -275,16 +748,20 @@ func TestCodexAppServer_ProtocolCorruptionEmitsOneError(t *testing.T) {
 	proc, server := newPipeProcess()
 	injectProc(b, proc)
 
-	// Server: consume the request, then write an invalid LSP frame.
-	// "Content-Length: not-a-number" triggers ErrInvalidContentLength in
-	// ReadFrame, which is not io.EOF, so readTurnEvents routes it to te.error.
+	// Server: complete handshake, consume turn/start, then write malformed JSON.
 	serverDone := make(chan error, 1)
 	go func() {
-		if err := server.drainOneRequest(); err != nil {
+		const threadID = "thread-corrupt"
+		if err := server.handleHandshake(threadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil { // turn/start
 			serverDone <- err
 			return
 		}
-		_, _ = io.WriteString(server.respWriter, "Content-Length: not-a-number\r\n\r\n")
+		// Write malformed JSON line — this is not valid JSON.
+		_, _ = io.WriteString(server.respWriter, "{this is not valid json\n")
 		_ = server.respWriter.Close()
 		serverDone <- nil
 	}()
@@ -374,16 +851,19 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 	ctx := context.Background()
 	input := simpleUserInput("hello")
 
-	// Server1: drain request then write an invalid LSP frame (protocol corruption).
+	// Server1: handle handshake then write malformed JSON after turn/start.
 	corruptDone := make(chan error, 1)
 	go func() {
-		if err := server1.drainOneRequest(); err != nil {
+		if err := server1.handleHandshake("thread-corrupt-1"); err != nil {
+			corruptDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server1.readRequest(); err != nil { // turn/start
 			corruptDone <- err
 			return
 		}
-		// Invalid Content-Length value causes ReadFrame to return
-		// ErrInvalidContentLength (not io.EOF), triggering the error path.
-		_, _ = io.WriteString(server1.respWriter, "Content-Length: NaN\r\n\r\n")
+		// Write malformed NDJSON to trigger protocol error.
+		_, _ = io.WriteString(server1.respWriter, "{bad json\n")
 		_ = server1.respWriter.Close()
 		corruptDone <- nil
 	}()
@@ -391,7 +871,11 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 	// Server2: respond normally.
 	normalDone := make(chan error, 1)
 	go func() {
-		if err := server2.drainOneRequest(); err != nil {
+		if err := server2.handleHandshake("thread-normal-2"); err != nil {
+			normalDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server2.readRequest(); err != nil { // turn/start
 			normalDone <- err
 			return
 		}
@@ -448,8 +932,8 @@ func TestCodexAppServer_BlocksTurnUntilRecovered(t *testing.T) {
 // ─── Criterion 2: basic Stream event mapping ─────────────────────────────────
 
 // TestCodexAppServer_EOFWithoutDone_ResetsProcess verifies that when the server
-// closes stdout without sending a "done" frame, the backend clears its process
-// reference so the next turn spawns a fresh process (not the dead one).
+// closes stdout without sending a "turn/completed" frame, the backend clears its
+// process reference so the next turn spawns a fresh process (not the dead one).
 func TestCodexAppServer_EOFWithoutDone_ResetsProcess(t *testing.T) {
 	b := newTestBackend()
 
@@ -474,10 +958,14 @@ func TestCodexAppServer_EOFWithoutDone_ResetsProcess(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Turn 1: server reads request then closes stdout without sending done.
+	// Turn 1: server handles handshake and turn/start then closes stdout without done.
 	eofDone := make(chan error, 1)
 	go func() {
-		if err := server1.drainOneRequest(); err != nil {
+		if err := server1.handleHandshake("thread-eof-1"); err != nil {
+			eofDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server1.readRequest(); err != nil { // turn/start
 			eofDone <- err
 			return
 		}
@@ -497,7 +985,11 @@ func TestCodexAppServer_EOFWithoutDone_ResetsProcess(t *testing.T) {
 	// Turn 2: server responds normally.
 	normalDone := make(chan error, 1)
 	go func() {
-		if err := server2.drainOneRequest(); err != nil {
+		if err := server2.handleHandshake("thread-eof-2"); err != nil {
+			normalDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server2.readRequest(); err != nil { // turn/start
 			normalDone <- err
 			return
 		}
@@ -528,8 +1020,8 @@ func TestCodexAppServer_EOFWithoutDone_ResetsProcess(t *testing.T) {
 	}
 }
 
-// TestCodexAppServer_StreamMapsTextEvents verifies that text_start,
-// text_delta, text_end, and done notifications from the server are mapped to
+// TestCodexAppServer_StreamMapsTextEvents verifies that item/agentMessage/delta,
+// item/completed, and turn/completed notifications from the server are mapped to
 // the correct normalized event sequence.
 func TestCodexAppServer_StreamMapsTextEvents(t *testing.T) {
 	b := newTestBackend()
@@ -541,7 +1033,11 @@ func TestCodexAppServer_StreamMapsTextEvents(t *testing.T) {
 
 	serverDone := make(chan error, 1)
 	go func() {
-		if err := server.drainOneRequest(); err != nil {
+		if err := server.handleHandshake("thread-text-test"); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil { // turn/start
 			serverDone <- err
 			return
 		}
@@ -782,11 +1278,21 @@ func TestCodexAppServer_ContextCancelDuringStream(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Server: drain request, then hang (never responds).
+	// Server: handle handshake, drain turn/start request, then hang (never responds).
+	// Pipe write errors after context cancellation are expected and tolerated.
 	serverDone := make(chan error, 1)
 	go func() {
-		if err := server.drainOneRequest(); err != nil {
-			serverDone <- err
+		if err := server.handleHandshake("thread-cancel-test"); err != nil {
+			// Pipe errors are expected when the backend terminates the process on
+			// context cancellation — treat them as clean shutdown.
+			_ = server.respWriter.Close()
+			serverDone <- nil
+			return
+		}
+		if _, err := server.readRequest(); err != nil { // turn/start
+			// Tolerate pipe errors from cancellation.
+			_ = server.respWriter.Close()
+			serverDone <- nil
 			return
 		}
 		// Hang until stdin closes (cancel → process terminates → stdin closed).

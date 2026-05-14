@@ -16,12 +16,9 @@ import (
 	"github.com/php-workx/fabrikk/llmclient"
 )
 
-// maxCodexHeaderBytes is the per-frame header size cap for the Codex
-// app-server JSON-RPC framing. 4 KiB is generous for LSP headers.
-const maxCodexHeaderBytes = 4096
-
-// maxCodexBodyBytes is the per-frame body size cap. 8 MiB accommodates large
-// tool call arguments while bounding memory allocation from a corrupt peer.
+// maxCodexBodyBytes is the per-line body size cap for NDJSON framing. 8 MiB
+// accommodates large tool call arguments while bounding memory allocation from
+// a corrupt peer.
 const maxCodexBodyBytes = 8 << 20
 
 // ─── Persistent process wrapper ──────────────────────────────────────────────
@@ -34,6 +31,10 @@ type codexProcess struct {
 	stdin        io.WriteCloser
 	stdout       *bufio.Reader
 	stdoutCloser io.Closer
+
+	// threadID is set after the initialize/thread/start handshake completes.
+	// It is reused for all subsequent turn/start requests on this process.
+	threadID string
 }
 
 // terminate sends a termination signal to the process tree (when sup != nil)
@@ -132,7 +133,7 @@ func startCodexAppServer(ctx context.Context, info CliInfo, env []string) (*code
 // ─── JSON-RPC protocol types ──────────────────────────────────────────────────
 
 // codexRPCFrame is the minimal decoded envelope for routing incoming JSON-RPC
-// 2.0 frames.
+// 2.0 frames over NDJSON transport.
 type codexRPCFrame struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -147,17 +148,89 @@ type codexRPCError struct {
 	Message string `json:"message"`
 }
 
-// codexEventParams is the expected shape of a notification params object.
-//
-// [VERIFY DURING IMPLEMENTATION] — the exact field names must be confirmed
-// against a running codex app-server. Unknown notification types are silently
-// skipped so that future protocol additions do not break existing streams.
-type codexEventParams struct {
-	Type       string `json:"type"`
-	ContentIdx int    `json:"content_index"`
-	Delta      string `json:"delta,omitempty"`
-	Content    string `json:"content,omitempty"`
-	StopReason string `json:"stop_reason,omitempty"`
+// ─── Inbound notification param structs ──────────────────────────────────────
+
+// codexThreadStartedParams is the params shape for the "thread/started"
+// notification. The thread.id field becomes the threadID for all subsequent
+// turn/start requests.
+type codexThreadStartedParams struct {
+	Thread struct {
+		ID string `json:"id"`
+	} `json:"thread"`
+}
+
+// codexAgentMessageDeltaParams is the params shape for the
+// "item/agentMessage/delta" notification.
+type codexAgentMessageDeltaParams struct {
+	ItemID   string `json:"itemId"`
+	Delta    string `json:"delta"`
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+}
+
+// codexThreadItem is a completed item carried by "item/completed" params.
+type codexThreadItem struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// codexItemCompletedParams is the params shape for the "item/completed"
+// notification.
+type codexItemCompletedParams struct {
+	Item     codexThreadItem `json:"item"`
+	ThreadID string          `json:"threadId"`
+	TurnID   string          `json:"turnId"`
+}
+
+// codexErrorParams is the params shape for the "error" notification.
+type codexErrorParams struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	WillRetry bool   `json:"willRetry"`
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+}
+
+// ─── Outbound request helpers ─────────────────────────────────────────────────
+
+// codexInitializeParams is the params for the "initialize" request.
+type codexInitializeParams struct {
+	ClientInfo   codexClientInfo `json:"clientInfo"`
+	Capabilities any             `json:"capabilities"`
+}
+
+type codexClientInfo struct {
+	Name    string  `json:"name"`
+	Title   *string `json:"title"`
+	Version string  `json:"version"`
+}
+
+// codexThreadStartParams is the params for the "thread/start" request.
+type codexThreadStartParams struct {
+	Model string `json:"model,omitempty"`
+}
+
+// codexTurnStartParams is the params for the "turn/start" request.
+type codexTurnStartParams struct {
+	ThreadID string           `json:"threadId"`
+	Input    []codexTurnInput `json:"input"`
+	Model    string           `json:"model,omitempty"`
+}
+
+type codexTurnInput struct {
+	Type         string `json:"type"`
+	Text         string `json:"text"`
+	TextElements []any  `json:"text_elements"`
+}
+
+// codexRPCRequest is the wire format for an outbound JSON-RPC 2.0 request.
+type codexRPCRequest struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      any    `json:"id,omitempty"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
 }
 
 // ─── Backend ──────────────────────────────────────────────────────────────────
@@ -169,10 +242,12 @@ type codexEventParams struct {
 // A single stream turn proceeds as follows:
 //  1. Acquire the turn semaphore.
 //  2. Ensure the process is running and healthy; start or restart if needed.
-//  3. Write a JSON-RPC `turn` request frame to process stdin.
-//  4. Read JSON-RPC notification frames from process stdout, mapping each to a
+//  3. On a fresh process: run the initialize/thread/start handshake to obtain
+//     a threadID.
+//  4. Write a JSON-RPC `turn/start` request frame to process stdin.
+//  5. Read JSON-RPC notification frames from process stdout, mapping each to a
 //     normalized llmclient.Event.
-//  5. Emit exactly one terminal done or error event, then release the semaphore.
+//  6. Emit exactly one terminal done or error event, then release the semaphore.
 //
 // Protocol corruption (malformed framing, JSON parse failure, unexpected EOF)
 // emits exactly one terminal error event, terminates the subprocess, and marks
@@ -267,8 +342,9 @@ func (b *CodexAppServerBackend) Close() error {
 	return nil
 }
 
-// Stream acquires the turn semaphore, ensures the process is running, writes a
-// JSON-RPC `turn` request, and returns a channel of normalized Event values.
+// Stream acquires the turn semaphore, ensures the process is running, runs the
+// per-process handshake on a fresh process, writes a JSON-RPC `turn/start`
+// request, and returns a channel of normalized Event values.
 //
 // The channel is closed after exactly one terminal event (done or error).
 // Cancelling ctx terminates the in-flight read loop and emits StopCancelled.
@@ -310,10 +386,20 @@ func (b *CodexAppServerBackend) Stream(
 		defer func() { b.turnCh <- struct{}{} }() // always release semaphore
 		defer te.close()                          // safety guard
 
-		proc, err := b.ensureProcess(streamCtx, cfg)
+		proc, fresh, err := b.ensureProcess(streamCtx, cfg)
 		if err != nil {
 			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: ensure process: %w", err))
 			return
+		}
+
+		// On a fresh process, run the initialize/thread/start handshake to
+		// obtain a threadID before sending any turn.
+		if fresh {
+			if err := b.runHandshake(streamCtx, proc, cfg); err != nil {
+				b.restartAfterProtocolError(err)
+				te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: handshake: %w", err))
+				return
+			}
 		}
 
 		cancelWatchDone := make(chan struct{})
@@ -329,26 +415,39 @@ func (b *CodexAppServerBackend) Stream(
 		id := b.nextID.Add(1)
 		prompt := llmclient.LastUserMessage(input)
 
-		params := map[string]any{
-			"message": prompt,
-		}
-		if cfg.SessionID != "" {
-			params["session_id"] = cfg.SessionID
+		turnParams := codexTurnStartParams{
+			ThreadID: proc.threadID,
+			Input: []codexTurnInput{
+				{
+					Type:         "text",
+					Text:         prompt,
+					TextElements: []any{},
+				},
+			},
 		}
 		if cfg.Model != "" {
-			params["model"] = cfg.Model
+			turnParams.Model = cfg.Model
 		}
 
-		if err := internal.WriteRequest(proc.stdin, id, "turn", params); err != nil {
+		req := codexRPCRequest{
+			JSONRPC: "2.0",
+			ID:      id,
+			Method:  "turn/start",
+			Params:  turnParams,
+		}
+		if err := internal.WriteLine(proc.stdin, req); err != nil {
 			b.restartAfterProtocolError(err)
-			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: write turn request: %w", err))
+			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: write turn/start: %w", err))
 			return
 		}
 
-		// Emit start event. The session ID is echoed from options; the server
-		// may include a canonical session ID in a future notification.
+		// Emit start event. The session ID is captured from thread/started.
 		fidelity := codexAppServerFidelity(cfg)
-		if !emit(streamCtx, ch, startEvent(cfg.SessionID, fidelity)) {
+		sessionID := proc.threadID
+		if cfg.SessionID != "" {
+			sessionID = cfg.SessionID
+		}
+		if !emit(streamCtx, ch, startEvent(sessionID, fidelity)) {
 			b.restartAfterProtocolError(streamCtx.Err())
 			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
 			return
@@ -360,9 +459,139 @@ func (b *CodexAppServerBackend) Stream(
 	return observeStream(b.Name(), model, started, ch), nil
 }
 
-// ensureProcess returns the current healthy process, or starts a fresh one if
-// none is running. Caller must not hold procMu.
-func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient.RequestConfig) (*codexProcess, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
+// runHandshake executes the per-process initialize → initialized → thread/start
+// sequence, capturing the threadID from the thread/started notification.
+// Called exactly once per fresh process, while holding the turn semaphore.
+func (b *CodexAppServerBackend) runHandshake(ctx context.Context, proc *codexProcess, cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig value avoids mutation.
+	// 1. Send initialize request (id=1).
+	initReq := codexRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: codexInitializeParams{
+			ClientInfo: codexClientInfo{
+				Name:    "fabrikk",
+				Title:   nil,
+				Version: "1.0.0",
+			},
+			Capabilities: nil,
+		},
+	}
+	if err := internal.WriteLine(proc.stdin, initReq); err != nil {
+		return fmt.Errorf("write initialize: %w", err)
+	}
+
+	// 2. Read initialize response (expect a result frame with our id).
+	if err := b.readUntilResponse(ctx, proc, 1); err != nil {
+		return fmt.Errorf("read initialize response: %w", err)
+	}
+
+	// 3. Send initialized notification (no id).
+	initedNotif := codexRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "initialized",
+	}
+	if err := internal.WriteLine(proc.stdin, initedNotif); err != nil {
+		return fmt.Errorf("write initialized notification: %w", err)
+	}
+
+	// 4. Send thread/start request (id=2).
+	threadStartParams := codexThreadStartParams{}
+	if cfg.Model != "" {
+		threadStartParams.Model = cfg.Model
+	}
+	threadStartReq := codexRPCRequest{
+		JSONRPC: "2.0",
+		ID:      2,
+		Method:  "thread/start",
+		Params:  threadStartParams,
+	}
+	if err := internal.WriteLine(proc.stdin, threadStartReq); err != nil {
+		return fmt.Errorf("write thread/start: %w", err)
+	}
+
+	// 5. Read frames until we see the thread/started notification; capture threadID.
+	threadID, err := b.readUntilThreadStarted(ctx, proc)
+	if err != nil {
+		return fmt.Errorf("read thread/started: %w", err)
+	}
+
+	proc.threadID = threadID
+	return nil
+}
+
+// readUntilResponse reads NDJSON frames until it sees a response frame with
+// the given id (or a JSON-RPC error response). Notifications are skipped.
+func (b *CodexAppServerBackend) readUntilResponse(ctx context.Context, proc *codexProcess, wantID int64) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line, err := internal.ReadLine(proc.stdout, maxCodexBodyBytes)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return io.ErrUnexpectedEOF
+			}
+			return fmt.Errorf("read frame: %w", err)
+		}
+		var frame codexRPCFrame
+		if jsonErr := json.Unmarshal(line, &frame); jsonErr != nil {
+			return fmt.Errorf("parse frame: %w", jsonErr)
+		}
+		if frame.Error != nil {
+			return fmt.Errorf("RPC error %d: %s", frame.Error.Code, frame.Error.Message)
+		}
+		// Skip notifications (no ID).
+		if len(frame.ID) == 0 || string(frame.ID) == "null" {
+			continue
+		}
+		// Check if this is the response we want.
+		var gotID int64
+		if jsonErr := json.Unmarshal(frame.ID, &gotID); jsonErr == nil && gotID == wantID {
+			return nil
+		}
+	}
+}
+
+// readUntilThreadStarted reads frames until the "thread/started" notification
+// arrives and returns the thread ID from params.thread.id.
+func (b *CodexAppServerBackend) readUntilThreadStarted(ctx context.Context, proc *codexProcess) (string, error) {
+	for {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		line, err := internal.ReadLine(proc.stdout, maxCodexBodyBytes)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return "", io.ErrUnexpectedEOF
+			}
+			return "", fmt.Errorf("read frame: %w", err)
+		}
+		var frame codexRPCFrame
+		if jsonErr := json.Unmarshal(line, &frame); jsonErr != nil {
+			return "", fmt.Errorf("parse frame: %w", jsonErr)
+		}
+		if frame.Error != nil {
+			return "", fmt.Errorf("RPC error %d: %s", frame.Error.Code, frame.Error.Message)
+		}
+		if frame.Method == "thread/started" {
+			var p codexThreadStartedParams
+			if jsonErr := json.Unmarshal(frame.Params, &p); jsonErr != nil {
+				return "", fmt.Errorf("parse thread/started params: %w", jsonErr)
+			}
+			if p.Thread.ID == "" {
+				return "", fmt.Errorf("thread/started: empty thread id")
+			}
+			return p.Thread.ID, nil
+		}
+		// Skip other notifications/responses during handshake.
+	}
+}
+
+// ensureProcess returns the current healthy process (and fresh=false), or
+// starts a fresh one (and fresh=true) if none is running. Caller must not hold
+// procMu.
+func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient.RequestConfig) (*codexProcess, bool, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
 	b.procMu.Lock()
 	defer b.procMu.Unlock()
 
@@ -378,7 +607,7 @@ func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient
 	}
 
 	if b.proc != nil && b.healthy && b.proc.alive() && b.routingKey == routingKey {
-		return b.proc, nil
+		return b.proc, false, nil
 	}
 
 	// Tear down any stale process before starting fresh.
@@ -390,14 +619,14 @@ func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient
 
 	proc, err := b.procFactory(ctx, env)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	b.proc = proc
 	b.healthy = true
 	b.routingKey = routingKey
 
-	return proc, nil
+	return proc, true, nil
 }
 
 // restartAfterProtocolError terminates the current process, marks the backend
@@ -421,9 +650,9 @@ func (b *CodexAppServerBackend) restartAfterProtocolError(err error) {
 	b.healthy = false
 }
 
-// readTurnEvents reads JSON-RPC notification frames from proc.stdout, mapping
-// each to a normalized llmclient.Event, until a terminal "done" notification
-// arrives or an error occurs.
+// readTurnEvents reads NDJSON notification frames from proc.stdout, mapping
+// each to a normalized llmclient.Event, until a terminal "turn/completed"
+// notification arrives or an error occurs.
 //
 // Exactly one terminal event is emitted via te. On protocol error,
 // restartAfterProtocolError is called before te.error.
@@ -434,7 +663,10 @@ func (b *CodexAppServerBackend) readTurnEvents(
 	te *terminalEmitter,
 ) {
 	assembledMsg := &llmclient.AssistantMessage{Role: "assistant"}
-	contentIndex := 0
+
+	// itemIndex maps itemId → contentIndex for tracking per-item content blocks.
+	itemIndex := make(map[string]int)
+	nextIndex := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -443,7 +675,7 @@ func (b *CodexAppServerBackend) readTurnEvents(
 			return
 		}
 
-		body, err := internal.ReadFrame(proc.stdout, maxCodexHeaderBytes, maxCodexBodyBytes)
+		line, err := internal.ReadLine(proc.stdout, maxCodexBodyBytes)
 		if err != nil {
 			if ctx.Err() != nil {
 				b.restartAfterProtocolError(ctx.Err())
@@ -451,8 +683,8 @@ func (b *CodexAppServerBackend) readTurnEvents(
 				return
 			}
 			if errors.Is(err, io.EOF) {
-				// Process closed stdout without a done notification. Treat as
-				// end-of-turn, but reset the process reference so the next turn
+				// Process closed stdout without a turn/completed notification. Treat
+				// as end-of-turn, but reset the process reference so the next turn
 				// spawns a fresh process rather than reusing the now-dead one.
 				b.restartAfterProtocolError(io.EOF)
 				te.done(ctx, assembledMsg, nil, llmclient.StopEndTurn)
@@ -466,7 +698,7 @@ func (b *CodexAppServerBackend) readTurnEvents(
 		}
 
 		var frame codexRPCFrame
-		if jsonErr := json.Unmarshal(body, &frame); jsonErr != nil {
+		if jsonErr := json.Unmarshal(line, &frame); jsonErr != nil {
 			protocolErr := fmt.Errorf("llmcli codex-appserver: parse frame JSON: %w", jsonErr)
 			b.restartAfterProtocolError(protocolErr)
 			te.error(ctx, protocolErr)
@@ -482,7 +714,7 @@ func (b *CodexAppServerBackend) readTurnEvents(
 			return
 		}
 
-		done := b.dispatchCodexFrame(ctx, frame, ch, te, &contentIndex, assembledMsg)
+		done := b.dispatchCodexFrame(ctx, frame, ch, te, &nextIndex, itemIndex, assembledMsg)
 		if done {
 			return
 		}
@@ -497,68 +729,117 @@ func (b *CodexAppServerBackend) dispatchCodexFrame(
 	frame codexRPCFrame,
 	ch chan<- llmclient.Event,
 	te *terminalEmitter,
-	contentIndex *int,
+	nextIndex *int,
+	itemIndex map[string]int,
 	assembledMsg *llmclient.AssistantMessage,
 ) (done bool) {
-	// Frames without a Method are responses to our requests (e.g. to turn).
-	// They are not streaming notifications; skip them here.
 	if frame.Method == "" {
 		return false
 	}
+	switch frame.Method {
+	case "thread/started", "turn/started":
+		return false
+	case "item/agentMessage/delta":
+		return b.handleAgentMessageDelta(ctx, frame, ch, te, nextIndex, itemIndex)
+	case "item/completed":
+		return b.handleItemCompleted(ctx, frame, ch, te, nextIndex, itemIndex, assembledMsg)
+	case "turn/completed":
+		if assembledMsg != nil {
+			assembledMsg.StopReason = llmclient.StopEndTurn
+		}
+		te.done(ctx, assembledMsg, nil, llmclient.StopEndTurn)
+		return true
+	case "error":
+		return b.handleErrorNotification(ctx, frame, te)
+	}
+	return false
+}
 
-	var params codexEventParams
+func (b *CodexAppServerBackend) handleAgentMessageDelta(
+	ctx context.Context,
+	frame codexRPCFrame,
+	ch chan<- llmclient.Event,
+	te *terminalEmitter,
+	nextIndex *int,
+	itemIndex map[string]int,
+) bool {
+	var p codexAgentMessageDeltaParams
 	if len(frame.Params) > 0 {
-		// Parse failure → skip unknown notification gracefully.
-		if err := json.Unmarshal(frame.Params, &params); err != nil {
+		if err := json.Unmarshal(frame.Params, &p); err != nil {
 			return false
 		}
 	}
-
-	switch frame.Method {
-	case "done":
-		reason := llmclient.StopEndTurn
-		if params.StopReason != "" {
-			reason = llmclient.StopReason(params.StopReason)
-		}
-		if assembledMsg != nil {
-			assembledMsg.StopReason = reason
-		}
-		te.done(ctx, assembledMsg, nil, reason)
-		return true
-
-	case "text_start":
-		idx := *contentIndex
+	idx, seen := itemIndex[p.ItemID]
+	if !seen {
+		idx = *nextIndex
+		itemIndex[p.ItemID] = idx
+		*nextIndex++
 		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextStart, ContentIndex: idx}) {
 			te.done(ctx, nil, nil, llmclient.StopCancelled)
 			return true
 		}
-
-	case "text_delta":
-		idx := *contentIndex
-		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextDelta, ContentIndex: idx, Delta: params.Delta}) {
-			te.done(ctx, nil, nil, llmclient.StopCancelled)
-			return true
-		}
-
-	case "text_end":
-		idx := *contentIndex
-		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx, Content: params.Content}) {
-			te.done(ctx, nil, nil, llmclient.StopCancelled)
-			return true
-		}
-		if assembledMsg != nil {
-			assembledMsg.Content = append(assembledMsg.Content, llmclient.ContentBlock{
-				Type: llmclient.ContentText,
-				Text: params.Content,
-			})
-		}
-		*contentIndex++
-
-	default:
-		// Unknown notification type — skip gracefully.
 	}
-
+	if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextDelta, ContentIndex: idx, Delta: p.Delta}) {
+		te.done(ctx, nil, nil, llmclient.StopCancelled)
+		return true
+	}
 	return false
+}
+
+func (b *CodexAppServerBackend) handleItemCompleted(
+	ctx context.Context,
+	frame codexRPCFrame,
+	ch chan<- llmclient.Event,
+	te *terminalEmitter,
+	nextIndex *int,
+	itemIndex map[string]int,
+	assembledMsg *llmclient.AssistantMessage,
+) bool {
+	var p codexItemCompletedParams
+	if len(frame.Params) > 0 {
+		if err := json.Unmarshal(frame.Params, &p); err != nil {
+			return false
+		}
+	}
+	if p.Item.Type != "agentMessage" {
+		return false
+	}
+	idx, seen := itemIndex[p.Item.ID]
+	if !seen {
+		idx = *nextIndex
+		itemIndex[p.Item.ID] = idx
+		*nextIndex++
+	}
+	if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx, Content: p.Item.Text}) {
+		te.done(ctx, nil, nil, llmclient.StopCancelled)
+		return true
+	}
+	if assembledMsg != nil {
+		assembledMsg.Content = append(assembledMsg.Content, llmclient.ContentBlock{
+			Type: llmclient.ContentText,
+			Text: p.Item.Text,
+		})
+	}
+	return false
+}
+
+func (b *CodexAppServerBackend) handleErrorNotification(
+	ctx context.Context,
+	frame codexRPCFrame,
+	te *terminalEmitter,
+) bool {
+	var p codexErrorParams
+	if len(frame.Params) > 0 {
+		_ = json.Unmarshal(frame.Params, &p)
+	}
+	msg := p.Error.Message
+	if msg == "" {
+		msg = "codex app-server: unknown error"
+	}
+	protocolErr := fmt.Errorf("llmcli codex-appserver: %s", msg)
+	b.restartAfterProtocolError(protocolErr)
+	te.error(ctx, protocolErr)
+	return true
 }
 
 // ─── Options ──────────────────────────────────────────────────────────────────
