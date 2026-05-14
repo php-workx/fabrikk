@@ -507,10 +507,12 @@ func claudeOnSystemFrame(
 ) error {
 	if frame.Subtype == "init" {
 		state.sessionID = frame.SessionID
-		if !emit(ctx, out, startEvent(state.sessionID, state.startFidelity)) {
-			return ctx.Err()
+		if !state.startEmitted {
+			if !emit(ctx, out, startEvent(state.sessionID, state.startFidelity)) {
+				return ctx.Err()
+			}
+			state.startEmitted = true
 		}
-		state.startEmitted = true
 		state.assembledMsg = &llmclient.AssistantMessage{
 			Role:  "assistant",
 			Model: frame.Model,

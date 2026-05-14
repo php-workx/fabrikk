@@ -49,13 +49,10 @@ actionlint:
 
 # --- Security ---
 
-# Scan for leaked secrets
+# Scan for leaked secrets (fails if betterleaks is not installed)
 betterleaks:
-    @if command -v betterleaks >/dev/null 2>&1; then \
-        betterleaks git --no-banner; \
-    else \
-        echo "warning: betterleaks not installed, skipping secret scan"; \
-    fi
+    @command -v betterleaks >/dev/null 2>&1 || (echo "error: betterleaks not installed — run: brew install leaktk/formulae/betterleaks"; exit 1)
+    @betterleaks git --no-banner
 
 # Scan for known vulnerabilities in dependencies
 vuln:

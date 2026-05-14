@@ -302,6 +302,13 @@ type CodexAppServerBackend struct {
 	healthy    bool          // false after protocol corruption; reset on restart
 	routingKey string
 
+	// procCtx is a long-lived context that outlasts individual stream turns.
+	// It is cancelled in Close to tear down the persistent subprocess.
+	// Passing procCtx (not the per-turn streamCtx) to procFactory prevents the
+	// persistent process from being killed at the end of each turn.
+	procCtx       context.Context
+	cancelProcCtx context.CancelFunc
+
 	// nextID is incremented atomically for each outbound request.
 	nextID atomic.Int64
 
@@ -319,9 +326,12 @@ type CodexAppServerBackend struct {
 // NewCodexAppServerBackend constructs a CodexAppServerBackend that uses the
 // detected CliInfo to spawn `codex app-server --listen stdio://` on demand.
 func NewCodexAppServerBackend(info CliInfo) *CodexAppServerBackend {
+	procCtx, cancelProcCtx := context.WithCancel(context.Background())
 	b := &CodexAppServerBackend{
-		CliBackend: NewCliBackend("codex-appserver", info),
-		turnCh:     make(chan struct{}, 1),
+		CliBackend:    NewCliBackend("codex-appserver", info),
+		turnCh:        make(chan struct{}, 1),
+		procCtx:       procCtx,
+		cancelProcCtx: cancelProcCtx,
 	}
 	b.procFactory = func(ctx context.Context, env []string) (*codexProcess, error) {
 		return startCodexAppServer(ctx, b.info, env)
@@ -364,6 +374,8 @@ func (b *CodexAppServerBackend) Capabilities() llmclient.Capabilities {
 // Close terminates the persistent subprocess and releases all resources.
 // Safe to call multiple times or concurrently. Blocks until the process exits.
 func (b *CodexAppServerBackend) Close() error {
+	b.cancelProcCtx()
+
 	b.procMu.Lock()
 	defer b.procMu.Unlock()
 
@@ -415,7 +427,7 @@ func (b *CodexAppServerBackend) Stream(
 	}
 
 	// Ensure the process is running and healthy; start or restart if needed.
-	proc, fresh, err := b.ensureProcess(streamCtx, cfg)
+	proc, fresh, err := b.ensureProcess(cfg)
 	if err != nil {
 		b.turnCh <- struct{}{}
 		cancelTimeout()
@@ -640,7 +652,7 @@ func (b *CodexAppServerBackend) readUntilThreadStarted(ctx context.Context, proc
 // ensureProcess returns the current healthy process (and fresh=false), or
 // starts a fresh one (and fresh=true) if none is running. Caller must not hold
 // procMu.
-func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient.RequestConfig) (*codexProcess, bool, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
+func (b *CodexAppServerBackend) ensureProcess(cfg llmclient.RequestConfig) (*codexProcess, bool, error) { //nolint:gocritic // RequestConfig value avoids mutation across persistent process setup.
 	b.procMu.Lock()
 	defer b.procMu.Unlock()
 
@@ -666,7 +678,7 @@ func (b *CodexAppServerBackend) ensureProcess(ctx context.Context, cfg llmclient
 		b.proc = nil
 	}
 
-	proc, err := b.procFactory(ctx, env)
+	proc, err := b.procFactory(b.procCtx, env)
 	if err != nil {
 		return nil, false, err
 	}

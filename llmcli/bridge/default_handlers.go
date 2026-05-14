@@ -110,7 +110,10 @@ func collectInput(req Request) (*llmclient.Context, []llmclient.Option, error) {
 	var payload collectRequest
 	if len(req.Payload) > 0 {
 		if err := json.Unmarshal(req.Payload, &payload); err != nil {
-			return nil, nil, fmt.Errorf("invalid payload: %w", err)
+			return nil, nil, &llmclient.EventErrorError{
+				Type:    llmclient.ErrTypeBadRequest,
+				Message: fmt.Sprintf("invalid payload: %s", err),
+			}
 		}
 	}
 
@@ -118,11 +121,17 @@ func collectInput(req Request) (*llmclient.Context, []llmclient.Option, error) {
 	if len(req.Context) > 0 {
 		input = new(llmclient.Context)
 		if err := json.Unmarshal(req.Context, input); err != nil {
-			return nil, nil, fmt.Errorf("invalid context: %w", err)
+			return nil, nil, &llmclient.EventErrorError{
+				Type:    llmclient.ErrTypeBadRequest,
+				Message: fmt.Sprintf("invalid context: %s", err),
+			}
 		}
 	}
 	if input == nil {
-		return nil, nil, fmt.Errorf("%s: context is required", llmclient.ErrTypeBadRequest)
+		return nil, nil, &llmclient.EventErrorError{
+			Type:    llmclient.ErrTypeBadRequest,
+			Message: "context is required",
+		}
 	}
 
 	return input, collectOptions(payload), nil

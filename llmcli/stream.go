@@ -22,8 +22,8 @@ type parserFunc func(ctx context.Context, out chan<- llmclient.Event, te *termin
 // structuredStream returns a channel of events for a single backend turn.
 // It emits the start event carrying the provided fidelity, invokes parseFn in
 // a goroutine, then emits exactly one terminal event based on parseFn's outcome.
-// Observer hooks (via DefaultObserver) fire at stream start, per-event, and at
-// stream end.
+// Observer hooks (via [GetDefaultObserver]) fire at stream start, per-event,
+// and at stream end.
 //
 // onClose is called (when non-nil) after parseFn returns and after exactly one
 // terminal event has been emitted. Use it for cleanup such as releasing

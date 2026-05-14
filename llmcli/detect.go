@@ -57,7 +57,7 @@ func versionWarning(name, version string) string {
 // compareSemver compares two semantic version strings. It strips pre-release
 // and build-metadata suffixes (anything after '-' or '+'), splits on '.',
 // and compares up to 3 numeric parts. Returns -1 if a < b, 0 if equal, 1 if
-// a > b. Non-numeric or unparseable segments are treated as 0 (no warning).
+// a > b. Non-numeric or unparseable segments are treated as 0.
 func compareSemver(a, b string) int {
 	normalize := func(v string) string {
 		if i := strings.IndexAny(v, "-+"); i >= 0 {

@@ -82,17 +82,9 @@ func init() {
 	_defaultObserver.Store(observerHolder{NoopObserver{}})
 }
 
-// DefaultObserver is the package-level [Observer] used when no custom observer
-// is configured. Direct assignment is allowed at process startup; for concurrent
-// use (e.g. tests that swap the observer between calls) prefer [SetDefaultObserver].
-//
-// Deprecated: Use [SetDefaultObserver] and [GetDefaultObserver] for race safety.
-var DefaultObserver Observer = NoopObserver{} //nolint:gochecknoglobals // backward-compat export; internal code uses _defaultObserver.
-
 // SetDefaultObserver atomically sets the package-level observer.
 func SetDefaultObserver(o Observer) {
 	_defaultObserver.Store(observerHolder{o})
-	DefaultObserver = o
 }
 
 // GetDefaultObserver atomically returns the package-level observer.

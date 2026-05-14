@@ -323,7 +323,20 @@ func (b *ClaudeIPCBackend) startClaudeIPCProcess(cfg llmclient.RequestConfig, in
 	initCtx, cancelInit := context.WithTimeout(procCtx, initTimeout)
 	defer cancelInit()
 
+	// Kill the process if initCtx expires so that the blocking ReadBoundedLine
+	// call in waitForClaudeIPCReady unblocks via EOF rather than hanging.
+	stopKill := make(chan struct{})
+	go func() {
+		select {
+		case <-initCtx.Done():
+			cancel() // cancel procCtx → supervisor terminates the process
+		case <-stopKill:
+		}
+	}()
+
 	sessionID, err := waitForClaudeIPCReady(initCtx, sup.Stdout)
+	close(stopKill) // stop the kill goroutine; no-op if it already fired
+
 	if err != nil {
 		cancel()
 		_ = stdinW.Close()
@@ -347,45 +360,40 @@ func claudeIPCInitTimeout() time.Duration {
 }
 
 // waitForClaudeIPCReady reads stdout until the system/init frame arrives and
-// returns the session_id it carries. Returns an error if ctx is cancelled or
-// the stream closes before the init frame arrives.
+// returns the session_id it carries. Returns an error if the stream closes
+// before the init frame arrives.
 //
-// Each ReadBoundedLine call runs in a goroutine so that ctx cancellation
-// (including init-timeout expiry) is honoured even while the read is blocked.
+// ctx is checked after each read error to distinguish a timeout-driven process
+// kill (ctx.Err() non-nil) from an unexpected EOF. The caller is responsible
+// for killing the process when ctx expires so that the blocking
+// ReadBoundedLine call unblocks via EOF; see startClaudeIPCProcess.
 func waitForClaudeIPCReady(ctx context.Context, r *bufio.Reader) (string, error) {
-	type readResult struct {
-		line []byte
-		err  error
-	}
 	for {
-		rrCh := make(chan readResult, 1)
-		go func() {
-			line, err := internal.ReadBoundedLine(r, maxClaudeLineBytes)
-			rrCh <- readResult{line, err}
-		}()
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case rr := <-rrCh:
-			if rr.err != nil {
-				if errors.Is(rr.err, io.EOF) {
-					return "", io.ErrUnexpectedEOF
-				}
-				if errors.Is(rr.err, internal.ErrLineTooLong) {
-					continue // oversized line — skip and keep scanning
-				}
-				return "", rr.err
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		line, err := internal.ReadBoundedLine(r, maxClaudeLineBytes)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
 			}
-			if len(rr.line) == 0 {
-				continue
+			if errors.Is(err, io.EOF) {
+				return "", io.ErrUnexpectedEOF
 			}
-			var frame claudeFrame
-			if json.Unmarshal(rr.line, &frame) != nil {
-				continue
+			if errors.Is(err, internal.ErrLineTooLong) {
+				continue // oversized line — skip and keep scanning
 			}
-			if frame.Type == "system" && frame.Subtype == "init" {
-				return frame.SessionID, nil
-			}
+			return "", err
+		}
+		if len(line) == 0 {
+			continue
+		}
+		var frame claudeFrame
+		if json.Unmarshal(line, &frame) != nil {
+			continue
+		}
+		if frame.Type == "system" && frame.Subtype == "init" {
+			return frame.SessionID, nil
 		}
 	}
 }

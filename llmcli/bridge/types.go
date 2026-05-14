@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 
@@ -47,8 +48,11 @@ type HandlerFunc struct {
 // Op returns the operation name handled by h.
 func (h HandlerFunc) Op() string { return h.Operation }
 
-// Handle calls h.Fn.
+// Handle calls h.Fn. Returns an error if h.Fn is nil.
 func (h HandlerFunc) Handle(ctx context.Context, req Request, deps Deps) (json.RawMessage, error) {
+	if h.Fn == nil {
+		return nil, fmt.Errorf("handler %q has no Fn", h.Operation)
+	}
 	return h.Fn(ctx, req, deps)
 }
 
