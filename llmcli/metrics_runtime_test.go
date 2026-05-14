@@ -78,9 +78,9 @@ func TestCliBackendAvailable_ReportsObserver(t *testing.T) {
 	_ = file.Close()
 
 	rec := &recordingObserver{}
-	old := DefaultObserver
-	DefaultObserver = rec
-	t.Cleanup(func() { DefaultObserver = old })
+	old := GetDefaultObserver()
+	SetDefaultObserver(rec)
+	t.Cleanup(func() { SetDefaultObserver(old) })
 
 	b := NewCliBackend("test-backend", CliInfo{Path: file.Name()})
 	if !b.Available() {
@@ -110,9 +110,9 @@ func TestOmpRPCAvailable_ReportsObserver(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	rec := &recordingObserver{}
-	old := DefaultObserver
-	DefaultObserver = rec
-	t.Cleanup(func() { DefaultObserver = old })
+	old := GetDefaultObserver()
+	SetDefaultObserver(rec)
+	t.Cleanup(func() { SetDefaultObserver(old) })
 
 	b := NewOmpRPCBackend(CliInfo{Path: testExecutable(t)})
 	if !b.Available() {
@@ -134,9 +134,9 @@ func TestCodexBackendStream_ReportsObserverHooks(t *testing.T) {
 	t.Setenv("FABRIKK_LLMCLI_TEST_VERSION", "ok")
 
 	rec := &recordingObserver{}
-	old := DefaultObserver
-	DefaultObserver = rec
-	t.Cleanup(func() { DefaultObserver = old })
+	old := GetDefaultObserver()
+	SetDefaultObserver(rec)
+	t.Cleanup(func() { SetDefaultObserver(old) })
 
 	b := NewCodexBackend(CliInfo{Path: testExecutable(t)})
 	ch, err := b.Stream(

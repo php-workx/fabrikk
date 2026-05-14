@@ -56,19 +56,23 @@ func (te *terminalEmitter) done(_ context.Context, msg *llmclient.AssistantMessa
 }
 
 // error emits an EventError event then closes the channel. If a terminal event
-// has already been emitted, error is a no-op. The send is attempted even when
-// ctx is already cancelled so that consumers receive error context; the channel
-// is always closed regardless.
-func (te *terminalEmitter) error(ctx context.Context, err error) { //nolint:predeclared // method on unexported type; no package-level shadow
+// has already been emitted, error is a no-op. The send always completes
+// regardless of ctx cancellation so that exactly one terminal event is
+// delivered before close.
+func (te *terminalEmitter) error(_ context.Context, err error) { //nolint:predeclared // method on unexported type; no package-level shadow
 	te.once.Do(func() {
 		te.hasFired.Store(true)
 		defer close(te.ch)
+		ev := errorEvent(err)
 		select {
-		case te.ch <- errorEvent(err):
-		case <-ctx.Done():
-			// Consumer may have exited due to cancellation; skip the send but
-			// always close via the deferred close above.
+		case te.ch <- ev:
+			return
+		default:
 		}
+		// Channel full on fast path; fall back to a blocking send ignoring ctx
+		// cancellation so the terminal event is always delivered before close.
+		// observeStream always drains the channel, so this unblocks promptly.
+		emit(context.Background(), te.ch, ev)
 	})
 }
 

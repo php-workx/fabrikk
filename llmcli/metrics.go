@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/php-workx/fabrikk/llmclient"
@@ -71,9 +72,33 @@ func (NoopObserver) OnBackendAvailability(_ string, _ bool) {}
 // Compile-time assertion: NoopObserver must satisfy Observer.
 var _ Observer = NoopObserver{}
 
-// DefaultObserver is the package-level [Observer] used when no custom
-// observer is configured. It is a [NoopObserver] by default.
-var DefaultObserver Observer = NoopObserver{} //nolint:gochecknoglobals // intentional package-level default; callers swap it for custom observers.
+// observerHolder wraps Observer so atomic.Value always stores the same type.
+type observerHolder struct{ v Observer }
+
+// _defaultObserver holds the package-level Observer atomically.
+var _defaultObserver atomic.Value //nolint:gochecknoglobals // backing store for GetDefaultObserver/SetDefaultObserver
+
+func init() {
+	_defaultObserver.Store(observerHolder{NoopObserver{}})
+}
+
+// DefaultObserver is the package-level [Observer] used when no custom observer
+// is configured. Direct assignment is allowed at process startup; for concurrent
+// use (e.g. tests that swap the observer between calls) prefer [SetDefaultObserver].
+//
+// Deprecated: Use [SetDefaultObserver] and [GetDefaultObserver] for race safety.
+var DefaultObserver Observer = NoopObserver{} //nolint:gochecknoglobals // backward-compat export; internal code uses _defaultObserver.
+
+// SetDefaultObserver atomically sets the package-level observer.
+func SetDefaultObserver(o Observer) {
+	_defaultObserver.Store(observerHolder{o})
+	DefaultObserver = o
+}
+
+// GetDefaultObserver atomically returns the package-level observer.
+func GetDefaultObserver() Observer {
+	return _defaultObserver.Load().(observerHolder).v //nolint:forcetypeassert // always an observerHolder
+}
 
 const (
 	defaultModelLabel = "default"
@@ -90,20 +115,20 @@ func effectiveObservedModel(cfg llmclient.RequestConfig) string { //nolint:gocri
 }
 
 func observeAvailability(backend string, available bool) bool {
-	observer := DefaultObserver
+	observer := GetDefaultObserver()
 	observer.OnBackendAvailability(backend, available)
 	return available
 }
 
 func observeStreamStart(backend string, cfg llmclient.RequestConfig) (string, time.Time) { //nolint:gocritic // RequestConfig value mirrors Stream option handling.
 	model := effectiveObservedModel(cfg)
-	DefaultObserver.OnStreamStart(backend, model)
+	GetDefaultObserver().OnStreamStart(backend, model)
 	return model, time.Now()
 }
 
 func observeStream(backend, model string, started time.Time, in <-chan llmclient.Event) <-chan llmclient.Event {
 	out := make(chan llmclient.Event, 16)
-	observer := DefaultObserver
+	observer := GetDefaultObserver()
 
 	go func() {
 		defer close(out)

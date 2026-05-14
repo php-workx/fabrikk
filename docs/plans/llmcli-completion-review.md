@@ -150,7 +150,7 @@ Or add explicit notes: "Tests-only tickets with dependencies on other tests-only
 
 ### 11. The dependency graph is missing the fab-ophc → opds → ophn chain
 The plan's ASCII graph shows:
-```
+```text
 ├── fab-opds
 ├── fab-ophn ──→ fab-opss
 ```

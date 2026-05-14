@@ -871,9 +871,9 @@ func findEvent(t *testing.T, events []llmclient.Event, et llmclient.EventType) l
 // start, text and done), and OnStreamEnd is called once with success=true.
 func TestClaudeStream_ObserverFires(t *testing.T) {
 	spy := &spyObserver{}
-	orig := DefaultObserver
-	DefaultObserver = spy
-	t.Cleanup(func() { DefaultObserver = orig })
+	orig := GetDefaultObserver()
+	SetDefaultObserver(spy)
+	t.Cleanup(func() { SetDefaultObserver(orig) })
 
 	exe := testExecutable(t)
 	b := NewClaudeBackend(CliInfo{

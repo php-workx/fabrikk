@@ -576,9 +576,9 @@ func TestOmpPrint_BuildArgs_NoSystemPrompt(t *testing.T) {
 // TestMain) to drive a full omp print-mode session without a real omp binary.
 func TestOmpStream_ObserverFires(t *testing.T) {
 	spy := &spyObserver{}
-	orig := DefaultObserver
-	DefaultObserver = spy
-	t.Cleanup(func() { DefaultObserver = orig })
+	orig := GetDefaultObserver()
+	SetDefaultObserver(spy)
+	t.Cleanup(func() { SetDefaultObserver(orig) })
 
 	exe := testExecutable(t)
 

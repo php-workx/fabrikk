@@ -886,9 +886,9 @@ func TestOpenCodeHTTP_DiscoverSchema_RetriesOnFailure(t *testing.T) {
 //   - OnStreamEnd once
 func TestOpenCodeHTTP_ObserverFires(t *testing.T) {
 	spy := &spyObserver{}
-	orig := DefaultObserver
-	DefaultObserver = spy
-	t.Cleanup(func() { DefaultObserver = orig })
+	orig := GetDefaultObserver()
+	SetDefaultObserver(spy)
+	t.Cleanup(func() { SetDefaultObserver(orig) })
 
 	// SSE body with a content event so parseFn emits at least one text event.
 	sseBody := fmt.Sprintf("data: {\"content\":%q}\n\n", "hello from observer test")

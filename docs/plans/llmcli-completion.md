@@ -10,7 +10,7 @@
 
 The epic `fab-yv57` has 12 closed child tickets (MVP done) and 29 open linked follow-ups. Of those 29, **~14 are already implemented in code** but lack the acceptance-criteria tests. The remaining **~15 have genuine implementation gaps** ranging from small (grace period constant) to large (rewriting the codex-appserver protocol layer).
 
-The plan splits work into **5 waves** ordered by dependency depth. Subagents can run tickets within a wave in parallel. Each wave ends with a `go test` validation gate.
+The plan splits work into **6 waves** ordered by dependency depth. Subagents can run tickets within a wave in parallel. Each wave ends with a `go test` validation gate.
 
 ---
 
@@ -395,7 +395,7 @@ if b.schemaDiscovered.Load() == 0 {
 
 ## Dependency Graph
 
-```
+```text
 Wave 1 (foundation, all parallel)
 ├── fab-sswr ──┬──→ fab-clss (needs sswr + clut)
 │              ├──→ fab-caxs (needs sswr + caps + citr)

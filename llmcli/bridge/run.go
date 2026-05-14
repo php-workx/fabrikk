@@ -68,19 +68,28 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type runner struct {
-	in      io.Reader
-	out     io.Writer
-	deps    Deps
-	active  map[string]context.CancelFunc
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	writeCh chan Response
+	in         io.Reader
+	out        io.Writer
+	deps       Deps
+	active     map[string]context.CancelFunc
+	mu         sync.Mutex
+	wg         sync.WaitGroup
+	writeCh    chan Response
+	writerDone chan struct{} // closed when the writer goroutine exits
 }
 
 func (r *runner) run(ctx context.Context) error {
-	writerDone := make(chan error, 1)
+	r.writerDone = make(chan struct{})
+	writerErr := make(chan error, 1)
 	go func() {
-		writerDone <- writeResponses(r.out, r.writeCh)
+		defer close(r.writerDone)
+		writerErr <- writeResponses(r.out, r.writeCh)
+	}()
+	// Cancel all active requests if the writer exits early so handler
+	// goroutines can return promptly instead of blocking on writeCh.
+	go func() {
+		<-r.writerDone
+		r.cancelAll()
 	}()
 
 	readErr := r.readLoop(ctx)
@@ -89,11 +98,20 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	r.wg.Wait()
 	close(r.writeCh)
-	writeErr := <-writerDone
+	writeErr := <-writerErr
 	if readErr != nil {
 		return readErr
 	}
 	return writeErr
+}
+
+// trySend delivers resp to writeCh. If the writer has exited it drops the send
+// rather than blocking indefinitely.
+func (r *runner) trySend(resp Response) {
+	select {
+	case r.writeCh <- resp:
+	case <-r.writerDone:
+	}
 }
 
 func (r *runner) readLoop(ctx context.Context) error {
@@ -121,7 +139,7 @@ func (r *runner) readLoop(ctx context.Context) error {
 func (r *runner) handleLine(ctx context.Context, line []byte) {
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
-		r.writeCh <- Response{Final: true, Error: &WireError{Type: llmclient.ErrTypeBadRequest, Message: err.Error()}}
+		r.trySend(Response{Final: true, Error: &WireError{Type: llmclient.ErrTypeBadRequest, Message: err.Error()}})
 		return
 	}
 	if req.Cancel {
@@ -133,16 +151,22 @@ func (r *runner) handleLine(ctx context.Context, line []byte) {
 
 func (r *runner) startRequest(ctx context.Context, req Request) {
 	if req.RequestID == "" {
-		r.writeCh <- errorResponse(req.RequestID, llmclient.ErrTypeBadRequest, "request_id is required")
+		r.trySend(errorResponse(req.RequestID, llmclient.ErrTypeBadRequest, "request_id is required"))
 		return
 	}
 	h, ok := registeredHandler(req.Op)
 	if !ok {
-		r.writeCh <- errorResponse(req.RequestID, llmclient.ErrTypeBadRequest, fmt.Sprintf("unknown op %q", req.Op))
+		r.trySend(errorResponse(req.RequestID, llmclient.ErrTypeBadRequest, fmt.Sprintf("unknown op %q", req.Op)))
 		return
 	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	r.mu.Lock()
+	if _, exists := r.active[req.RequestID]; exists {
+		r.mu.Unlock()
+		cancel()
+		r.trySend(errorResponse(req.RequestID, llmclient.ErrTypeBadRequest, "request_id already in flight"))
+		return
+	}
 	r.active[req.RequestID] = cancel
 	r.mu.Unlock()
 
@@ -153,10 +177,10 @@ func (r *runner) startRequest(ctx context.Context, req Request) {
 		defer cancel()
 		result, err := h.Handle(reqCtx, req, r.deps)
 		if err != nil {
-			r.writeCh <- errorResponse(req.RequestID, classifyError(err), err.Error())
+			r.trySend(errorResponse(req.RequestID, classifyError(err), err.Error()))
 			return
 		}
-		r.writeCh <- Response{RequestID: req.RequestID, Final: true, Result: result}
+		r.trySend(Response{RequestID: req.RequestID, Final: true, Result: result})
 	}()
 }
 

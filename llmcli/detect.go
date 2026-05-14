@@ -35,11 +35,10 @@ type CliInfo struct {
 // minVersions maps CLI name → minimum version string. Versions below this
 // threshold cause DetectAvailableContext to populate CliInfo.VersionWarning.
 var minVersions = map[string]string{
-	"claude":          "1.0.0",
-	"codex":           "0.1.0",
-	"codex-appserver": "0.2.0",
-	"opencode":        "0.3.0",
-	"omp":             "14.0.0",
+	"claude":   "1.0.0",
+	"codex":    "0.1.0",
+	"opencode": "0.3.0",
+	"omp":      "14.0.0",
 }
 
 // versionWarning returns a human-readable warning when version is below the

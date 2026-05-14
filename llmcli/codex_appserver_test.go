@@ -1754,9 +1754,9 @@ func TestCodexAppServer_ReasoningMapping(t *testing.T) {
 //   - OnStreamEnd once
 func TestCodexAppServer_ObserverFires(t *testing.T) {
 	spy := &spyObserver{}
-	orig := DefaultObserver
-	DefaultObserver = spy
-	t.Cleanup(func() { DefaultObserver = orig })
+	orig := GetDefaultObserver()
+	SetDefaultObserver(spy)
+	t.Cleanup(func() { SetDefaultObserver(orig) })
 
 	b := newTestBackend()
 	proc, server := newPipeProcess()

@@ -19,7 +19,7 @@ patterns already implemented.
 
 ## Process Command Line
 
-```
+```bash
 claude -p "" --output-format stream-json --input-format stream-json --verbose
        [--model <model>] [--system-prompt <text>] [--no-session-persistence]
 ```
@@ -45,7 +45,7 @@ flag, not CWD).
 
 ## Architecture Overview
 
-```
+```text
 ClaudeIPCBackend
   └── claudeIPCProc (one per backend, lazily started)
         ├── sup      *supervisor      owns the OS process (via startSupervisedWithStdin)
@@ -204,7 +204,7 @@ func claudeIPCRoutingKey(cfg llmclient.RequestConfig, input *llmclient.Context) 
 ```
 
 `ensureProcess()` logic:
-```
+```text
 b.mu.Lock()
 if proc != nil && proc.alive() && routingKey == b.routingKey:
     b.mu.Unlock(); return proc, nil   // fast path: reuse

@@ -136,7 +136,7 @@ func (cb *CircuitBreaker) AllowAt(now time.Time) bool {
 
 	case CircuitOpen:
 		// Check if we should reset
-		if len(cb.eventTimes) <= cb.burstThreshold && now.Sub(cb.lastTrip) >= cb.quietPeriod {
+		if len(cb.eventTimes) <= cb.burstThreshold && now.Sub(cb.lastTrip) >= cb.resetInterval {
 			cb.state = CircuitClosed
 			cb.sampleCounter = 0
 			cb.logger.Info("circuit breaker reset: burst subsided",
@@ -211,6 +211,8 @@ func (cb *CircuitBreaker) Reset() {
 	cb.state = CircuitClosed
 	cb.eventTimes = cb.eventTimes[:0]
 	cb.sampleCounter = 0
+	cb.consecutiveFailures = 0
+	cb.lastTrip = time.Time{}
 }
 
 // RecordSuccess records a successful downstream operation and closes the

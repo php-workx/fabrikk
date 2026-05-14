@@ -104,9 +104,9 @@ func (s *spyObserver) OnBackendAvailability(_ string, _ bool)       {}
 // (including EventStart and EventDone), OnStreamEnd once with success=true.
 func TestStructuredStream_InvokesObserver(t *testing.T) {
 	spy := &spyObserver{}
-	orig := DefaultObserver
-	DefaultObserver = spy
-	t.Cleanup(func() { DefaultObserver = orig })
+	orig := GetDefaultObserver()
+	SetDefaultObserver(spy)
+	t.Cleanup(func() { SetDefaultObserver(orig) })
 
 	parseFn := func(ctx context.Context, out chan<- llmclient.Event, _ *terminalEmitter) error {
 		emit(ctx, out, llmclient.Event{Type: llmclient.EventTextDelta, Delta: "a"})

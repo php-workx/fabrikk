@@ -57,7 +57,7 @@ archives:
   - id: llmcli
     builds:
       - llmcli
-    name_template: "llmcli-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}"
+    name_template: 'llmcli-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
     formats:
       - binary
 

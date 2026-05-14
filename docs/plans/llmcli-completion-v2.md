@@ -556,7 +556,7 @@ Thread `cfg` into `parseOmpRPCTurn` (store on `ompRPCProc` or pass as param)
 
 ## Dependency Graph (Revised)
 
-```
+```text
 Wave 1 (foundation, all parallel)
 ├── fab-sswr ──┬──→ Wave 5: fab-clss (needs sswr + clut)
 │              ├──→ Wave 5: fab-caxs (needs sswr + caps + citr)

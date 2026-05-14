@@ -624,13 +624,13 @@ func TestClaudeIPC_LargePrompt_NoArgLimit(t *testing.T) {
 		t.Fatalf("Stream: %v", err)
 	}
 
-	var receivedLen int
+	receivedLenCh := make(chan int, 1)
 	go func() {
 		line, readErr := srv.StdinReader.ReadString('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			t.Errorf("drainStdin: %v", readErr)
 		}
-		receivedLen = len(line)
+		receivedLenCh <- len(line)
 		srv.writeTextTurn("ok")
 		_ = srv.stdoutW.Close()
 	}()
@@ -641,7 +641,7 @@ func TestClaudeIPC_LargePrompt_NoArgLimit(t *testing.T) {
 		t.Errorf("last event = %q reason = %q, want EventDone/StopEndTurn", last.Type, last.Reason)
 	}
 	// The JSON line must be at least as long as the large text itself.
-	if receivedLen < len(largeText) {
+	if receivedLen := <-receivedLenCh; receivedLen < len(largeText) {
 		t.Errorf("stdin line length = %d, want >= %d (no truncation)", receivedLen, len(largeText))
 	}
 }

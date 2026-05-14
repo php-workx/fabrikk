@@ -40,7 +40,7 @@ func structuredStream(
 	ch := make(chan llmclient.Event, 16)
 	te := newTerminalEmitter(ch)
 
-	DefaultObserver.OnStreamStart(backend, model)
+	GetDefaultObserver().OnStreamStart(backend, model)
 	started := time.Now()
 
 	go func() {

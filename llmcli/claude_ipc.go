@@ -120,7 +120,11 @@ func (b *ClaudeIPCBackend) Close() error {
 	}
 	proc.cancel()
 	_ = proc.stdinW.Close()
+	// Hold turnMu while draining to avoid concurrent reads on proc.sup.Stdout
+	// with any active turn goroutine that may still be reading from it.
+	proc.turnMu.Lock()
 	_, _ = io.Copy(io.Discard, proc.sup.Stdout)
+	proc.turnMu.Unlock()
 	return proc.sup.wait()
 }
 
@@ -229,7 +233,11 @@ func (b *ClaudeIPCBackend) ensureProcess(cfg llmclient.RequestConfig, input *llm
 	if old != nil {
 		old.cancel()
 		_ = old.stdinW.Close()
+		// Hold turnMu while draining to avoid concurrent reads on old.sup.Stdout
+		// with any active turn goroutine that may still be reading from it.
+		old.turnMu.Lock()
 		_, _ = io.Copy(io.Discard, old.sup.Stdout)
+		old.turnMu.Unlock()
 		_ = old.sup.wait()
 	}
 
@@ -341,33 +349,43 @@ func claudeIPCInitTimeout() time.Duration {
 // waitForClaudeIPCReady reads stdout until the system/init frame arrives and
 // returns the session_id it carries. Returns an error if ctx is cancelled or
 // the stream closes before the init frame arrives.
+//
+// Each ReadBoundedLine call runs in a goroutine so that ctx cancellation
+// (including init-timeout expiry) is honoured even while the read is blocked.
 func waitForClaudeIPCReady(ctx context.Context, r *bufio.Reader) (string, error) {
+	type readResult struct {
+		line []byte
+		err  error
+	}
 	for {
+		rrCh := make(chan readResult, 1)
+		go func() {
+			line, err := internal.ReadBoundedLine(r, maxClaudeLineBytes)
+			rrCh <- readResult{line, err}
+		}()
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		default:
-		}
-
-		line, err := internal.ReadBoundedLine(r, maxClaudeLineBytes)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return "", io.ErrUnexpectedEOF
+		case rr := <-rrCh:
+			if rr.err != nil {
+				if errors.Is(rr.err, io.EOF) {
+					return "", io.ErrUnexpectedEOF
+				}
+				if errors.Is(rr.err, internal.ErrLineTooLong) {
+					continue // oversized line — skip and keep scanning
+				}
+				return "", rr.err
 			}
-			if errors.Is(err, internal.ErrLineTooLong) {
-				continue // oversized line — skip and keep scanning
+			if len(rr.line) == 0 {
+				continue
 			}
-			return "", err
-		}
-		if len(line) == 0 {
-			continue
-		}
-		var frame claudeFrame
-		if json.Unmarshal(line, &frame) != nil {
-			continue
-		}
-		if frame.Type == "system" && frame.Subtype == "init" {
-			return frame.SessionID, nil
+			var frame claudeFrame
+			if json.Unmarshal(rr.line, &frame) != nil {
+				continue
+			}
+			if frame.Type == "system" && frame.Subtype == "init" {
+				return frame.SessionID, nil
+			}
 		}
 	}
 }
