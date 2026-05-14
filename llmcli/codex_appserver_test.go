@@ -1196,11 +1196,12 @@ func TestCodexAppServer_Ollama_InjectsEnv(t *testing.T) {
 	}
 
 	ollamaCfg := llmclient.OllamaConfig{BaseURL: "http://localhost:11434", Model: "llama3"}
-	ch, err := b.Stream(context.Background(), simpleUserInput("hi"), llmclient.WithOllama(ollamaCfg))
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
+	// procFactory returns an error, so Stream itself returns an error (ensureProcess
+	// runs synchronously before the stream goroutine starts).
+	ch, _ := b.Stream(context.Background(), simpleUserInput("hi"), llmclient.WithOllama(ollamaCfg))
+	if ch != nil {
+		drainChannel(ch)
 	}
-	drainChannel(ch)
 
 	var capturedEnv []string
 	select {
@@ -1686,4 +1687,72 @@ func TestCodexAppServer_ReasoningMapping(t *testing.T) {
 	if thinkingDeltas[0].Delta != thinkingText {
 		t.Errorf("ThinkingDelta.Delta = %q; want %q", thinkingDeltas[0].Delta, thinkingText)
 	}
+}
+
+// TestCodexAppServer_ObserverFires verifies that, because Stream delegates to
+// structuredStream, the DefaultObserver hooks fire correctly:
+//   - OnStreamStart once
+//   - OnEventEmitted at least twice (EventStart + EventDone minimum)
+//   - OnStreamEnd once
+func TestCodexAppServer_ObserverFires(t *testing.T) {
+	spy := &spyObserver{}
+	orig := DefaultObserver
+	DefaultObserver = spy
+	t.Cleanup(func() { DefaultObserver = orig })
+
+	b := newTestBackend()
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	const mockThreadID = "thread-observer-test"
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server.handleHandshake(mockThreadID); err != nil {
+			serverDone <- fmt.Errorf("handleHandshake: %w", err)
+			return
+		}
+		if _, err := server.readRequest(); err != nil {
+			serverDone <- fmt.Errorf("read turn/start: %w", err)
+			return
+		}
+		if err := server.sendTextBlock("observer test text"); err != nil {
+			serverDone <- fmt.Errorf("sendTextBlock: %w", err)
+			return
+		}
+		if err := server.sendDone(); err != nil {
+			serverDone <- fmt.Errorf("sendDone: %w", err)
+			return
+		}
+		_ = server.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ctx := context.Background()
+	ch, err := b.Stream(ctx, simpleUserInput("observe me"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	spy.mu.Lock()
+	starts := spy.starts
+	ends := spy.ends
+	eventTypes := spy.eventTypes
+	spy.mu.Unlock()
+
+	if starts != 1 {
+		t.Errorf("OnStreamStart called %d time(s), want 1", starts)
+	}
+	if len(ends) != 1 {
+		t.Errorf("OnStreamEnd called %d time(s), want 1", len(ends))
+	}
+	if len(eventTypes) < 2 {
+		t.Errorf("OnEventEmitted called %d time(s), want >= 2 (EventStart + EventDone minimum)", len(eventTypes))
+	}
+	_ = events
 }

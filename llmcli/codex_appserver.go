@@ -394,11 +394,9 @@ func (b *CodexAppServerBackend) Stream(
 		cancelTimeout()
 		return nil, err
 	}
-	model, started := observeStreamStart(b.Name(), cfg)
 
-	// Fast path: a pre-cancelled context must be rejected before we consume
-	// the semaphore token, because Go's select is non-deterministic when
-	// multiple cases are ready simultaneously.
+	// Fast path: reject a pre-cancelled context before consuming the semaphore
+	// token (Go's select is non-deterministic when multiple cases are ready).
 	if err := streamCtx.Err(); err != nil {
 		cancelTimeout()
 		return nil, err
@@ -412,40 +410,33 @@ func (b *CodexAppServerBackend) Stream(
 		return nil, streamCtx.Err()
 	}
 
-	ch := make(chan llmclient.Event, 16)
-	te := newTerminalEmitter(ch)
+	// Ensure the process is running and healthy; start or restart if needed.
+	proc, fresh, err := b.ensureProcess(streamCtx, cfg)
+	if err != nil {
+		b.turnCh <- struct{}{}
+		cancelTimeout()
+		return nil, fmt.Errorf("llmcli codex-appserver: ensure process: %w", err)
+	}
 
-	go func() {
-		defer cancelTimeout()
-		defer func() { b.turnCh <- struct{}{} }() // always release semaphore
-		defer te.close()                          // safety guard
-
-		proc, fresh, err := b.ensureProcess(streamCtx, cfg)
-		if err != nil {
-			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: ensure process: %w", err))
-			return
+	// On a fresh process, run the initialize/thread/start handshake to obtain a
+	// threadID. This is synchronous and must complete before Stream returns so
+	// that sessionID is available for the start event.
+	if fresh {
+		if err := b.runHandshake(streamCtx, proc, cfg); err != nil {
+			b.restartAfterProtocolError(err)
+			b.turnCh <- struct{}{}
+			cancelTimeout()
+			return nil, fmt.Errorf("llmcli codex-appserver: handshake: %w", err)
 		}
+	}
 
-		// On a fresh process, run the initialize/thread/start handshake to
-		// obtain a threadID before sending any turn.
-		if fresh {
-			if err := b.runHandshake(streamCtx, proc, cfg); err != nil {
-				b.restartAfterProtocolError(err)
-				te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: handshake: %w", err))
-				return
-			}
-		}
+	sessionID := proc.threadID
+	if cfg.SessionID != "" {
+		sessionID = cfg.SessionID
+	}
+	fidelity := codexAppServerFidelity(cfg)
 
-		cancelWatchDone := make(chan struct{})
-		go func() {
-			select {
-			case <-streamCtx.Done():
-				b.restartAfterProtocolError(streamCtx.Err())
-			case <-cancelWatchDone:
-			}
-		}()
-		defer close(cancelWatchDone)
-
+	parseFn := func(ctx context.Context, out chan<- llmclient.Event, te *terminalEmitter) error {
 		id := b.nextID.Add(1)
 		prompt := llmclient.LastUserMessage(input)
 
@@ -471,26 +462,37 @@ func (b *CodexAppServerBackend) Stream(
 		}
 		if err := internal.WriteLine(proc.stdin, req); err != nil {
 			b.restartAfterProtocolError(err)
-			te.error(streamCtx, fmt.Errorf("llmcli codex-appserver: write turn/start: %w", err))
-			return
+			return fmt.Errorf("write turn/start: %w", err)
 		}
 
-		// Emit start event. The session ID is captured from thread/started.
-		fidelity := codexAppServerFidelity(cfg)
-		sessionID := proc.threadID
-		if cfg.SessionID != "" {
-			sessionID = cfg.SessionID
-		}
-		if !emit(streamCtx, ch, startEvent(sessionID, fidelity)) {
-			b.restartAfterProtocolError(streamCtx.Err())
-			te.done(streamCtx, nil, nil, llmclient.StopCancelled)
-			return
-		}
+		// Watch for context cancellation and terminate the process so that the
+		// blocking ReadLine call inside readTurnEvents unblocks via EOF.
+		cancelWatchDone := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				b.restartAfterProtocolError(ctx.Err())
+			case <-cancelWatchDone:
+			}
+		}()
+		defer close(cancelWatchDone)
 
-		b.readTurnEvents(streamCtx, proc, ch, te)
-	}()
+		b.readTurnEvents(ctx, proc, out, te)
+		return nil
+	}
 
-	return observeStream(b.Name(), model, started, ch), nil
+	return structuredStream(
+		streamCtx,
+		b.Name(),
+		sessionID,
+		cfg.Model,
+		fidelity,
+		parseFn,
+		func() {
+			cancelTimeout()
+			b.turnCh <- struct{}{}
+		},
+	), nil
 }
 
 // runHandshake executes the per-process initialize → initialized → thread/start
