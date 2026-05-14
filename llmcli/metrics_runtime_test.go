@@ -3,6 +3,7 @@ package llmcli
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -98,6 +99,16 @@ func TestCliBackendAvailable_ReportsObserver(t *testing.T) {
 }
 
 func TestOmpRPCAvailable_ReportsObserver(t *testing.T) {
+	// Fake HOME with omp config so Ready() returns ReadyOK on any machine.
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".omp", "agent"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpHome, ".omp", "agent", "config.yml"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("HOME", tmpHome)
+
 	rec := &recordingObserver{}
 	old := DefaultObserver
 	DefaultObserver = rec
