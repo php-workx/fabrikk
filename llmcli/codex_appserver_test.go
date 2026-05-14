@@ -668,6 +668,64 @@ func TestCodexAppServer_StreamSerializesTurns(t *testing.T) {
 	}
 }
 
+// TestCodexAppServer_HandshakeFailureReleasesSemaphore verifies that when the
+// per-process handshake fails (e.g. unexpected EOF before initialize response),
+// the turn semaphore is released so subsequent Stream calls can still proceed.
+func TestCodexAppServer_HandshakeFailureReleasesSemaphore(t *testing.T) {
+	b := newTestBackend()
+
+	proc, server := newPipeProcess()
+	injectProc(b, proc)
+
+	// Server drains the initialize request (so the backend write doesn't block)
+	// then closes the response pipe, giving the backend an unexpected EOF.
+	go func() {
+		_, _ = server.readRequest() // consume initialize
+		_ = server.respWriter.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := b.Stream(ctx, simpleUserInput("hi"))
+	if err == nil {
+		t.Fatal("Stream should have returned an error after handshake failure")
+	}
+
+	// Semaphore must have been released: a subsequent procFactory call must not
+	// hang. Inject a second process that handles the full flow.
+	proc2, server2 := newPipeProcess()
+	injectProc(b, proc2)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := server2.handleHandshake("thread-recovery"); err != nil {
+			serverDone <- err
+			return
+		}
+		if _, err := server2.readRequest(); err != nil {
+			serverDone <- err
+			return
+		}
+		if err := server2.sendDone(); err != nil {
+			serverDone <- err
+			return
+		}
+		_ = server2.respWriter.Close()
+		serverDone <- nil
+	}()
+
+	ch, err := b.Stream(ctx, simpleUserInput("retry"))
+	if err != nil {
+		t.Fatalf("Stream after handshake recovery: %v", err)
+	}
+	events := drainWithTimeout(t, ch)
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	assertExactlyOneTerminal(t, events, "recovery stream")
+}
+
 // ─── Criterion 2: CloseTerminatesProcess ─────────────────────────────────────
 
 // TestCodexAppServer_CloseTerminatesProcess verifies that calling Close on the

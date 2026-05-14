@@ -38,7 +38,7 @@ func newTerminalEmitter(ch chan<- llmclient.Event) *terminalEmitter {
 
 // done emits an EventDone event then closes the channel. If a terminal event
 // has already been emitted, done is a no-op.
-func (te *terminalEmitter) done(ctx context.Context, msg *llmclient.AssistantMessage, usage *llmclient.Usage, reason llmclient.StopReason) {
+func (te *terminalEmitter) done(_ context.Context, msg *llmclient.AssistantMessage, usage *llmclient.Usage, reason llmclient.StopReason) {
 	te.once.Do(func() {
 		te.hasFired.Store(true)
 		defer close(te.ch)
@@ -48,7 +48,10 @@ func (te *terminalEmitter) done(ctx context.Context, msg *llmclient.AssistantMes
 			return
 		default:
 		}
-		emit(ctx, te.ch, ev)
+		// Channel full on fast path; fall back to a blocking send that ignores
+		// ctx cancellation so the terminal event is always delivered before close.
+		// observeStream always drains the channel, so this unblocks promptly.
+		emit(context.Background(), te.ch, ev)
 	})
 }
 

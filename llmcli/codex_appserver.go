@@ -560,10 +560,18 @@ func (b *CodexAppServerBackend) runHandshake(ctx context.Context, proc *codexPro
 	return nil
 }
 
+// maxHandshakeFrames is the maximum number of frames readUntilResponse will
+// scan before giving up. This bounds the loop when a server sends an unexpected
+// ID type (e.g. string "1" instead of integer 1) or an unexpected response
+// sequence, preventing an unbounded read when no request timeout is set.
+const maxHandshakeFrames = 200
+
 // readUntilResponse reads NDJSON frames until it sees a response frame with
 // the given id (or a JSON-RPC error response). Notifications are skipped.
+// Returns an error if more than maxHandshakeFrames are read without a match.
 func (b *CodexAppServerBackend) readUntilResponse(ctx context.Context, proc *codexProcess, wantID int64) error {
-	for {
+	for i := range maxHandshakeFrames {
+		_ = i
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -591,6 +599,7 @@ func (b *CodexAppServerBackend) readUntilResponse(ctx context.Context, proc *cod
 			return nil
 		}
 	}
+	return fmt.Errorf("did not receive response for id %d within %d frames", wantID, maxHandshakeFrames)
 }
 
 // readUntilThreadStarted reads frames until the "thread/started" notification
@@ -933,9 +942,16 @@ func (b *CodexAppServerBackend) handleItemCompleted(
 	case p.Item.Type == "agentMessage":
 		idx, seen := itemIndex[p.Item.ID]
 		if !seen {
+			// item/completed arrived without any prior item/agentMessage/delta
+			// (e.g. empty message). Emit the opening EventTextStart so consumers
+			// always see a matched start/end pair.
 			idx = *nextIndex
 			itemIndex[p.Item.ID] = idx
 			*nextIndex++
+			if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextStart, ContentIndex: idx}) {
+				te.done(ctx, nil, nil, llmclient.StopCancelled)
+				return true
+			}
 		}
 		if !emit(ctx, ch, llmclient.Event{Type: llmclient.EventTextEnd, ContentIndex: idx, Content: p.Item.Text}) {
 			te.done(ctx, nil, nil, llmclient.StopCancelled)
