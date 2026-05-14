@@ -1,6 +1,7 @@
 package llmclient
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ const (
 	OptionTimeout            OptionName = "timeout"
 	OptionReasoningEffort    OptionName = "reasoningEffort"
 	OptionRawCapture         OptionName = "rawCapture"
+	OptionHostToolResponder  OptionName = "hostToolResponder"
 )
 
 // RawStream identifies which subprocess stream produced a raw captured chunk.
@@ -43,6 +45,15 @@ const (
 // RawCaptureFunc receives cloned stdout/stderr chunks from subprocess
 // backends before llmcli normalizes stdout into events or trims stderr tails.
 type RawCaptureFunc func(stream RawStream, data []byte)
+
+// HostToolResponder is a callback invoked by the omp-rpc backend when the
+// model requests execution of a host-defined tool. The callback receives the
+// context (which is cancelled if the stream is cancelled) and the ToolCall
+// describing the requested invocation. It returns the result content blocks,
+// a flag indicating whether the result is an error, and any transport-level
+// error that should terminate the stream. Returning (nil, true, nil) sends a
+// generic refusal; returning (blocks, false, nil) sends a successful result.
+type HostToolResponder func(ctx context.Context, call ToolCall) (result []ContentBlock, isError bool, err error)
 
 // OptionResult is returned in Fidelity.OptionResults to report how the
 // backend handled each option passed to Stream.
@@ -174,6 +185,11 @@ type RequestConfig struct {
 
 	// RawCapture receives cloned stdout/stderr chunks from subprocess backends.
 	RawCapture RawCaptureFunc
+
+	// HostToolResponder is called by the omp-rpc backend when the model
+	// requests execution of a host-defined tool. When nil and a host_tool_call
+	// arrives, the backend sends an error result to unblock the model turn.
+	HostToolResponder HostToolResponder
 
 	// RequiredOptions is the set of options that must be applied for the
 	// request to proceed. If any are unsupported, Stream returns
@@ -322,6 +338,15 @@ func WithReasoningEffort(level string) Option {
 func WithRawCapture(capture RawCaptureFunc) Option {
 	return func(cfg *RequestConfig) {
 		cfg.RawCapture = capture
+	}
+}
+
+// WithHostToolResponder registers a callback invoked by the omp-rpc backend
+// when the model requests execution of a host-defined tool. Passing nil clears
+// any previously set responder.
+func WithHostToolResponder(fn HostToolResponder) Option {
+	return func(cfg *RequestConfig) {
+		cfg.HostToolResponder = fn
 	}
 }
 

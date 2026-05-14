@@ -1,6 +1,7 @@
 package llmclient_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -509,5 +510,68 @@ func TestUnsupportedOptionError_ErrorString(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("Error() = %q, missing %q", msg, want)
 		}
+	}
+}
+
+// ─── fab-omth: HostToolResponder ──────────────────────────────────────────────
+
+// TestWithHostToolResponder verifies that WithHostToolResponder sets the
+// HostToolResponder field on RequestConfig via ApplyOptions.
+func TestWithHostToolResponder(t *testing.T) {
+	called := false
+	responder := llmclient.HostToolResponder(func(_ context.Context, tc llmclient.ToolCall) ([]llmclient.ContentBlock, bool, error) {
+		called = true
+		return []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "ok"}}, false, nil
+	})
+
+	cfg := apply(llmclient.WithHostToolResponder(responder))
+
+	if cfg.HostToolResponder == nil {
+		t.Fatal("HostToolResponder should be set after WithHostToolResponder")
+	}
+
+	// Invoke the stored responder to confirm it is the one we passed.
+	blocks, isErr, err := cfg.HostToolResponder(context.Background(), llmclient.ToolCall{Name: "test"})
+	if err != nil {
+		t.Fatalf("responder returned error: %v", err)
+	}
+	if !called {
+		t.Error("stored responder was not the one passed to WithHostToolResponder")
+	}
+	if isErr {
+		t.Error("expected isError=false from test responder")
+	}
+	if len(blocks) == 0 || blocks[0].Text != "ok" {
+		t.Errorf("unexpected result blocks: %v", blocks)
+	}
+}
+
+// TestWithHostToolResponder_NilSafe verifies that passing nil to
+// WithHostToolResponder clears the field and that the zero-value RequestConfig
+// has no responder set.
+func TestWithHostToolResponder_NilSafe(t *testing.T) {
+	// Zero-value config from DefaultRequestConfig must have nil responder.
+	cfg := llmclient.DefaultRequestConfig()
+	if cfg.HostToolResponder != nil {
+		t.Error("DefaultRequestConfig should have nil HostToolResponder")
+	}
+
+	// Passing nil explicitly must also clear the field.
+	cfgWithNil := apply(llmclient.WithHostToolResponder(nil))
+	if cfgWithNil.HostToolResponder != nil {
+		t.Error("WithHostToolResponder(nil) should set HostToolResponder to nil")
+	}
+
+	// Setting then clearing via a second application.
+	responder := llmclient.HostToolResponder(func(_ context.Context, _ llmclient.ToolCall) ([]llmclient.ContentBlock, bool, error) {
+		return nil, false, nil
+	})
+	cfgSet := apply(llmclient.WithHostToolResponder(responder))
+	if cfgSet.HostToolResponder == nil {
+		t.Fatal("responder should be set after WithHostToolResponder(non-nil)")
+	}
+	cfgCleared := llmclient.ApplyOptions(cfgSet, []llmclient.Option{llmclient.WithHostToolResponder(nil)})
+	if cfgCleared.HostToolResponder != nil {
+		t.Error("HostToolResponder should be nil after applying WithHostToolResponder(nil)")
 	}
 }
