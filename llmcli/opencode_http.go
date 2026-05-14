@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/php-workx/fabrikk/llmcli/internal"
@@ -78,6 +79,10 @@ type OpenCodeHTTPBackend struct {
 	httpClient *http.Client
 
 	closeOnce sync.Once
+
+	// schemaDiscovered is set to 1 after a successful GET /doc call.
+	// It is intentionally 0 on failure so that the next Stream call retries.
+	schemaDiscovered atomic.Int32
 }
 
 // NewOpenCodeHTTPBackend constructs an OpenCodeHTTPBackend from the detected
@@ -194,6 +199,15 @@ func (b *OpenCodeHTTPBackend) Stream(
 	if err := b.ensureServer(streamCtx, port); err != nil {
 		cancelTimeout()
 		return nil, fmt.Errorf("llmcli opencode: ensure server: %w", err)
+	}
+
+	// Best-effort schema discovery: only mark as done when the call succeeds.
+	// A transient failure (5xx, network blip, context cancel) leaves
+	// schemaDiscovered at 0 so the next Stream call retries.
+	if b.schemaDiscovered.Load() == 0 {
+		if err := b.discoverSchema(streamCtx); err == nil {
+			b.schemaDiscovered.Store(1)
+		}
 	}
 
 	// 1. Open SSE stream BEFORE sending the prompt.
@@ -501,7 +515,29 @@ func (b *OpenCodeHTTPBackend) scanForServerConnected(body io.Reader) bool {
 	}
 }
 
-// discoverSchema issues GET /doc on the server and stores the result. It is
+// discoverSchema issues GET /doc on the server. It returns nil when the server
+// responds with 2xx and a non-nil error otherwise (network error, non-2xx status,
+// or context cancellation). The caller decides whether to record the result.
+func (b *OpenCodeHTTPBackend) discoverSchema(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/doc", http.NoBody)
+	if err != nil {
+		return err
+	}
+	b.setAuth(req)
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("GET /doc returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // openSSEStream opens the long-lived GET /event SSE connection and returns the
 // HTTP response. The caller owns the response body and must close it.
 func (b *OpenCodeHTTPBackend) openSSEStream(ctx context.Context) (*http.Response, error) {

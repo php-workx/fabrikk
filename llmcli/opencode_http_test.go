@@ -758,6 +758,125 @@ func TestOpenCodeHTTP_RefusesWithOllama(t *testing.T) {
 	}
 }
 
+// ─── fab-opds: discoverSchema retry on failure ───────────────────────────────
+
+// TestOpenCodeHTTP_DiscoverSchema_RetriesOnFailure verifies that a failed
+// discoverSchema (HTTP 500 from /doc) leaves schemaDiscovered at 0, so the
+// next Stream call retries discovery. On the second call the /doc endpoint
+// returns 200, after which schemaDiscovered is 1 and a third Stream call
+// skips /doc entirely.
+func TestOpenCodeHTTP_DiscoverSchema_RetriesOnFailure(t *testing.T) {
+	t.Helper()
+
+	// docCallCount tracks how many times /doc has been called.
+	var docCallCount atomic.Int32
+
+	// SSE body used for every Stream call: a single content event followed by EOF.
+	sseBody := "data: {\"content\":\"ok\"}\n\n"
+
+	mux := http.NewServeMux()
+
+	// /event: return server.connected + content event, then close.
+	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, sseBody)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	})
+
+	// /session: always return a fresh session id.
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "sess-retry-test"})
+	})
+
+	// /doc: return 500 on the first call, 200 on the second and beyond.
+	mux.HandleFunc("/doc", func(w http.ResponseWriter, r *http.Request) {
+		n := int(docCallCount.Add(1))
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// /: handle prompt_async.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/prompt_async") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	b := &OpenCodeHTTPBackend{
+		CliBackend: NewCliBackend("opencode-serve", CliInfo{}),
+		httpClient: srv.Client(),
+		baseURL:    srv.URL,
+	}
+
+	input := &llmclient.Context{
+		Messages: []llmclient.Message{{
+			Role:    llmclient.RoleUser,
+			Content: []llmclient.ContentBlock{{Type: llmclient.ContentText, Text: "hello"}},
+		}},
+	}
+
+	// --- First Stream call: /doc returns 500, schemaDiscovered must stay 0. ---
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel1()
+
+	ch1, err := b.Stream(ctx1, input)
+	if err != nil {
+		t.Fatalf("Stream #1: unexpected error: %v", err)
+	}
+	waitForEvents(t, ch1, 3*time.Second)
+
+	if got := b.schemaDiscovered.Load(); got != 0 {
+		t.Errorf("after first Stream (doc 500): schemaDiscovered = %d, want 0", got)
+	}
+	if got := int(docCallCount.Load()); got != 1 {
+		t.Errorf("after first Stream: /doc call count = %d, want 1", got)
+	}
+
+	// --- Second Stream call: /doc returns 200, schemaDiscovered must become 1. ---
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+
+	ch2, err := b.Stream(ctx2, input)
+	if err != nil {
+		t.Fatalf("Stream #2: unexpected error: %v", err)
+	}
+	waitForEvents(t, ch2, 3*time.Second)
+
+	if got := b.schemaDiscovered.Load(); got != 1 {
+		t.Errorf("after second Stream (doc 200): schemaDiscovered = %d, want 1", got)
+	}
+	if got := int(docCallCount.Load()); got != 2 {
+		t.Errorf("after second Stream: /doc call count = %d, want 2", got)
+	}
+
+	// --- Third Stream call: schemaDiscovered == 1, /doc must NOT be called again. ---
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel3()
+
+	ch3, err := b.Stream(ctx3, input)
+	if err != nil {
+		t.Fatalf("Stream #3: unexpected error: %v", err)
+	}
+	waitForEvents(t, ch3, 3*time.Second)
+
+	if got := int(docCallCount.Load()); got != 2 {
+		t.Errorf("after third Stream: /doc call count = %d, want 2 (no extra call)", got)
+	}
+}
+
 // ─── fab-opss: structuredStream delegation ────────────────────────────────────
 
 // TestOpenCodeHTTP_ObserverFires verifies that when Stream delegates to
