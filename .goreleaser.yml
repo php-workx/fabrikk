@@ -57,7 +57,7 @@ archives:
   - id: llmcli
     builds:
       - llmcli
-    name_template: 'llmcli-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+    name_template: 'llmcli-{{ .Version }}-{{ .Os }}-{{ .Arch }}'
     formats:
       - binary
 
@@ -74,6 +74,8 @@ changelog:
 
 brews:
   - name: fabrikk
+    ids:
+      - fabrikk
     homepage: "https://github.com/php-workx/fabrikk"
     description: "Spec-driven autonomous run system for coding agents"
     license: "MIT"
