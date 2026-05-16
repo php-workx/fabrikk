@@ -76,13 +76,13 @@ brews:
   - name: fabrikk
     ids:
       - fabrikk
-    github_token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/php-workx/fabrikk"
     description: "Spec-driven autonomous run system for coding agents"
     license: "MIT"
     repository:
       owner: php-workx
       name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     install: |
       bin.install "fabrikk"
       bin.install_symlink "fabrikk" => "fab"
