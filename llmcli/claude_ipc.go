@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -461,7 +462,12 @@ func claudeIPCRoutingKey(cfg llmclient.RequestConfig, input *llmclient.Context) 
 	if cfg.Ollama != nil {
 		ollama = ollamaEffectiveBaseURL(*cfg.Ollama) + ":" + cfg.Ollama.Model
 	}
-	return cfg.Model + "\x00" + h + "\x00" + cfg.WorkingDirectory + "\x00" + ollama
+	key := cfg.Model + "\x00" + h + "\x00" + cfg.WorkingDirectory + "\x00" + ollama
+	if cfg.EnvironmentSet || len(cfg.EnvironmentOverlay) > 0 {
+		env := resolveProcessEnv(cfg, claudeOllamaEnvOverrides(cfg))
+		key += "\x00env:" + strings.Join(env, "\x00")
+	}
+	return key
 }
 
 // claudeIPCInitFidelity returns the Fidelity for an IPC turn.

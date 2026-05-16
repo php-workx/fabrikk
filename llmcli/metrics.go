@@ -83,7 +83,11 @@ func init() {
 }
 
 // SetDefaultObserver atomically sets the package-level observer.
+// Passing nil normalizes to [NoopObserver] so callers never receive a nil Observer.
 func SetDefaultObserver(o Observer) {
+	if o == nil {
+		o = NoopObserver{}
+	}
 	_defaultObserver.Store(observerHolder{o})
 }
 
@@ -114,8 +118,9 @@ func observeAvailability(backend string, available bool) bool {
 
 func observeStreamStart(backend string, cfg llmclient.RequestConfig) (string, time.Time) { //nolint:gocritic // RequestConfig value mirrors Stream option handling.
 	model := effectiveObservedModel(cfg)
+	started := time.Now()
 	GetDefaultObserver().OnStreamStart(backend, model)
-	return model, time.Now()
+	return model, started
 }
 
 func observeStream(backend, model string, started time.Time, in <-chan llmclient.Event) <-chan llmclient.Event {
