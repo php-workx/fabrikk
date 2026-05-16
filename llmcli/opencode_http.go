@@ -1,0 +1,783 @@
+package llmcli
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/php-workx/fabrikk/llmcli/internal"
+	"github.com/php-workx/fabrikk/llmclient"
+)
+
+// openCodeDefaultPort is the port used when WithOpenCodePort is not supplied.
+const openCodeDefaultPort = 4096
+
+// openCodeUsername is the HTTP basic-auth username the OpenCode server expects.
+const openCodeUsername = "opencode"
+
+// openCodeReadyTimeout is the maximum time to wait for the server to report
+// server.connected after spawn.
+const openCodeReadyTimeout = 10 * time.Second
+
+// openCodeReadyPollInterval is the delay between readiness poll attempts.
+const openCodeReadyPollInterval = 100 * time.Millisecond
+
+// openCodeReadyAttemptTimeout is the per-attempt timeout when polling /event.
+const openCodeReadyAttemptTimeout = 1 * time.Second
+
+// maxOpenCodeSSELineBytes caps the per-line allocation in the SSE reader.
+// 4 MiB is generous for event payloads while bounding memory usage.
+const maxOpenCodeSSELineBytes = 4 * 1024 * 1024
+
+// OpenCodeHTTPBackend is a persistent HTTP+SSE backend for `opencode serve`.
+// It starts or reuses an opencode server process and communicates with it
+// using a split-channel pattern: POST commands + GET /event SSE stream.
+//
+// The event schema is not yet fully mapped, so the backend is registered as
+// StreamingStructuredUnknown. Tool, thinking, and usage fidelity are not
+// claimed until the /doc schema mapping is pinned.
+//
+// OpenCodeHTTPBackend implements [llmclient.Backend].
+type OpenCodeHTTPBackend struct {
+	CliBackend
+
+	mu      sync.Mutex
+	closed  bool
+	srv     *supervisor // non-nil when we own the server process
+	baseURL string      // e.g. "http://127.0.0.1:4096"; set after ensureServer
+	port    int         // port backing baseURL; 0 means externally injected/test URL
+
+	// spawnMu serializes the slow spawn-and-wait path inside ensureServer so
+	// that concurrent Stream() calls don't each spawn their own process. b.mu
+	// is still used for all field accesses; spawnMu only gates the region
+	// where b.mu is intentionally released to allow Close() to cancel waitReady.
+	spawnMu sync.Mutex
+
+	// serverCtx/serverCancel govern the spawned server process lifetime.
+	// They are initialized lazily in ensureServer when we spawn the process.
+	// Close() cancels serverCtx to unblock any in-progress waitReady.
+	// All access is under b.mu except the cancel call in Close(), which is
+	// safe because context.CancelFunc is goroutine-safe.
+	serverCtx    context.Context
+	serverCancel context.CancelFunc
+
+	// password is the HTTP basic-auth secret read from
+	// OPENCODE_SERVER_PASSWORD. Empty means no auth is set.
+	password string
+
+	httpClient *http.Client
+
+	closeOnce sync.Once
+
+	// schemaDiscovered is set to 1 after a successful GET /doc call.
+	// It is intentionally 0 on failure so that the next Stream call retries.
+	schemaDiscovered atomic.Int32
+}
+
+// NewOpenCodeHTTPBackend constructs an OpenCodeHTTPBackend from the detected
+// CliInfo. The HTTP basic-auth password is read from OPENCODE_SERVER_PASSWORD.
+func NewOpenCodeHTTPBackend(info CliInfo) *OpenCodeHTTPBackend {
+	return &OpenCodeHTTPBackend{
+		CliBackend: NewCliBackend("opencode-serve", info),
+		password:   os.Getenv("OPENCODE_SERVER_PASSWORD"),
+		httpClient: &http.Client{Timeout: 0}, // no global timeout; callers use ctx
+	}
+}
+
+// newOpenCodeHTTPBackendWithClient is the test hook that allows injecting a
+// custom http.Client (e.g. one pointing at an httptest.Server).
+func newOpenCodeHTTPBackendWithClient(info CliInfo, client *http.Client, password string) *OpenCodeHTTPBackend {
+	b := NewOpenCodeHTTPBackend(info)
+	b.httpClient = client
+	b.password = password
+	return b
+}
+
+// Available reports whether the backend is usable. For a persistent backend
+// this checks both the binary on disk and that the server (if owned) is alive.
+func (b *OpenCodeHTTPBackend) Available() bool {
+	return observeAvailability(b.Name(), b.Ready(context.Background()).State == llmclient.ReadyOK)
+}
+
+// Ready checks binary availability, opencode config presence, and owned-server liveness.
+func (b *OpenCodeHTTPBackend) Ready(_ context.Context) llmclient.ReadyReport {
+	if !b.binaryAvailable() {
+		return readyMissingBinary(b.Name(), b.info.Path)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "opencode HTTP backend has been closed"}
+	}
+	if b.srv != nil {
+		// Server already started — verify it is still running.
+		select {
+		case <-b.srv.done:
+			return llmclient.ReadyReport{State: llmclient.ReadyUnknown, Detail: "opencode server process has exited"}
+		default:
+			return llmclient.ReadyReport{State: llmclient.ReadyOK}
+		}
+	}
+	// Server not yet started — check that opencode has been configured.
+	if !anyPathExists(xdgConfigPath("opencode", "opencode.json")) {
+		return readyNotAuthed(b.Name(), "configure a provider in ~/.config/opencode/opencode.json")
+	}
+	return llmclient.ReadyReport{State: llmclient.ReadyOK}
+}
+
+// Close terminates the owned server process (if any) and releases resources.
+// Safe to call multiple times.
+func (b *OpenCodeHTTPBackend) Close() error {
+	var err error
+	b.closeOnce.Do(func() {
+		b.mu.Lock()
+		b.closed = true
+		cancel := b.serverCancel
+		b.serverCancel = nil
+		b.serverCtx = nil
+		s := b.srv
+		b.srv = nil
+		b.mu.Unlock()
+
+		// Cancel serverCtx first to unblock any in-progress waitReady call
+		// that is running outside the lock in ensureServer.
+		if cancel != nil {
+			cancel()
+		}
+		if s != nil {
+			s.terminate(nil)
+			err = s.wait()
+		}
+	})
+	return err
+}
+
+// Stream opens the SSE event stream before submitting the prompt, then drives
+// the full split-channel request lifecycle:
+//
+//  1. Ensure the opencode server is running or reuse an external one.
+//  2. Open GET /event SSE stream.
+//  3. Create a session via POST /session.
+//  4. Send POST /session/:id/prompt_async in a goroutine.
+//  5. Parse the SSE stream and emit normalized events on the returned channel.
+//
+// The returned channel is closed after exactly one terminal event (done or
+// error). Cancelling ctx terminates the SSE stream and the channel.
+//
+// NOTE: parseOpenCodeSSE has no terminal-event detection and relies on EOF or
+// ctx cancellation to stop. Callers should supply a non-zero timeout via
+// [llmclient.WithTimeout] to avoid hanging on a connection that never closes.
+func (b *OpenCodeHTTPBackend) Stream(
+	ctx context.Context,
+	input *llmclient.Context,
+	opts ...llmclient.Option,
+) (<-chan llmclient.Event, error) {
+	cfg := llmclient.ApplyOptions(llmclient.DefaultRequestConfig(), opts)
+	streamCtx, cancelTimeout := contextWithRequestTimeout(ctx, cfg)
+
+	if err := checkOpenCodeHTTPRequiredOptions(cfg); err != nil {
+		cancelTimeout()
+		return nil, err
+	}
+
+	port := openCodeDefaultPort
+	if cfg.OpenCodePort != 0 {
+		port = cfg.OpenCodePort
+	}
+
+	if err := b.ensureServer(streamCtx, port); err != nil {
+		cancelTimeout()
+		return nil, fmt.Errorf("llmcli opencode: ensure server: %w", err)
+	}
+
+	// Best-effort schema discovery: only mark as done when the call succeeds.
+	// A transient failure (5xx, network blip, context cancel) leaves
+	// schemaDiscovered at 0 so the next Stream call retries.
+	if b.schemaDiscovered.Load() == 0 {
+		if err := b.discoverSchema(streamCtx); err == nil {
+			b.schemaDiscovered.Store(1)
+		}
+	}
+
+	// 1. Open SSE stream BEFORE sending the prompt.
+	sseCtx, cancelSSE := context.WithCancel(streamCtx)
+	sseResp, err := b.openSSEStream(sseCtx) //nolint:bodyclose // response body is owned by the parseFn goroutine via structuredStream
+	if err != nil {
+		cancelSSE()
+		cancelTimeout()
+		return nil, fmt.Errorf("llmcli opencode: open SSE stream: %w", err)
+	}
+
+	// 2. Create a session.
+	sessionID, err := b.createSession(streamCtx)
+	if err != nil {
+		_ = sseResp.Body.Close()
+		cancelSSE()
+		cancelTimeout()
+		return nil, fmt.Errorf("llmcli opencode: create session: %w", err)
+	}
+
+	// promptErrCh carries the result of sendPromptAsync. It is buffered so the
+	// prompt goroutine never blocks even if parseFn has already moved on.
+	promptErrCh := make(chan error, 1)
+
+	// Goroutine: send prompt_async. On failure, cancel the SSE reader so parseFn
+	// unblocks from parseOpenCodeSSE.
+	go func() {
+		pErr := b.sendPromptAsync(streamCtx, sessionID, input)
+		// Send before cancelSSE so parseFn always sees the error.
+		promptErrCh <- pErr
+		if pErr != nil {
+			cancelSSE()
+		}
+	}()
+
+	fidelity := openCodeHTTPFidelity(cfg)
+
+	// parseFn reads the SSE stream and waits for the prompt goroutine result.
+	// structuredStream calls it in its own goroutine and handles terminal emission.
+	parseFn := func(_ context.Context, out chan<- llmclient.Event, _ *terminalEmitter) error {
+		parseErr := parseOpenCodeSSE(sseCtx, sseResp.Body, out, fidelity)
+
+		// Drain so that underlying connections are cleanly released.
+		_, _ = io.Copy(io.Discard, sseResp.Body)
+
+		// Wait for the prompt goroutine to finish. This ensures we can report a
+		// prompt error even when the SSE body finishes before the prompt response.
+		var pErr error
+		select {
+		case pErr = <-promptErrCh:
+		case <-streamCtx.Done():
+			// Parent context cancelled; prompt error (if any) is not actionable.
+		}
+
+		switch {
+		case pErr != nil:
+			return pErr
+		case parseErr != nil && !isContextError(parseErr):
+			return fmt.Errorf("llmcli opencode: SSE parse: %w", parseErr)
+		default:
+			return nil
+		}
+	}
+
+	// onClose cancels the SSE sub-context and closes the response body.
+	// structuredStream calls this after parseFn returns, before emitting the terminal.
+	onClose := func() {
+		cancelSSE()
+		_ = sseResp.Body.Close()
+		cancelTimeout()
+	}
+
+	return structuredStream(streamCtx, "opencode-serve", sessionID, cfg.Model, fidelity, parseFn, onClose), nil
+}
+
+// ensureServer makes sure a server is available at the given port.
+//
+// If b.baseURL is already set for this port (pre-configured or adopted in a
+// previous call), the server is assumed ready.
+// If we already own a live process, it is reused. If the port is already in
+// use (external instance), we adopt it. Otherwise we spawn a new process.
+//
+// spawnMu serializes the slow "spawn + waitReady" path so that concurrent
+// Stream() calls don't each start their own process. b.mu is released before
+// waitReady so that a concurrent Close() can cancel b.serverCtx and unblock
+// the readiness probe without deadlocking.
+func (b *OpenCodeHTTPBackend) ensureServer(ctx context.Context, port int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Fast path: check under b.mu whether a live server already exists.
+	b.mu.Lock()
+	if b.checkExistingServer(port) {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+
+	// Slow path: serialize spawn/adoption so concurrent callers don't each
+	// start their own process. After acquiring spawnMu, re-check state under
+	// b.mu to handle the case where another goroutine completed the spawn
+	// while we were waiting.
+	b.spawnMu.Lock()
+	defer b.spawnMu.Unlock()
+
+	b.mu.Lock()
+	if b.checkExistingServer(port) {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// Check if an external server is already listening on the port.
+	if isPortInUse(port) {
+		// Adopt the external server; do not spawn our own.
+		b.mu.Lock()
+		if b.serverCtx == nil {
+			b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+		}
+		serverCtx := b.serverCtx
+		b.mu.Unlock()
+
+		if err := b.waitReady(serverCtx, url); err != nil {
+			return err
+		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.closed {
+			return errors.New("llmcli opencode: backend closed during server adoption")
+		}
+		b.baseURL = url
+		b.port = port
+		return nil
+	}
+
+	// Spawn the server. Init a fresh serverCtx so Close() can cancel any
+	// in-progress waitReady without affecting the per-turn stream context.
+	b.mu.Lock()
+	if b.serverCancel != nil {
+		b.serverCancel()
+	}
+	b.serverCtx, b.serverCancel = context.WithCancel(context.Background())
+	serverCtx := b.serverCtx
+	path := b.info.Path
+	b.mu.Unlock()
+
+	//nolint:gosec // path is from exec.LookPath via CliInfo, not user input
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- b.info.Path is a detected CLI binary path and only fixed backend args are appended.
+	cmd := exec.Command(path, "serve", "--port", fmt.Sprint(port))
+	configureProcessGroup(cmd)
+
+	tail := newTailWriter()
+	cmd.Stderr = tail
+
+	if err := cmd.Start(); err != nil {
+		b.mu.Lock()
+		if b.serverCtx == serverCtx {
+			b.serverCancel()
+			b.serverCancel = nil
+			b.serverCtx = nil
+		}
+		b.mu.Unlock()
+		return fmt.Errorf("start opencode serve: %w", err)
+	}
+
+	// Wrap in a supervisor for lifecycle management.
+	s := &supervisor{
+		cmd:           cmd,
+		Stdout:        bufio.NewReader(bytes.NewReader(nil)), // opencode serve has no useful stdout
+		stderrTailBuf: tail,
+		done:          make(chan struct{}),
+		gracePeriod:   defaultPerCallGracePeriod,
+	}
+
+	// Use serverCtx (not the per-turn ctx) so that a cancelled per-turn ctx
+	// does not kill a successfully starting server process. Close() cancels
+	// serverCtx to abort this probe when the backend is shut down.
+	if err := b.waitReady(serverCtx, url); err != nil {
+		s.terminate(err)
+		_ = s.wait()
+		b.mu.Lock()
+		if b.serverCtx == serverCtx {
+			b.serverCancel()
+			b.serverCancel = nil
+			b.serverCtx = nil
+		}
+		b.mu.Unlock()
+		return err
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		s.terminate(nil)
+		_ = s.wait()
+		return errors.New("llmcli opencode: backend closed during server startup")
+	}
+	b.srv = s
+	b.baseURL = url
+	b.port = port
+	return nil
+}
+
+// checkExistingServer reports whether a live server matching the given port is
+// already available. As a side effect it clears stale state when the owned
+// process has exited. Must be called with b.mu held.
+func (b *OpenCodeHTTPBackend) checkExistingServer(port int) bool {
+	if b.srv != nil {
+		select {
+		case <-b.srv.done:
+			// Process exited; caller must respawn.
+			b.srv = nil
+			b.baseURL = ""
+			b.port = 0
+		default:
+			if b.port == port {
+				return true
+			}
+			b.srv.terminate(nil)
+			_ = b.srv.wait()
+			b.srv = nil
+			b.baseURL = ""
+			b.port = 0
+		}
+	}
+
+	// Pre-configured base URL (test injection or caller-supplied external server).
+	if b.baseURL != "" && (b.port == 0 || b.port == port) {
+		return true
+	}
+
+	return false
+}
+
+// waitReady polls GET /event until the server emits a "server.connected" SSE
+// event or the deadline (openCodeReadyTimeout) is exceeded.
+func (b *OpenCodeHTTPBackend) waitReady(ctx context.Context, baseURL string) error {
+	deadline := time.Now().Add(openCodeReadyTimeout)
+
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, openCodeReadyAttemptTimeout)
+		req, _ := http.NewRequestWithContext(attemptCtx, http.MethodGet, baseURL+"/event", http.NoBody)
+		b.setAuth(req)
+		req.Header.Set("Accept", "text/event-stream")
+
+		resp, err := b.httpClient.Do(req)
+		if err != nil {
+			cancel()
+			time.Sleep(openCodeReadyPollInterval)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			_ = resp.Body.Close()
+			cancel()
+			return errors.New("opencode serve: 401 unauthorized — check OPENCODE_SERVER_PASSWORD")
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			cancel()
+			time.Sleep(openCodeReadyPollInterval)
+			continue
+		}
+
+		// Read SSE lines until we see server.connected or the attempt times out.
+		connected := b.scanForServerConnected(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+
+		if connected {
+			return nil
+		}
+
+		if attemptCtx.Err() != nil && ctx.Err() == nil {
+			// Per-attempt timeout: retry.
+			time.Sleep(openCodeReadyPollInterval)
+			continue
+		}
+	}
+
+	return fmt.Errorf("opencode serve: readiness timeout after %s at %s", openCodeReadyTimeout, baseURL)
+}
+
+// scanForServerConnected reads lines from body until a "server.connected" data
+// payload is seen or the body read returns an error. It returns true when the
+// event is found.
+func (b *OpenCodeHTTPBackend) scanForServerConnected(body io.Reader) bool {
+	r := bufio.NewReader(body)
+	for {
+		ev, err := internal.ReadEvent(r, 4096)
+		if err != nil {
+			return false
+		}
+		if bytes.Contains(ev.Data, []byte("server.connected")) {
+			return true
+		}
+	}
+}
+
+// discoverSchema issues GET /doc on the server. It returns nil when the server
+// responds with 2xx and a non-nil error otherwise (network error, non-2xx status,
+// or context cancellation). The caller decides whether to record the result.
+func (b *OpenCodeHTTPBackend) discoverSchema(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/doc", http.NoBody)
+	if err != nil {
+		return err
+	}
+	b.setAuth(req)
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("GET /doc returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// openSSEStream opens the long-lived GET /event SSE connection and returns the
+// HTTP response. The caller owns the response body and must close it.
+func (b *OpenCodeHTTPBackend) openSSEStream(ctx context.Context) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.baseURL+"/event", http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	b.setAuth(req)
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("GET /event returned %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+// createSession issues POST /session and returns the new session ID.
+func (b *OpenCodeHTTPBackend) createSession(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/session", http.NoBody)
+	if err != nil {
+		return "", err
+	}
+	b.setAuth(req)
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST /session: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("POST /session returned %d", resp.StatusCode)
+	}
+
+	var session struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return "", fmt.Errorf("decode session response: %w", err)
+	}
+	if session.ID == "" {
+		return "", errors.New("POST /session returned empty id")
+	}
+	return session.ID, nil
+}
+
+// openCodePromptBody is the JSON request body for prompt_async.
+type openCodePromptBody struct {
+	// Text is the concatenated user messages.
+	Text string `json:"text"`
+}
+
+// sendPromptAsync submits the prompt via POST /session/:id/prompt_async.
+// It returns nil on a 204 No Content response, and a non-nil error otherwise
+// (including network errors and unexpected status codes).
+func (b *OpenCodeHTTPBackend) sendPromptAsync(
+	ctx context.Context,
+	sessionID string,
+	input *llmclient.Context,
+) error {
+	body := openCodePromptBody{
+		Text: llmclient.LastUserMessage(input),
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal prompt body: %w", err)
+	}
+
+	url := b.baseURL + "/session/" + sessionID + "/prompt_async"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encoded))
+	if err != nil {
+		return fmt.Errorf("build prompt_async request: %w", err)
+	}
+	b.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST prompt_async: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body) // always drain
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("POST prompt_async returned %d (want 204)", resp.StatusCode)
+	}
+	return nil
+}
+
+// setAuth attaches HTTP basic auth to req when a password is configured.
+func (b *OpenCodeHTTPBackend) setAuth(req *http.Request) {
+	if b.password != "" {
+		req.SetBasicAuth(openCodeUsername, b.password)
+	}
+}
+
+// isPortInUse returns true when a TCP connection to 127.0.0.1:port succeeds
+// within a short timeout.
+func isPortInUse(port int) bool {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// isContextError reports whether err is or wraps a context cancellation or
+// deadline exceeded error.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func checkOpenCodeHTTPRequiredOptions(cfg llmclient.RequestConfig) error { //nolint:gocritic // RequestConfig is passed by value throughout option helpers.
+	return llmclient.EnforceRequired(cfg, openCodeHTTPStaticCapabilities(""))
+}
+
+// — SSE stream parser ---------------------------------------------------------
+
+// parseOpenCodeSSE reads SSE events from body, emits normalized llmclient
+// events to out, and returns when the stream ends or ctx is cancelled.
+//
+// Since the OpenCode event schema is schema-gated (StreamingStructuredUnknown),
+// this parser:
+//   - Emits text deltas for any event whose data contains a recognizable text
+//     payload (best-effort; silently skips unrecognized events).
+//   - Returns nil on clean EOF; the caller (structuredStream) is responsible for
+//     emitting the terminal event so it can fold in any prompt error.
+//
+// EventStart is NOT emitted here — structuredStream emits it before invoking
+// parseFn so that all backends share uniform start-event behaviour.
+//
+// It does NOT emit tool, thinking, or usage events until the schema is pinned.
+//
+// WARNING: This function has no terminal-event detection. It relies entirely on
+// the server closing the SSE body (EOF) or ctx being cancelled to return. A
+// long-lived connection that never closes will block indefinitely. Callers MUST
+// supply a non-zero timeout via [llmclient.WithTimeout] (or cancel ctx externally)
+// to guarantee termination. [llmclient.DefaultRequestConfig] has Timeout = 0.
+func parseOpenCodeSSE(
+	ctx context.Context,
+	body io.Reader,
+	out chan<- llmclient.Event,
+	_ *llmclient.Fidelity,
+) error {
+	r := bufio.NewReader(body)
+	contentIndex := 0
+
+	for {
+		ev, err := internal.ReadEvent(r, maxOpenCodeSSELineBytes)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		// Check context cancellation between events.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Skip empty payloads (e.g. server.connected heartbeats).
+		if len(ev.Data) == 0 {
+			continue
+		}
+
+		// Best-effort text extraction: try to unmarshal a JSON object with a
+		// "content" or "text" string field. Unknown schemas are silently skipped.
+		text := extractOpenCodeText(ev.Data)
+		if text == "" {
+			continue
+		}
+
+		evs := textSequence(contentIndex, text)
+		for i := range evs {
+			if !emit(ctx, out, evs[i]) {
+				return ctx.Err()
+			}
+		}
+		contentIndex++
+	}
+}
+
+func openCodeHTTPStaticCapabilities(version string) llmclient.Capabilities {
+	return llmclient.Capabilities{
+		Backend: "opencode-serve",
+		Version: version,
+		// StreamingStructuredUnknown: SSE transport is confirmed, but the
+		// event schema is not yet pinned. Full-fidelity events are not claimed
+		// until /doc schema mapping is verified by tests.
+		Streaming: llmclient.StreamingStructuredUnknown,
+		MultiTurn: true,
+		OptionSupport: map[llmclient.OptionName]llmclient.OptionSupport{
+			llmclient.OptionOpenCodePort: llmclient.OptionSupportFull,
+			llmclient.OptionTimeout:      llmclient.OptionSupportFull,
+			llmclient.OptionJSONSchema:   llmclient.OptionSupportPartial,
+		},
+	}
+}
+
+func openCodeHTTPFidelity(cfg llmclient.RequestConfig) *llmclient.Fidelity { //nolint:gocritic // RequestConfig is passed by value throughout fidelity helpers.
+	results := make(map[llmclient.OptionName]llmclient.OptionResult)
+	if cfg.OpenCodePort != 0 {
+		results[llmclient.OptionOpenCodePort] = llmclient.OptionApplied
+	}
+	return populateJSONSchemaFidelity(&llmclient.Fidelity{
+		Streaming:     llmclient.StreamingStructuredUnknown,
+		ToolControl:   llmclient.ToolControlNone,
+		OptionResults: mergeOptionResults(results, executionOptionResults(cfg, openCodeHTTPStaticCapabilities(""))),
+	}, cfg)
+}
+
+// openCodeTextPayload is the minimal JSON shape we try to extract text from.
+// It covers the most common patterns seen in OpenCode SSE events.
+type openCodeTextPayload struct {
+	Content string `json:"content"`
+	Text    string `json:"text"`
+}
+
+// extractOpenCodeText tries to find a text string in a raw SSE data payload.
+// Returns empty string when the payload is not recognized.
+func extractOpenCodeText(data []byte) string {
+	// Fast path: skip obviously non-JSON payloads.
+	if len(data) == 0 || data[0] != '{' {
+		return ""
+	}
+	var p openCodeTextPayload
+	if json.Unmarshal(data, &p) != nil {
+		return ""
+	}
+	if p.Content != "" {
+		return p.Content
+	}
+	return p.Text
+}

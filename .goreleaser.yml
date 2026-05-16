@@ -25,6 +25,25 @@ builds:
       - -X main.GitCommit={{.ShortCommit}}
       - -X main.BuildDate={{.Date}}
 
+
+  - id: llmcli
+    main: ./cmd/llmcli
+    binary: llmcli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.GitCommit={{.ShortCommit}}
+      - -X main.BuildDate={{.Date}}
+
 archives:
   - id: fabrikk
     builds:
@@ -33,6 +52,14 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+
+
+  - id: llmcli
+    builds:
+      - llmcli
+    name_template: 'llmcli-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+    formats:
+      - binary
 
 checksum:
   name_template: "checksums.txt"

@@ -212,10 +212,11 @@ func WithTemperature(t float64) Option { ... }
 // --- Backend-specific options ---
 
 // WithOllama routes the request through an Ollama instance instead of the
-// direct provider. Recognized by: Claude, Codex, OpenCode backends.
+// direct provider. Recognized by: Claude, Codex, OpenCode, omp backends.
 func WithOllama(cfg OllamaConfig) Option { ... }
 
-// WithCodexProfile selects a Codex config profile. Recognized by: Codex only.
+// WithCodexProfile selects a Codex config profile. Currently not advertised by
+// any backend until end-to-end runtime support is verified.
 func WithCodexProfile(name string) Option { ... }
 
 // WithHostTools injects custom tool definitions that the host executes.
@@ -261,7 +262,7 @@ capabilities before calling `Stream()`.
 | `WithModel` | ✅ | ✅ | ✅ | ⚠️ config | ⚠️ config | ✅ | ✅ |
 | `WithSession` | ✅ `--resume` | ❌ | ✅ thread | ❌ | ✅ session | ✅ `--resume` | ✅ |
 | `WithOllama` | ✅ env vars | ✅ `--oss`/profile | ✅ env vars | ✅ config | ✅ config | ✅ env vars | ✅ env vars |
-| `WithCodexProfile` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `WithCodexProfile` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `WithHostTools` | ❌ | ❌ | ❌ until protocol verified | ❌ | ❌ | ❌ | ✅ |
 | `WithOpenCodePort` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | `WithTemperature` | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ config | ⚠️ config |
@@ -432,7 +433,7 @@ func SelectBackendByName(name string) (Backend, error) { ... }
 | `NeedsToolResults` | Everything except `omp-rpc` unless Codex app-server host-result injection is verified |
 | `NeedsMultiTurn` | `codex-exec`, `opencode-run` |
 | `MinStreaming=structured` | `codex-exec`, `opencode-run`, and `opencode-serve` until its SSE schema is mapped |
-| `MinStreaming=text_chunk` | Buffered modes; `codex-exec`/`opencode-run` only pass if a pipe-mode probe proves incremental output |
+| `MinStreaming=text_chunk` | Buffered modes; `codex-exec`/`opencode-run` are currently classified as buffered-only until a pipe-mode probe is implemented and verified |
 | `NeedsThinking` | Text-only modes and `opencode-serve` until mapped |
 | `NeedsUsage` | Text-only modes and `opencode-serve` until mapped |
 | `NeedsOllama` | Backends whose routing probe cannot verify the requested model/provider route |
@@ -648,8 +649,8 @@ const (
 | omp print/json | ✅ | ✅ | ✅ | ✅ | ✅ usage | ✅ |
 | omp RPC | ✅ | ✅ | ✅ | ✅ | ✅ usage | ✅ |
 | OpenCode serve | ✅ | ⚠️ schema-gated | ⚠️ schema-gated | ⚠️ schema-gated | ⚠️ schema-gated | ✅ |
-| Codex exec | synthesized | ⚠️ probe text streaming | ❌ | ❌ | ✅ exit code | ✅ stderr |
-| OpenCode run | synthesized | ⚠️ probe text streaming | ❌ | ❌ | ✅ exit code | ✅ stderr |
+| Codex exec | synthesized | buffered-only today | ❌ | ❌ | ✅ exit code | ✅ stderr |
+| OpenCode run | synthesized | buffered-only today | ❌ | ❌ | ✅ exit code | ✅ stderr |
 
 ---
 
@@ -1747,8 +1748,8 @@ print it at the end, even though they technically use a streaming output format.
 | `omp -p --mode json` | ✅ Yes (JSONL) | JSONL events, real-time |
 | `omp --mode rpc` | ✅ Yes (JSONL) | Bidirectional, real-time |
 | `codex app-server` | ✅ Yes (JSON-RPC) | JSON-RPC notifications stream |
-| `codex exec` | ⚠️/❌ Probe required | Text-only; must prove incremental output when stdout is piped |
-| `opencode run` (CLI) | ⚠️/❌ Probe required | Text-only; must prove incremental output when stdout is piped |
+| `codex exec` | ❌ today | Text-only; current implementation conservatively treats piped stdout as buffered until a probe is implemented and verified |
+| `opencode run` (CLI) | ❌ today | Text-only; current implementation conservatively treats piped stdout as buffered until a probe is implemented and verified |
 | `opencode serve` (HTTP + SSE) | ⚠️ Schema TBD | SSE transport streams, but full event fidelity is not available until event schema is mapped |
 
 **Structured streaming CLIs** (✅) get the full `Event` stream
@@ -1756,10 +1757,10 @@ with text deltas, tool calls, thinking blocks, and usage. These are the ones to
 prefer for any UI that wants to show real-time progress.
 
 **Partial streaming CLIs** (⚠️) emit text incrementally but without structure.
-The backend may produce `text_delta` events from the streamed bytes (chunk on
-newline or every N bytes) only after a runtime probe proves stdout is incremental
-when piped. They cannot produce `toolcall_*`, `thinking_*`, or usage events.
-These are best treated as fallbacks.
+`llmcli` only promotes them to chunked `text_delta` streaming after a runtime
+probe proves stdout remains incremental when piped. Until that probe exists and
+is verified, text-only fallbacks stay `StreamingBufferedOnly`. They cannot
+produce `toolcall_*`, `thinking_*`, or usage events.
 
 **Buffered CLIs** (❌) defeat the streaming model entirely; avoid them or treat
 them as a single `text_start`, `text_delta`, `text_end`, `done` sequence where
@@ -1768,7 +1769,9 @@ the delta contains the complete buffered response.
 ### Reading partial text output as a stream
 
 For partial-streaming CLIs (⚠️), the backend should emit incremental events only
-after the capability probe proves the CLI streams stdout through a pipe:
+after the capability probe proves the CLI streams stdout through a pipe. The
+current implementation intentionally does not claim that behavior for text-only
+fallbacks yet:
 
 ```go
 // For text-only CLIs that passed the pipe-streaming probe, read in chunks and
@@ -2602,6 +2605,11 @@ it only surfaces what the CLI provides.
 
 `llmcli` should emit structured metrics for monitoring and debugging.
 
+Runtime backends now expose these signals through the package-level
+`DefaultObserver` hooks. `Available()` reports backend availability, and real
+stream paths report stream start/end, per-event delivery, and spawn-to-first-
+event duration without coupling the package to a specific metrics library.
+
 ### Recommended metrics
 
 | Metric | Type | Labels | Description |
@@ -2654,6 +2662,7 @@ type StreamLogFields struct {
 - Verify streaming: events arrive before subprocess exit
 - Verify cancellation: cancel context mid-stream, subprocess is killed
 - Verify session continuity: first call returns `SessionID`, second call with `WithSession()` continues
+- Treat text-only fallbacks conservatively: they should stay buffered-only until a verified pipe-streaming probe exists
 
 ### Test isolation
 

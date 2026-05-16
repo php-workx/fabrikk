@@ -15,7 +15,7 @@ default:
 # --- Quality gates ---
 
 # Pre-commit: fast local checks + fresh non-race tests
-pre-commit: fmt vet lint build-check mod-tidy actionlint gitleaks test-fast
+pre-commit: fmt vet lint build-check mod-tidy actionlint betterleaks test-fast
 
 # Pre-push: pre-commit checks + race tests + vulnerability scan
 pre-push: pre-commit test-race vuln
@@ -49,13 +49,10 @@ actionlint:
 
 # --- Security ---
 
-# Scan for leaked secrets
-gitleaks:
-    @if command -v gitleaks >/dev/null 2>&1; then \
-        gitleaks git --no-banner; \
-    else \
-        echo "warning: gitleaks not installed, skipping secret scan"; \
-    fi
+# Scan for leaked secrets (fails if betterleaks is not installed)
+betterleaks:
+    @command -v betterleaks >/dev/null 2>&1 || (echo "error: betterleaks not installed — run: brew install leaktk/formulae/betterleaks"; exit 1)
+    @betterleaks git --no-banner
 
 # Scan for known vulnerabilities in dependencies
 vuln:
