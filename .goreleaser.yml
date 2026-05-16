@@ -82,7 +82,7 @@ brews:
     repository:
       owner: php-workx
       name: homebrew-tap
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     install: |
       bin.install "fabrikk"
       bin.install_symlink "fabrikk" => "fab"
